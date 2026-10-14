@@ -1,0 +1,14 @@
+query($owner: String!, $name: String!, $states: [PullRequestState!]) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: $states, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title url isDraft headRefName baseRefName
+        author { login }
+        commits(last: 1) { nodes { commit { committedDate } } }
+        reviews(last: 30) { nodes { author { login } state submittedAt } }
+        reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } body path line } } } }
+        comments(last: 30) { nodes { author { login } body createdAt } }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "orch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node --experimental-strip-types --no-warnings src/setup.ts",
+    "start": "claude -n orch --remote-control orch --plugin-dir ./mod",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "board": "node --experimental-strip-types --no-warnings src/cli.ts",
+    "watch": "node --experimental-strip-types --no-warnings src/watch.ts",
+    "orch": "node --experimental-strip-types --no-warnings src/orch.ts",
+    "reflect": "node --experimental-strip-types --no-warnings src/reflect-run.ts",
+    "test:mod": "claude plugin test mod"
+  },
+  "description": "An orchestrator for your Claude Code and Codex sessions: one chat that watches every agent, queues what needs you, and runs workers.",
+  "license": "MIT"
+}

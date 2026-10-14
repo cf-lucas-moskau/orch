@@ -1,0 +1,8 @@
+{
+  "name": "orch-deck",
+  "version": "0.1.0",
+  "description": "orch deck: a live pane in orch's session with the session map, agent bus, worker stages, decisions and workflows, and keys that hand orch a prompt",
+  "author": { "name": "Lucas Moskau" },
+  "license": "UNLICENSED",
+  "types": "./types/index.d.ts"
+}

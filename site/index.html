@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>orch · one chat that runs all your coding agents</title>
+<meta name="description" content="orch is a Claude Code session that watches every other agent session, queues what needs you, and runs workers with tests and two-model reviews.">
+<meta property="og:title" content="orch">
+<meta property="og:description" content="One chat that runs all your coding agents.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23141210'/><circle cx='16' cy='16' r='6' fill='%23e07a4f'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #12100e; --panel: #1b1916; --line: #2c2925; --text: #ece7e1; --muted: #9a928a; --dim: #6b645d;
+    --accent: #e07a4f; --blue: #7fb2e5; --green: #8cc28a; --yellow: #e2c06b; --red: #e48a8a;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace; --sans: Inter, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); }
+  a { color: inherit; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+  .logo { font: 600 18px var(--mono); display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .logo i { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  nav a.gh { font-size: 14px; color: var(--muted); text-decoration: none; }
+  nav a.gh:hover { color: var(--text); }
+
+  .hero { padding: 56px 0 40px; display: grid; gap: 40px; }
+  h1 { font-size: clamp(36px, 6vw, 64px); line-height: 1.05; letter-spacing: -0.03em; margin: 0; max-width: 14ch; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); max-width: 60ch; margin: 20px 0 0; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 18px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 15px; }
+  .btn.primary { background: var(--accent); color: #1a0f09; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .copy { font: 14px var(--mono); background: var(--panel); border: 1px solid var(--line); color: var(--text); padding: 12px 14px; border-radius: 10px; cursor: pointer; display: inline-flex; gap: 10px; align-items: center; max-width: 100%; overflow: hidden; }
+  .copy span.p { color: var(--dim); }
+  .copy .done { color: var(--green); font-family: var(--sans); font-size: 13px; }
+
+  .term { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 80px -30px rgba(0,0,0,.7); }
+  .term .bar { display: flex; gap: 7px; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--dim); }
+  .term .bar b { width: 11px; height: 11px; border-radius: 50%; background: #3a3631; }
+  .term .bar span { margin-left: 8px; }
+  .term .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); }
+  .term pre { margin: 0; padding: 18px; font: 13px/1.65 var(--mono); overflow-x: auto; white-space: pre; }
+  .term .chat { border-right: 1px solid var(--line); color: var(--muted); }
+  .term .chat .me { color: var(--text); }
+  .a { color: var(--accent); } .b { color: var(--blue); } .g { color: var(--green); } .y { color: var(--yellow); } .r { color: var(--red); } .d { color: var(--dim); } .t { color: var(--text); } .bold { font-weight: 600; }
+
+  section { padding: 72px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: clamp(26px, 3.5vw, 36px); letter-spacing: -0.02em; margin: 0 0 12px; line-height: 1.15; }
+  .sub { color: var(--muted); max-width: 62ch; margin: 0 0 36px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+  .card h3 { margin: 0 0 8px; font-size: 17px; display: flex; align-items: center; gap: 10px; }
+  .card h3 i { font: 600 12px var(--mono); color: var(--accent); font-style: normal; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .says { display: grid; gap: 10px; }
+  .say { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 20px; padding: 16px 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; align-items: baseline; }
+  .say q { font: 15px var(--mono); color: var(--text); quotes: none; }
+  .say q::before { content: "› "; color: var(--accent); }
+  .say span { color: var(--muted); font-size: 15px; }
+
+  .deck { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px; font-size: 15px; color: var(--muted); }
+  kbd { font: 600 13px var(--mono); color: var(--text); background: var(--panel); border: 1px solid var(--line); border-bottom-width: 2px; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+
+  .never { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+  .never span { font-size: 14px; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); color: var(--text); background: var(--panel); }
+  .never span::before { content: "✕ "; color: var(--red); }
+
+  .steps { counter-reset: s; display: grid; gap: 14px; max-width: 760px; }
+  .step { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 14px; align-items: start; }
+  .step::before { counter-increment: s; content: counter(s); width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--panel); border: 1px solid var(--line); font: 600 14px var(--mono); color: var(--accent); }
+  .step p { margin: 4px 0 8px; }
+  .step pre { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font: 14px/1.6 var(--mono); overflow-x: auto; }
+  .needs { color: var(--muted); font-size: 15px; margin-top: 28px; }
+  .needs a { color: var(--text); }
+
+  footer { border-top: 1px solid var(--line); padding: 32px 0 48px; color: var(--dim); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+  @media (max-width: 820px) {
+    .term .split { grid-template-columns: minmax(0, 1fr); }
+    .term .chat { border-right: 0; border-bottom: 1px solid var(--line); }
+    .deck { grid-template-columns: minmax(0, 1fr); }
+    .say { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  }
+  @media (max-width: 480px) { .wrap { padding: 0 16px; } .term pre { font-size: 11.5px; padding: 14px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="logo" href="#"><i></i>orch</a>
+    <a class="gh" href="https://github.com/cf-lucas-moskau/orch">GitHub ↗</a>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <h1>One chat that runs <em>all</em> your coding agents.</h1>
+      <p class="lede">Five Claude Code sessions, five panes. One waits for a permission, one finished an hour ago with a question, two are working. orch watches all of them, tells you what matters, queues every question for you and starts new workers with tests and a two-model review. From your desk or your phone.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/cf-lucas-moskau/orch">Get orch on GitHub</a>
+        <button class="copy" data-copy="git clone https://github.com/cf-lucas-moskau/orch ~/orch && cd ~/orch && npm run setup"><span class="p">$</span> git clone …/orch &amp;&amp; npm run setup <span class="done" hidden>copied</span></button>
+      </div>
+    </div>
+
+    <div class="term" aria-label="orch in a terminal: the chat on the left, the orch deck pane on the right">
+      <div class="bar"><b></b><b></b><b></b><span>herdr · orch · /deck</span></div>
+      <div class="split">
+<pre class="chat"><span class="me">› what's going on</span>
+
+<span class="t">●</span> One needs you: <span class="t">api</span> is blocked on a
+  permission to run migrations (D-12).
+  <span class="t">fix-login</span> passed its gates, review
+  is running. <span class="t">pr118</span> is a Claude + Codex
+  pair, both still working.
+  6 idle.
+
+<span class="me">› accept D-12</span>
+
+<span class="t">●</span> Told api: yes, go ahead.</pre>
+<pre id="deck"></pre>
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <h2>What it does</h2>
+    <p class="sub">orch is a Claude Code session with a few skills and a small TypeScript toolkit. A hook in every session writes one line per event to a local feed; orch reads it and acts within rules you can edit.</p>
+    <div class="grid">
+      <div class="card"><h3><i>01</i>Watches</h3><p>Every Claude and Codex session on your machine, who is working, blocked, idle or asking you something.</p></div>
+      <div class="card"><h3><i>02</i>Queues</h3><p>Anything that needs you becomes a decision with a recommendation and one phone notification. Your answer gets typed into the right session.</p></div>
+      <div class="card"><h3><i>03</i>Dispatches</h3><p>New work goes to a worker in its own git worktree. orch runs your tests when it's done and commits on the branch only if they pass.</p></div>
+      <div class="card"><h3><i>04</i>Reviews</h3><p>Claude and Codex review the same change independently. What both find counts; the rest gets checked against the code first.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Just talk to it</h2>
+    <p class="sub">No commands to learn. These all work as typed.</p>
+    <div class="says">
+      <div class="say"><q>what's going on</q><span>Blocked first, then questions waiting for you, then who is working. Idle as a count.</span></div>
+      <div class="say"><q>run my-app fix-login: Safari login button does nothing</q><span>A worker on its own branch. Tests, then a commit, then a decision if it should be pushed.</span></div>
+      <div class="say"><q>… with both</q><span>Same task to Claude and Codex. orch picks the winner by tests and review.</span></div>
+      <div class="say"><q>look at the PRs of my-app</q><span>Workers for review comments on your PRs, drafted reviews for your colleagues' PRs.</span></div>
+      <div class="say"><q>continue my-app</q><span>Plans the next steps toward your goal and dispatches up to your worker cap.</span></div>
+      <div class="say"><q>reject D-7, keep the old API</q><span>Your words go into that session verbatim.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="deck">
+      <div>
+        <h2>orch deck</h2>
+        <p class="sub" style="margin-bottom:24px">Type <kbd>/deck</kbd> and a live pane docks next to the chat: every session as a map, a dot running along the line whenever a message moves, each worker's stage, the bus of prompts and replies, open decisions. It's a Claude Code mod, so it lives right in the terminal.</p>
+        <div class="keys">
+          <kbd>m b w d f</kbd><span>map, bus, workers, decisions, flows</span>
+          <kbd>j k</kbd><span>select a session</span>
+          <kbd>s</kbd><span>steer it with one line</span>
+          <kbd>r</kbd><span>read its screen inline</span>
+          <kbd>g c</kbd><span>run gates, clean up</span>
+          <kbd>y n</kbd><span>accept or reject the decision</span>
+        </div>
+      </div>
+      <div class="term"><div class="bar"><b></b><b></b><b></b><span>workers</span></div>
+<pre><span class="t bold">fix-login</span>   <span class="g">■■■</span><span class="a">■</span><span class="d">□□</span> <span class="a">review</span>  12m
+  <span class="d">fix Safari login · "gates green, 3 files"</span>
+<span class="t bold">pr118-cl</span>    <span class="g">■</span><span class="a">■</span><span class="d">□□□□</span> <span class="a">work</span>     4m
+  <span class="d">address review on #118</span>
+<span class="t bold">pr118-cx</span>    <span class="g">■</span><span class="a">■</span><span class="d">□□□□</span> <span class="a">work</span>     4m
+  <span class="d">address review on #118 (Codex)</span>
+
+<span class="d">brief  work  gates  review  judge  push</span></pre></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Never on its own</h2>
+    <p class="sub">These always come back to you as a decision. Workers never commit; orch commits on the worker's branch only after your tests pass. The rules are a plain Markdown file you can read and change.</p>
+    <div class="never"><span>push</span><span>merge</span><span>open or comment on PRs</span><span>deploy</span><span>touch a database</span><span>send anything outside your machine</span><span>answer a permission prompt</span></div>
+  </section>
+
+  <section id="install">
+    <h2>Install in a minute</h2>
+    <p class="sub">No dependencies to install. Setup checks your tools, creates your local files and adds one hook to Claude Code (and Codex). It backs up what it changes.</p>
+    <div class="steps">
+      <div class="step"><div><p>Clone and set up</p><pre>git clone https://github.com/cf-lucas-moskau/orch ~/orch
+cd ~/orch && npm run setup</pre></div></div>
+      <div class="step"><div><p>Put your name in <code>local.md</code> and your repos with their test commands in <code>projects.md</code>.</p></div></div>
+      <div class="step"><div><p>In a herdr workspace called <code>orch</code>, start it and say hi.</p><pre>npm start</pre></div></div>
+    </div>
+    <p class="needs">Needs macOS, Node 22.6+, <a href="https://claude.com/claude-code">Claude Code</a>, <a href="https://herdr.dev">herdr</a> and jq. Optional: <a href="https://github.com/openai/codex">Codex</a> for two-model work, <a href="https://cli.github.com">gh</a> for PRs.</p>
+  </section>
+
+  <footer>
+    <span>orch · MIT · built with Claude Code</span>
+    <a href="https://github.com/cf-lucas-moskau/orch">github.com/cf-lucas-moskau/orch</a>
+  </footer>
+</div>
+
+<script>
+  // The deck's map tab, animated: a dot travels out on a prompt and back on a reply.
+  const rows = [
+    { name: 'fix-login', stage: 4, label: 'review', col: 'a', age: '12m' },
+    { name: 'pr118-cl', stage: 2, label: 'work', col: 'a', age: '4m' },
+    { name: 'pr118-cx', stage: 2, label: 'work', col: 'a', age: '4m' },
+    { name: 'api', stage: 0, label: 'blocked', col: 'r', age: '1m' },
+  ];
+  const deck = document.getElementById('deck');
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const pad = (s, n) => s + ' '.repeat(Math.max(0, n - s.length));
+  let tick = 0, live = 0, dir = 1;
+  function edge(i) {
+    const len = 4;
+    if (i !== live) return `<span class="d">${'─'.repeat(len)}▶</span>`;
+    const pos = dir > 0 ? tick % len : len - 1 - (tick % len);
+    let s = '';
+    for (let k = 0; k < len; k++) s += k === pos ? '<span class="a">●</span>' : '<span class="a">━</span>';
+    return s + `<span class="a">${dir > 0 ? '▶' : '◀'}</span>`;
+  }
+  function bar(r) {
+    if (r.label === 'blocked') return '<span class="r">needs you</span>';
+    let s = '';
+    for (let k = 0; k < 6; k++) s += k < r.stage - 1 ? '<span class="g">■</span>' : k === r.stage - 1 ? '<span class="a">■</span>' : '<span class="d">□</span>';
+    return s + ` <span class="${r.col}">${pad(r.label, 6)}</span>`;
+  }
+  function render() {
+    const out = [
+      '<span class="a bold">orch deck</span>  <span class="t">[map]</span> <span class="d">bus workers decisions flows</span>',
+      '',
+      '<span class="d">you</span> <span class="d">──▶</span> <span class="a bold">orch</span> <span class="d">[dispatch]</span>',
+    ];
+    rows.forEach((r, i) => out.push(`  <span class="d">${i === rows.length - 1 ? '└' : '├'}</span>${edge(i)} <span class="${r.label === 'blocked' ? 'r' : 'b'}">${pad(r.name, 10)}</span> ${bar(r)} <span class="d">${r.age}</span>`));
+    out.push('  <span class="d">   6 idle sessions</span>', '',
+      '<span class="y">D-12</span> api: run the migration? <span class="d">rec: yes</span>',
+      '', '<span class="d">bus</span>',
+      ' <span class="d">10:14</span> <span class="a">prompt</span> orch → pr118-cx',
+      ' <span class="d">10:13</span> <span class="g">reply </span> fix-login: gates green',
+      ' <span class="d">10:12</span> <span class="r">needs </span> api: permission for Bash');
+    deck.innerHTML = out.join('\n');
+  }
+  render();
+  if (!still) setInterval(() => {
+    tick++;
+    if (tick % 8 === 0) { live = (live + 1) % rows.length; dir = Math.random() < 0.5 ? 1 : -1; }
+    render();
+  }, 300);
+
+  document.querySelectorAll('.copy').forEach(b => b.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); const d = b.querySelector('.done'); d.hidden = false; setTimeout(() => d.hidden = true, 1500); } catch {}
+  }));
+</script>
+</body>
+</html>

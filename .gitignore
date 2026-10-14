@@ -1,0 +1,21 @@
+node_modules/
+mod/.claude-plugin/types/
+.vercel/
+
+# Your ledger: local to this machine, never in git
+feed/
+briefs/
+board.md
+sessions.json
+local.md
+projects.md
+workers.json
+log.md
+decisions/*
+!decisions/README.md
+plans/*
+!plans/README.md
+notes/
+reviews/
+learned/
+.playwright-mcp/
