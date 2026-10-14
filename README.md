@@ -4,7 +4,7 @@ One chat that runs all your coding agents.
 
 You have five Claude Code sessions open in five panes. One is waiting for a permission, one finished an hour ago and asked you a question, two are working, one is idle. orch is a Claude Code session that watches all of them for you. You ask it "what's going on" and get the short answer. It queues every question that needs you, relays your answers, and starts new workers in their own git worktrees, checks their tests, and has Claude and Codex review the result. You can reach it from your phone via Remote Control.
 
-Landing page: https://orch-agents.vercel.app
+Landing page: https://orch-agents-lemon.vercel.app
 
 ```
 you ──▶ orch ──┬──▶ worker  fix-login     ■■■□□□ gates   4m

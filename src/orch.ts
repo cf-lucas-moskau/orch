@@ -267,7 +267,7 @@ async function bimodel(p: Project, base: string, sha: string, label: string, onl
       // After a long tool loop Claude's last message can be empty, so ask for schema-checked output instead of text.
       headless('claude', ['-p', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--no-session-persistence', '--output-format', 'json', '--json-schema', JSON.stringify(FINDINGS_SCHEMA)], prompt, wt)
         .then(r => { try { const j = JSON.parse(r.out); return j.structured_output ? { ok: true, out: JSON.stringify(j.structured_output) } : { ok: false, out: j.result || r.out }; } catch { return r; } }),
-      headless('codex', ['exec', '-c', 'model_reasoning_effort="high"', '--sandbox', 'read-only', '--ephemeral', '--output-schema', schema, '-o', last, '-C', wt, '-'], prompt, wt)
+      headless('codex', ['exec', '--disable', 'hooks', '-c', 'model_reasoning_effort="high"', '--sandbox', 'read-only', '--ephemeral', '--output-schema', schema, '-o', last, '-C', wt, '-'], prompt, wt)
         .then(r => { try { return r.ok ? { ok: true, out: readFileSync(last, 'utf8') } : r; } catch { return { ok: false, out: 'no last message written' }; } }),
     ]);
     const take = (name: string, r: { ok: boolean; out: string }): Finding[] => {
