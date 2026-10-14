@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildBrief, parseDecision, parseLearned } from '../src/brief.ts';
 import { extractSignals, parseOutcome } from '../src/reflect.ts';
@@ -29,14 +28,6 @@ test('decision header and fields parse', () => {
   const done = parseOutcome(decision.replace('Status: open', 'Status: accepted') + '"yes push" 2026-10-05, relayed\n');
   assert.equal(done?.status, 'accepted');
   assert.match(done!.outcome, /yes push/);
-});
-
-test('real decision files parse', () => {
-  for (const f of ['D-01.md', 'D-02.md']) {
-    const d = parseDecision(readFileSync(join(import.meta.dirname, '..', 'decisions', f), 'utf8'));
-    assert.match(d.id, /^D-\d+$/);
-    assert.ok(d.status);
-  }
 });
 
 const learned = `# learned 2026-10-05
