@@ -1,6 +1,6 @@
 // One-time setup: checks tools, creates the local ledger, installs the feed hook for Claude (and Codex),
 // and with --nightly the macOS learning jobs. Safe to rerun; it backs up any settings file before changing it.
-// Usage: npm run setup [-- --nightly] [-- --dry-run]
+// Usage: npm run setup [-- --nightly] [-- --state] [-- --dry-run]
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -10,6 +10,7 @@ const root = join(import.meta.dirname, '..');
 const home = homedir();
 const dry = process.argv.includes('--dry-run');
 const nightly = process.argv.includes('--nightly');
+const stateFeed = process.argv.includes('--state');
 const has = (bin: string) => spawnSync('sh', ['-c', `command -v ${bin}`]).status === 0;
 const say = (s: string) => console.log(s);
 const write = (path: string, text: string) => { if (!dry) writeFileSync(path, text); };
@@ -115,6 +116,26 @@ if (nightly) {
       }
       say(`  + ${j.label}`);
     }
+  }
+}
+
+// 6. The state feed for orch companion (launchd/orch.state.plist), kept alive by launchd.
+if (stateFeed) {
+  say('\nState feed');
+  if (process.platform !== 'darwin') say('  · launchd is macOS only; keep `npm run -s state` running with systemd or similar.');
+  else {
+    const x = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const plist = readFileSync(join(root, 'launchd', 'orch.state.plist'), 'utf8')
+      .replace('{{ORCH_DIR}}', x(q(root))).replace('{{PATH}}', x(process.env.PATH ?? '/usr/bin:/bin'))
+      .replaceAll('{{LOG}}', x(join(home, 'Library', 'Logs', 'orch.state.log')));
+    const dst = join(home, 'Library', 'LaunchAgents', 'orch.state.plist');
+    if (!dry) {
+      mkdirSync(join(dst, '..'), { recursive: true });
+      spawnSync('launchctl', ['bootout', `gui/${process.getuid!()}`, dst]);
+      writeFileSync(dst, plist);
+      spawnSync('launchctl', ['bootstrap', `gui/${process.getuid!()}`, dst], { stdio: 'inherit' });
+    }
+    say('  + orch.state, writing ~/agent-bus/orch-state.json every 3 s');
   }
 }
 
