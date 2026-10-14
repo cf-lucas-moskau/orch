@@ -1,5 +1,5 @@
 // Pure: the user's morning PR routine for one repo.
-// His PRs with colleague feedback get a worker that checks and implements it; colleagues' PRs nobody
+// Their PRs with colleague feedback get a worker that checks and implements it; colleagues' PRs nobody
 // reviewed yet get a bimodel review and a drafted comment. Everything else is listed, not acted on.
 
 export type Pr = {
@@ -89,4 +89,23 @@ export function addressTask(pr: Pr, feedback: Feedback[]): string {
     '',
     ...feedback.map((f, i) => `${i + 1}. @${f.who} on ${f.where}:\n${f.body.trim()}`),
   ].join('\n');
+}
+
+// What `gh pr view --json isDraft,mergeable,reviewDecision,statusCheckRollup` says about merging now.
+export type PrState = {
+  isDraft: boolean; mergeable: string; reviewDecision: string | null;
+  statusCheckRollup: { status?: string | null; conclusion?: string | null; state?: string | null; name?: string; context?: string }[];
+};
+const PASSED = /^(SUCCESS|NEUTRAL|SKIPPED)$/;
+export function mergeBlocker(s: PrState): string | null {
+  if (s.isDraft) return 'draft';
+  if (s.mergeable === 'CONFLICTING') return 'merge conflicts';
+  if (s.mergeable !== 'MERGEABLE') return `mergeability ${s.mergeable || 'unknown'}, try again shortly`;
+  if (s.reviewDecision === 'CHANGES_REQUESTED') return 'changes requested';
+  if (s.reviewDecision === 'REVIEW_REQUIRED') return 'a required approval is missing';
+  const name = (c: PrState['statusCheckRollup'][number]) => c.name ?? c.context ?? 'check';
+  const pending = s.statusCheckRollup.filter(c => (c.status && c.status !== 'COMPLETED') || /^(PENDING|EXPECTED)$/.test(c.state ?? ''));
+  if (pending.length) return `checks pending: ${pending.map(name).join(', ')}`;
+  const failed = s.statusCheckRollup.filter(c => !PASSED.test(c.conclusion ?? c.state ?? ''));
+  return failed.length ? `checks failed: ${failed.map(name).join(', ')}` : null;
 }

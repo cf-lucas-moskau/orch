@@ -65,6 +65,8 @@ The deck is a [Claude Code mod](https://www.claudemod.com) (early access) and do
 
 Push, merge, open or comment on PRs, deploy, touch a database, send anything outside your machine, or answer a permission prompt. Those always become a decision for you. Workers never commit; orch commits on the worker's branch only after your gates pass. The full rules are in `policies.md`; put your own overrides in `local.md`.
 
+Once you trust it, you can let orch push, comment, approve and merge by itself. Copy the `## Autonomy` section from `policies.md` into `local.md` and switch the ones you want to `on`. It still only pushes work that passed your gates and a clean two-model review, approves only PRs with no serious findings, and merges only with green checks and every approval your branch protection requires. Deploys, databases and permission prompts always stay with you.
+
 ## Optional extras
 
 - Codex: install it before `npm run setup` (or rerun setup) and say "with Codex" or "with both".

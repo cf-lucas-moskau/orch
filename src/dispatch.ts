@@ -141,3 +141,19 @@ export function restoreList(feed: import('./board.ts').FeedEvent[], liveSids: Se
 }
 
 export const resumeCommand = (l: Lost) => l.kind === 'codex' ? `codex resume ${l.sid}` : `claude --resume ${l.sid}`;
+
+// Outward actions orch may take without a decision. Off unless an `## Autonomy` section says `- <action>: on`;
+// local.md is read first, so its lines win over policies.md.
+export const AUTONOMOUS = ['push', 'comment', 'approve', 'merge'] as const;
+export type Autonomous = typeof AUTONOMOUS[number];
+export function parseAutonomy(...texts: string[]): Set<Autonomous> {
+  const on = new Set<Autonomous>();
+  for (const a of AUTONOMOUS) {
+    for (const t of texts) {
+      const section = t.split(/^## /m).find(s => /^autonomy\b/i.test(s)) ?? '';
+      const m = section.match(new RegExp(`^- ${a}: (on|off)\\b`, 'mi'));
+      if (m) { if (m[1].toLowerCase() === 'on') on.add(a); break; }
+    }
+  }
+  return on;
+}

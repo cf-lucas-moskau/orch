@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickWinner, resolveProject, score, canDispatch, canSteer, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, type Worker } from '../src/dispatch.ts';
+import { pickWinner, resolveProject, score, canDispatch, canSteer, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -107,4 +107,12 @@ test('winner: gates first, then review score, then smaller diff', () => {
   const tie = pickWinner([cand('a', true, 90, empty), cand('b', true, 20, empty)]);
   assert.equal(tie.winner!.name, 'b');
   assert.match(tie.reason, /smaller diff/);
+});
+
+test('autonomy is off by default and local.md wins over policies.md', () => {
+  const policies = '## Autonomy\n\n- push: off\n- comment: off\n- approve: off\n- merge: off\n\n## Learning\n\n- project: on\n';
+  assert.deepEqual([...parseAutonomy('', policies)], []);
+  const local = '# local\n\n## Autonomy\n\n- push: on\n- merge: on\n';
+  assert.deepEqual([...parseAutonomy(local, policies)].sort(), ['merge', 'push']);
+  assert.deepEqual([...parseAutonomy('- push: on', policies)], [], 'outside the Autonomy section it does nothing');
 });

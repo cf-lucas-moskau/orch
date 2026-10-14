@@ -6,7 +6,7 @@ The rules orch enforces. orch never decides for the user what this file marks ne
 
 Every event the watcher prints is sorted into one of three buckets.
 
-Needs the user: a session is blocked on a permission prompt, asks a question, or waits on an approval. Anything touching commits, pushes, merges, deploys, DB writes, outward-facing actions (PR comments, Slack, email, Jira) or money is always needs the user, even if the session only proposes it. A long task that finished and now sits idle waiting for "go" counts too.
+Needs the user: a session is blocked on a permission prompt, asks a question, or waits on an approval. Anything touching commits, pushes, merges, deploys, DB writes, outward-facing actions (PR comments, Slack, email, Jira) or money is always needs the user, even if the session only proposes it, except what Autonomy below switches on. A long task that finished and now sits idle waiting for "go" counts too.
 
 FYI: a session finished and reported, nothing pending. Shown when the user asks, never pushed.
 
@@ -28,7 +28,7 @@ Concurrency cap: 4 workers. Everything runs on one machine; raise it in `local.m
 
 Each worker runs in its own herdr worktree on branch `orch/<name>`, leaves its changes for orch to commit once the gates pass, and never pushes, merges, opens PRs, deploys or touches databases; those come back as decisions.
 
-When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, and a decision only if the work needs pushing or merging. Fail: steer the worker once with the failing output; a second failure is needs the user.
+When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, then push and merge as Autonomy allows; whatever it doesn't allow becomes a decision. Fail: steer the worker once with the failing output; a second failure is needs the user.
 
 Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree with uncommitted changes or commits on no other branch; abandoning those needs a decision, then `--abandon`.
 
@@ -36,7 +36,7 @@ Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree
 
 Workers are Claude unless the user says otherwise ("with Codex", "both") or the plan task carries a `(codex)` or `(both)` tag.
 
-orch tags a task `(both)` on its own when a miss is expensive: auth and permissions, money, data migrations or deletion, concurrency, security fixes. A pair is the same task given to a Claude and a Codex worker in separate worktrees; it takes two slots. When both are done, `orch judge` runs gates and a bimodel review on each and picks the winner. Merging the winner stays a decision; the loser is cleaned up with `--abandon` after the user agrees.
+orch tags a task `(both)` on its own when a miss is expensive: auth and permissions, money, data migrations or deletion, concurrency, security fixes. A pair is the same task given to a Claude and a Codex worker in separate worktrees; it takes two slots. When both are done, `orch judge` runs gates and a bimodel review on each and picks the winner. The winner is pushed and merged as Autonomy allows; the loser is cleaned up with `--abandon` after the user agrees.
 
 Workers never commit (orch commits after the gates pass, and Codex's sandbox keeps `.git` read-only). They leave changes uncommitted; `orch gates` makes the one local commit on the worker branch when the gates pass. A Codex permission prompt is a decision, never answered by orch.
 
@@ -48,7 +48,24 @@ Claude workers start in pstack's poteto-mode (`/pstack:poteto-mode`): every work
 
 ## PR routine
 
-"Look at the PRs of <repo>" runs the orch-prs skill: the user's PRs with colleague feedback get an address worker; colleagues' PRs nobody reviewed get a bimodel review and a drafted comment that @-mentions the author. Pushing fixes and posting reviews are decisions.
+"Look at the PRs of <repo>" runs the orch-prs skill: the user's PRs with colleague feedback get an address worker; colleagues' PRs nobody reviewed get a bimodel review and a drafted comment that @-mentions the author. Pushing fixes, posting reviews and merging follow Autonomy.
+
+## Autonomy
+
+Outward actions orch takes without asking once switched on (in `local.md`, which wins). Off means a decision first, then the command with `--accepted D-NN`. The commands refuse on their own when neither holds.
+
+- push: off
+- comment: off
+- approve: off
+- merge: off
+
+When on, each still has a bar:
+- push: a worker branch or a PR head, only after its gates passed and `orch review` left no blocking finding. Then `orch open-pr` for a new branch. Never force, never straight to the default branch.
+- comment: post the drafted review or reply as written in `reviews/`.
+- approve: a colleague's PR whose bimodel review left no blocking or medium finding after verification. Anything less gets a comment instead.
+- merge: `orch merge` squash-merges only with checks green, no conflicts, no changes requested and every approval branch protection requires; it refuses otherwise. Never `--admin`. Checks still pending: try again on the next pass.
+
+Every autonomous action is logged and listed in the next brief, never pushed as a notification. Deploys, DB writes, force pushes, money, Slack, email, Jira and permission prompts stay needs the user regardless. A merge or push that fails twice becomes a decision.
 
 ## Learning
 

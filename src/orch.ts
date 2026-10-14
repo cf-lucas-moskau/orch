@@ -1,4 +1,4 @@
-// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore.
+// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, and the PR commands.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -7,11 +7,11 @@ import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
 import {
-  canDispatch, canSteer, cleanupBlocker, findLive, isTrustDialog, pairNames, parseCap, parseProjects, pickWinner, resolveProject,
-  restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Candidate, type Kind, type Live, type Project, type Worker,
+  canDispatch, canSteer, cleanupBlocker, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
+  restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
-import { addressTask, renderTriage, triagePrs, type Pr } from './prs.ts';
+import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrState } from './prs.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -336,16 +336,25 @@ async function judge([slug]: string[]) {
 }
 
 
-// the user's morning PR routine. `prs` lists; `address` and `review` act; `post-review` and `push` run only after the user accepted.
+// The PR routine. `prs` lists; `address` and `review` act. `push`, `open-pr`, `post-review` and `merge` are outward:
+// each runs only when `## Autonomy` in local.md or policies.md switches it on, or with `--accepted D-NN` after the user accepted.
+function allowed(action: Autonomous, args: string[]): string {
+  const i = args.indexOf('--accepted');
+  if (i >= 0 && /^D-?\d+$/.test(args[i + 1] ?? '')) return args[i + 1];
+  if (parseAutonomy(read('local.md'), read('policies.md')).has(action)) return 'autonomous';
+  return die(`${action} needs the user: file a decision and rerun with --accepted D-NN, or switch ${action} on under Autonomy in local.md`);
+}
+
+const gh = (cwd: string, ...a: string[]) => {
+  const r = spawnSync('gh', a, { cwd, encoding: 'utf8', maxBuffer: 1 << 26 });
+  return r.status === 0 ? r.stdout : die(`gh ${a.slice(0, 2).join(' ')} failed: ${r.stderr.trim()}`);
+};
+
 function openPrs(p: Project): { me: string; prs: Pr[] } {
-  const gh = (...a: string[]) => {
-    const r = spawnSync('gh', a, { cwd: p.path, encoding: 'utf8', maxBuffer: 1 << 26 });
-    return r.status === 0 ? r.stdout : die(`gh ${a.slice(0, 2).join(' ')} failed: ${r.stderr.trim()}`);
-  };
-  const [owner, name] = gh('repo', 'view', '--json', 'owner,name', '--jq', '.owner.login + " " + .name').trim().split(' ');
+  const [owner, name] = gh(p.path, 'repo', 'view', '--json', 'owner,name', '--jq', '.owner.login + " " + .name').trim().split(' ');
   const query = readFileSync(join(import.meta.dirname, 'prs.graphql'), 'utf8');
-  const data = JSON.parse(gh('api', 'graphql', '-F', `owner=${owner}`, '-F', `name=${name}`, '-f', 'states=OPEN', '-f', `query=${query}`));
-  return { me: gh('api', 'user', '--jq', '.login').trim(), prs: data.data.repository.pullRequests.nodes };
+  const data = JSON.parse(gh(p.path, 'api', 'graphql', '-F', `owner=${owner}`, '-F', `name=${name}`, '-f', 'states=OPEN', '-f', `query=${query}`));
+  return { me: gh(p.path, 'api', 'user', '--jq', '.login').trim(), prs: data.data.repository.pullRequests.nodes };
 }
 
 function prs([repoArg]: string[]) {
@@ -375,27 +384,62 @@ function address([repoArg, n, ...args]: string[]) {
     { base: git(p.path, 'rev-parse', from).trim(), prHead: t.pr.headRefName }, from);
 }
 
-function postReview([repoArg, n, file]: string[]) {
-  if (!repoArg || !n || !file) die('usage: orch post-review <repo> <pr> <body-file>   (only after the user accepted the decision)');
+const OUTWARD = '[--accepted D-NN]';
+
+// --approve approves the PR with the body; without it the body is a comment.
+function postReview([repoArg, n, file, ...args]: string[]) {
+  if (!repoArg || !n || !file) die(`usage: orch post-review <repo> <pr> <body-file> [--approve] ${OUTWARD}`);
+  const approve = args.includes('--approve');
+  const by = allowed(approve ? 'approve' : 'comment', args);
   const p = project(repoArg);
   const body = join(root, file);
   if (!existsSync(body)) die(`no ${file}`);
-  const r = spawnSync('gh', ['pr', 'review', n.replace('#', ''), '--comment', '--body-file', body], { cwd: p.path, encoding: 'utf8' });
-  if (r.status !== 0) die(`gh pr review failed: ${r.stderr.trim()}`);
-  log(`post-review ${p.repo} #${n}: posted ${file}`);
-  console.log(`review posted on #${n}`);
+  gh(p.path, 'pr', 'review', n.replace('#', ''), approve ? '--approve' : '--comment', '--body-file', body);
+  log(`post-review ${p.repo} #${n} (${by}): ${approve ? 'approved' : 'commented'} with ${file}`);
+  console.log(`review ${approve ? 'approved' : 'posted'} on #${n}`);
 }
 
-function push([name]: string[]) {
-  if (!name) die('usage: orch push <worker>   (only after the user accepted the decision)');
+// Never forced: a rejected push comes back as an error for a decision.
+function push([name, ...args]: string[]) {
+  if (!name) die(`usage: orch push <worker> ${OUTWARD}`);
+  const by = allowed('push', args);
   const w = worker(name);
   const target = w.prHead ?? w.branch;
   const r = spawnSync('git', ['-C', w.worktree, 'push', 'origin', `HEAD:${target}`], { encoding: 'utf8' });
   if (r.status !== 0) die(`push failed: ${r.stderr.trim()}`);
-  log(`push ${name}: HEAD -> origin/${target}`);
+  log(`push ${name} (${by}): HEAD -> origin/${target}`);
   console.log(`pushed ${name} to origin/${target}`);
 }
 
+// Opens a PR for a pushed worker branch against the branch it started from (the repo default otherwise).
+function openPr([name, ...args]: string[]) {
+  if (!name) die(`usage: orch open-pr <worker> [--base <branch>] ${OUTWARD}`);
+  const by = allowed('push', args);
+  const w = worker(name);
+  if (w.prHead) die(`${name} works on an existing PR branch (${w.prHead}); push updates it`);
+  const p = projectOf(w);
+  const base = args.includes('--base') ? args[args.indexOf('--base') + 1] : null;
+  const title = w.task.split('\n')[0].slice(0, 70);
+  const body = `${w.task.trim()}\n\nOpened by orch: worker ${name} (${w.kind ?? 'claude'}), gates passed.`;
+  const url = gh(p.path, 'pr', 'create', '--head', w.branch, '--title', title, '--body', body, ...(base ? ['--base', base] : [])).trim();
+  log(`open-pr ${name} (${by}): ${url}`);
+  console.log(url);
+}
+
+// Squash-merges once nothing blocks it. Never --admin: branch protection always wins.
+function merge([repoArg, n, ...args]: string[]) {
+  if (!repoArg || !n) die(`usage: orch merge <repo> <pr> ${OUTWARD}`);
+  const by = allowed('merge', args);
+  const p = project(repoArg);
+  const pr = n.replace('#', '');
+  const state: PrState = JSON.parse(gh(p.path, 'pr', 'view', pr, '--json', 'isDraft,mergeable,reviewDecision,statusCheckRollup'));
+  const blocker = mergeBlocker(state);
+  if (blocker) die(`not merged: #${pr} ${blocker}`);
+  gh(p.path, 'pr', 'merge', pr, '--squash');
+  log(`merge ${p.repo} #${pr} (${by}): squash-merged`);
+  console.log(`merged #${pr}`);
+}
+
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

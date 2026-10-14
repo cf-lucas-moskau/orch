@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { addressTask, renderTriage, triagePr, triagePrs, type Pr } from '../src/prs.ts';
+import { addressTask, mergeBlocker, renderTriage, triagePr, triagePrs, type Pr, type PrState } from '../src/prs.ts';
 
 const me = 'me';
 const pr = (n: number, author: string, o: Partial<{ draft: boolean; reviews: [string, string, string][]; threads: [boolean, string, string][]; comments: [string, string][]; last: string }> = {}): Pr => ({
@@ -54,4 +54,16 @@ test('address brief quotes every comment with its location', () => {
   assert.match(out, /PR #1 "PR 1"/);
   assert.match(out, /1\. @KorbinianK on src\/a\.ts:12:\nrename this/);
   assert.match(out, /Do not reply on GitHub/);
+});
+
+test('merge waits for green checks, approvals and no conflicts', () => {
+  const ok: PrState = { isDraft: false, mergeable: 'MERGEABLE', reviewDecision: '', statusCheckRollup: [
+    { name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }, { context: 'vercel', state: 'SUCCESS' }, { name: 'lint', status: 'COMPLETED', conclusion: 'SKIPPED' }] };
+  assert.equal(mergeBlocker(ok), null);
+  assert.equal(mergeBlocker({ ...ok, isDraft: true }), 'draft');
+  assert.equal(mergeBlocker({ ...ok, mergeable: 'CONFLICTING' }), 'merge conflicts');
+  assert.equal(mergeBlocker({ ...ok, reviewDecision: 'REVIEW_REQUIRED' }), 'a required approval is missing');
+  assert.equal(mergeBlocker({ ...ok, reviewDecision: 'CHANGES_REQUESTED' }), 'changes requested');
+  assert.equal(mergeBlocker({ ...ok, statusCheckRollup: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] }), 'checks pending: test');
+  assert.equal(mergeBlocker({ ...ok, statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }] }), 'checks failed: test');
 });
