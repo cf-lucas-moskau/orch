@@ -1,0 +1,5 @@
+dist/
+dist-electron/
+out/
+shots/
+build/icon.png

@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": ["node", "vite/client"],
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["src", "electron", "scripts", "test", "../src/state.ts"]
+}
