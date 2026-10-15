@@ -6,10 +6,13 @@ export type Pr = {
   number: number; title: string; url: string; isDraft: boolean; headRefName: string; baseRefName: string;
   author: { login: string } | null;
   commits: { nodes: { commit: { committedDate: string } }[] };
-  reviews: { nodes: { author: { login: string } | null; state: string; submittedAt: string }[] };
-  reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { author: { login: string } | null; body: string; path: string | null; line: number | null }[] } }[] };
-  comments: { nodes: { author: { login: string } | null; body: string; createdAt: string }[] };
+  commitsSince?: { nodes: { commit: { oid: string; committedDate: string } }[] };
+  reviewRequests?: { nodes: { requestedReviewer: { login?: string } | null }[] };
+  reviews: { nodes: { author: { login: string } | null; state: string; submittedAt: string; commit?: { oid: string } | null; reactions?: Reactions }[] };
+  reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { author: { login: string } | null; body: string; path: string | null; line: number | null; createdAt?: string }[] } }[] };
+  comments: { nodes: { author: { login: string } | null; body: string; createdAt: string; reactions?: Reactions }[] };
 };
+type Reactions = { nodes: { user: { login: string } | null; content: string; createdAt: string }[] };
 
 export type Feedback = { who: string; where: string; body: string };
 export type Triage =
@@ -17,7 +20,8 @@ export type Triage =
   | { kind: 'approved'; pr: Pr; by: string[] }          // mine, approved, nothing open
   | { kind: 'waiting'; pr: Pr }                         // mine, no colleague review yet
   | { kind: 'review'; pr: Pr }                          // theirs, nobody reviewed it
-  | { kind: 'reviewed'; pr: Pr; by: string[] }          // theirs, already has a review
+  | { kind: 'rereview'; pr: Pr; why: string[]; since: string } // theirs, I reviewed, something changed since
+  | { kind: 'reviewed'; pr: Pr; by: string[] }          // theirs, already has a review, nothing new since mine
   | { kind: 'draft'; pr: Pr };
 
 const BOT = /\[bot\]$|^(cursor|copilot|coderabbitai|github-actions|dependabot|renovate|sonarcloud|codecov|vercel)$/i;
@@ -46,15 +50,46 @@ export function triagePr(pr: Pr, me: string): Triage {
   }
 
   const reviewers = [...new Set(pr.reviews.nodes.map(r => login(r.author)).filter(human))];
+  const changed = changesSinceMyReview(pr, me);
+  if (changed) return { kind: 'rereview', pr, ...changed };
   return reviewers.length ? { kind: 'reviewed', pr, by: reviewers } : { kind: 'review', pr };
 }
 
-const ORDER: Triage['kind'][] = ['address', 'review', 'approved', 'waiting', 'reviewed', 'draft'];
+// Anything that happened on a colleague's PR after my last review or comment means it needs another look:
+// new commits, a re-review request, an emoji on what I wrote, or a reply. "Nothing changed" is only true
+// when none of these fired.
+export function changesSinceMyReview(pr: Pr, me: string): { why: string[]; since: string } | null {
+  const mine = [
+    ...pr.reviews.nodes.filter(r => login(r.author) === me).map(r => r.submittedAt),
+    ...pr.comments.nodes.filter(c => login(c.author) === me).map(c => c.createdAt),
+  ].sort();
+  const since = mine[mine.length - 1];
+  if (!since) return null;
+  const why: string[] = [];
+  // Commits after the one my last review was on; dates only as a fallback (clocks on laptops drift).
+  const list = pr.commitsSince?.nodes ?? [];
+  const reviewedOid = pr.reviews.nodes.filter(r => login(r.author) === me && r.commit?.oid).map(r => r.commit!.oid).pop();
+  const at = reviewedOid ? list.findIndex(n => n.commit.oid === reviewedOid) : -1;
+  const commits = at >= 0 ? list.slice(at + 1) : (list.length ? list : pr.commits.nodes).filter(n => n.commit.committedDate > since);
+  if (commits.length) why.push(`${commits.length} new commit${commits.length > 1 ? 's' : ''}`);
+  if (pr.reviewRequests?.nodes.some(n => n.requestedReviewer?.login === me)) why.push('re-review requested');
+  const reacts = [...pr.reviews.nodes.filter(r => login(r.author) === me).flatMap(r => r.reactions?.nodes ?? []),
+    ...pr.comments.nodes.filter(c => login(c.author) === me).flatMap(c => c.reactions?.nodes ?? [])]
+    .filter(r => login(r.user) !== me && r.createdAt > since);
+  if (reacts.length) why.push(`reaction ${[...new Set(reacts.map(r => r.content.toLowerCase()))].join(', ')}`);
+  const replies = [...pr.comments.nodes.filter(c => login(c.author) !== me && !isBot(login(c.author)) && c.createdAt > since),
+    ...pr.reviewThreads.nodes.flatMap(t => t.comments.nodes).filter(c => login(c.author) !== me && !isBot(login(c.author)) && (c.createdAt ?? '') > since)];
+  if (replies.length) why.push(`${replies.length} repl${replies.length > 1 ? 'ies' : 'y'}`);
+  return why.length ? { why, since } : null;
+}
+
+const ORDER: Triage['kind'][] = ['address', 'rereview', 'review', 'approved', 'waiting', 'reviewed', 'draft'];
 export const triagePrs = (prs: Pr[], me: string) =>
   prs.map(p => triagePr(p, me)).sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || a.pr.number - b.pr.number);
 
 const LABEL: Record<Triage['kind'], string> = {
   address: 'Yours, colleague feedback to check and implement',
+  rereview: "Colleagues', changed since my review: re-review, then approve or comment",
   review: "Colleagues', not reviewed yet",
   approved: 'Yours, approved, nothing open',
   waiting: 'Yours, waiting for a review',
@@ -71,6 +106,7 @@ export function renderTriage(repo: string, ts: Triage[]): string {
     for (const t of group) {
       const who = login(t.pr.author);
       const extra = t.kind === 'address' ? ` · ${t.feedback.length} open comments`
+        : t.kind === 'rereview' ? ` · ${t.why.join(', ')} since ${t.since.slice(0, 16)}`
         : t.kind === 'approved' || t.kind === 'reviewed' ? ` · by ${t.by.join(', ')}` : '';
       out.push(`- #${t.pr.number} ${t.pr.title} (@${who}${extra})`);
     }

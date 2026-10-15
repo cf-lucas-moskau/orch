@@ -373,6 +373,7 @@ function prs([repoArg]: string[]) {
   for (const t of ts) {
     if (t.kind === 'address') console.log(`next: orch address ${p.repo} ${t.pr.number}`);
     if (t.kind === 'review') console.log(`next: orch review ${p.repo} ${t.pr.number}`);
+    if (t.kind === 'rereview') console.log(`next: orch review ${p.repo} ${t.pr.number} (only what changed since ${t.since.slice(0, 16)}), then approve or comment`);
   }
 }
 
