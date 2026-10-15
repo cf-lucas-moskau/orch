@@ -5,9 +5,11 @@ query($owner: String!, $name: String!, $states: [PullRequestState!]) {
         number title url isDraft headRefName baseRefName
         author { login }
         commits(last: 1) { nodes { commit { committedDate } } }
-        reviews(last: 30) { nodes { author { login } state submittedAt } }
-        reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } body path line } } } }
-        comments(last: 30) { nodes { author { login } body createdAt } }
+        commitsSince: commits(last: 30) { nodes { commit { oid committedDate } } }
+        reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
+        reviews(last: 30) { nodes { author { login } state submittedAt commit { oid } reactions(last: 20) { nodes { user { login } content createdAt } } } }
+        reviewThreads(first: 100) { nodes { isResolved comments(last: 20) { nodes { author { login } body path line createdAt } } } }
+        comments(last: 30) { nodes { author { login } body createdAt reactions(last: 20) { nodes { user { login } content createdAt } } } }
       }
     }
   }
