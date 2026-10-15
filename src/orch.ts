@@ -300,7 +300,8 @@ async function review([repoArg, target, ...rest]: string[]) {
   const only = rest.flatMap((a, i) => rest[i - 1] === '--only' ? [a] : []);
   const p = project(repoArg);
   let head = target, base = rest.includes('--base') ? rest[rest.indexOf('--base') + 1] ?? '' : '';
-  const pr = target.match(/^#?(\d+)$/)?.[1];
+  // PR numbers are short; an all-digit short commit hash (7+ chars) is a commit, not a PR.
+  const pr = target.match(/^#?(\d{1,6})$/)?.[1];
   if (pr) {
     const r = spawnSync('gh', ['pr', 'view', pr, '--json', 'headRefOid,baseRefName'], { cwd: p.path, encoding: 'utf8' });
     if (r.status !== 0) die(`gh pr view ${pr} failed: ${r.stderr}`);
