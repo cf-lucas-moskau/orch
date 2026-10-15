@@ -77,10 +77,45 @@ export function canDispatch(workers: Worker[], cap: number, name: string, live: 
   return running >= cap ? `concurrency cap reached (${running}/${cap})` : null;
 }
 
-// Never type into a pane the user is using, never answer an approval dialog for them.
-export function canSteer(a: Live | undefined): string | null {
+// What the user has typed into a Claude (❯) or Codex (›) input box, from an ANSI screen.
+// The box runs from the last prompt line to the next ─ rule. Dim or grey runs are
+// suggestions and placeholders, not the user's text.
+// null: no input box found, so the caller must not assume it is empty.
+export function inputDraft(ansiScreen: string): string | null {
+  const lines = ansiScreen.split(/\r?\n/);
+  let i = -1;
+  for (let k = lines.length - 1; k >= 0; k--) if (/^(\x1b\[[0-9;]*m)*\s*[❯›]/.test(lines[k])) { i = k; break; }
+  if (i < 0) return null;
+  const box: string[] = [];
+  for (let k = i; k < lines.length; k++) {
+    if (k > i && /^(\x1b\[[0-9;]*m)*\s*─/.test(lines[k])) break;
+    box.push(k === i ? lines[k].replace(/^(\x1b\[[0-9;]*m|\s)*[❯›]/, '') : lines[k]);
+  }
+  let out = '', hidden = false;
+  for (const part of box.join('\n').split(/(\x1b\[[0-9;]*m)/)) {
+    const m = part.match(/^\x1b\[([0-9;]*)m$/);
+    if (!m) { if (!hidden) out += part; continue; }
+    const p = m[1] === '' ? [0] : m[1].split(';').map(Number);
+    for (let j = 0; j < p.length; j++) {
+      const c = p[j];
+      if (c === 38 || c === 48) {
+        const rgb = p[j + 1] === 2 ? p.slice(j + 2, j + 5) : null;
+        // Only the exact placeholder greys Claude Code and Codex draw; any other colour is real text.
+        if (c === 38) hidden = rgb ? rgb.join(',') === '153,153,153' : p[j + 2] >= 242 && p[j + 2] <= 246;
+        j += p[j + 1] === 2 ? 4 : 2;
+      } else if (c === 0 || c === 22 || c === 39) hidden = false;
+      else if (c === 2 || c === 90) hidden = true;
+    }
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+// Never type over what the user is typing, never answer an approval dialog for them.
+// A focused pane with an empty input box is fine: the user is only looking at it.
+export function canSteer(a: Live | undefined, draft = ''): string | null {
   if (!a) return 'no live agent with that name or pane';
-  if (a.focused) return 'the user is in that pane (focused)';
+  // Any text already in the box would be submitted together with ours, focused or not.
+  if (draft) return `${a.focused ? 'the user is typing in that pane' : 'that pane has an unsent draft'} ("${draft.slice(0, 40)}")`;
   if (a.agent_status === 'blocked') return 'session is blocked on a dialog; that is a decision, not a prompt';
   return null;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickWinner, resolveProject, score, canDispatch, canSteer, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { pickWinner, resolveProject, score, canDispatch, canSteer, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -35,7 +35,9 @@ test('dispatch refuses bad names, taken names and a full cap', () => {
 });
 
 test('steering skips focused and blocked panes', () => {
-  assert.match(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' })!, /focused/);
+  assert.equal(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' }), null, 'focused but empty input: send');
+  assert.match(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' }, 'half a sentence')!, /typing/);
+  assert.match(canSteer({ agent_status: 'idle', pane_id: 'p' }, 'left behind')!, /unsent draft/);
   assert.match(canSteer({ agent_status: 'blocked', pane_id: 'p' })!, /decision/);
   assert.match(canSteer(undefined)!, /no live agent/);
   assert.equal(canSteer({ agent_status: 'done', pane_id: 'p' }), null);
@@ -115,4 +117,24 @@ test('autonomy is off by default and local.md wins over policies.md', () => {
   const local = '# local\n\n## Autonomy\n\n- push: on\n- merge: on\n';
   assert.deepEqual([...parseAutonomy(local, policies)].sort(), ['merge', 'push']);
   assert.deepEqual([...parseAutonomy('- push: on', policies)], [], 'outside the Autonomy section it does nothing');
+});
+
+// Captured from real panes with `herdr agent read --source visible --ansi`.
+test('inputDraft ignores dim suggestions and grey prompt, keeps typed text', () => {
+  const E = '\x1b';
+  assert.equal(inputDraft(`header\n\u276f ${E}[0m${E}[2mTry "write a test for <filepath>"${E}[0m\r\n\u2500\u2500\u2500\nfooter`), '');
+  assert.equal(inputDraft(`${E}[0m${E}[38;2;153;153;153m\u276f ${E}[0m\r`), '');
+  assert.equal(inputDraft(`\u276f hello typed draft\r`), 'hello typed draft');
+  assert.equal(inputDraft(`\u276f fix it${E}[2m suggestion tail${E}[0m`), 'fix it');
+  assert.equal(inputDraft(`\u203a codex draft`), 'codex draft');
+  assert.equal(inputDraft('no prompt here'), null);
+});
+
+test('inputDraft keeps truecolor typed text, reads multi-line drafts, ignores menus above', () => {
+  const E = '\x1b';
+  assert.equal(inputDraft(`\u276f ${E}[38;2;220;120;80mcoloured words${E}[0m`), 'coloured words');
+  assert.equal(inputDraft(`\u276f first line\nsecond line\n\u2500\u2500\u2500\nstatus bar`), 'first line second line');
+  assert.equal(inputDraft(`\u276f 1. Option one\n  2. Option two\n\u2500\u2500\n\u276f ${E}[2mTry something${E}[0m\n\u2500\u2500`), '');
+  assert.equal(inputDraft(`\u276f ${E}[38;5;245mgrey 256${E}[0m`), '');
+  assert.equal(inputDraft(`\u276f ${E}[38;2;120;120;120mreal grey text${E}[0m`), 'real grey text');
 });

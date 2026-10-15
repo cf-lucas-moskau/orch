@@ -13,7 +13,7 @@ ship (Autonomy in `policies.md`): `review <repo> <branch>` and verify single-mod
 
 blocked or question from a worker: same as any session, a decision. Answer only with the user's words.
 
-steer: `steer <name|pane> "<text>"`. For a new substantial task in one of the user's sessions, start the text with `/pstack:poteto-mode ` and keep it on one line (a newline turns it into pasted text and the slash command never runs). Use SendMessage instead when the session is a ListAgents peer (match by session id in `sessions.json`). It refuses focused and blocked panes; leave those alone and tell the user.
+steer: `steer <name|pane> "<text>"`. For a new substantial task in one of the user's sessions, start the text with `/pstack:poteto-mode ` and keep it on one line (a newline turns it into pasted text and the slash command never runs). Relaying an answer or follow-up to a Claude session: SendMessage first when it is a ListAgents peer (match by session id in `sessions.json`); it lands in the session's queue without touching the input box, so it works while the user has the pane open. Type with `steer` only for Codex, for non-peers, and for slash commands like poteto-mode (SendMessage can't run those). `steer` refuses only when the user is actually typing in the pane (text in the input box, suggestions ignored) or the pane is blocked on a dialog; then use SendMessage, or give the user the text.
 
 cleanup: `cleanup <name>` once the work is merged or abandoned. A refusal lists the unsaved work; file a decision, and only after the user agrees run `cleanup <name> --abandon`. The branch is always kept.
 
