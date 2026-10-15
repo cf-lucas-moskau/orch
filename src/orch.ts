@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
 import {
-  canDispatch, canSteer, cleanupBlocker, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
+  canDispatch, canSteer, cleanupBlocker, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
@@ -131,7 +131,14 @@ function steer([target, ...rest]: string[]) {
   const text = rest.join(' ').trim();
   if (!target || !text) die('usage: orch steer <name|pane> <text>');
   const a = findLive(live(), target);
-  const blocker = canSteer(a);
+  let draft = '';
+  if (a) {
+    const r = spawnSync('herdr', ['agent', 'read', a.pane_id, '--source', 'visible', '--ansi'], { encoding: 'utf8' });
+    // Can't see the input box: assume someone is typing rather than risk typing over them.
+    const d = r.status === 0 && r.stdout?.trim() ? inputDraft(r.stdout) : null;
+    draft = d ?? '(no input box visible)';
+  }
+  const blocker = canSteer(a, draft);
   if (blocker) die(`not sent: ${blocker}`);
   const status = submit(a!.pane_id, text);
   log(`steer ${a!.name ?? a!.pane_id}: ${text.slice(0, 160)}`);
