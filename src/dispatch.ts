@@ -149,6 +149,9 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Gates, all must pass before you report done: ${gates}.`,
     // Workers never commit (Codex's sandbox cannot anyway). orch commits after the gates pass.
     `Commit rule: leave your changes uncommitted; orch runs the gates and commits them on this branch. Never push, merge, open PRs, reply on GitHub, deploy or touch databases; stop and ask instead. These rules override any playbook step that commits, pushes or opens a PR.`,
+    // Questions that stay in scope cost Lucas a round trip; settle them in the worker.
+    `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
+    `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done. Stop processes by PID, never by name pattern; other workers run on the same machine.`,
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
 }
