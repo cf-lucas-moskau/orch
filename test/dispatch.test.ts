@@ -61,6 +61,8 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /## Task\n\nadd a flag\nwith detail/);
   assert.match(b, /`npm run lint`, `npm test`/);
   assert.match(b, /leave your changes uncommitted; orch runs the gates and commits/);
+  assert.match(b, /in-scope implementation and investigation calls yourself/);
+  assert.match(b, /bound to 127\.0\.0\.1/);
   const p = workerPrompt({ name: 'flag', kind: 'claude' }, '/x/briefs/flag.md');
   assert.equal(p, '/pstack:poteto-mode You are worker flag, dispatched by orch. Read your brief at /x/briefs/flag.md and follow it.');
   assert.ok(!p.includes('\n'));

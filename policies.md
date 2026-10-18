@@ -28,6 +28,8 @@ Concurrency cap: 4 workers. Everything runs on one machine; raise it in `local.m
 
 Each worker runs in its own herdr worktree on branch `orch/<name>`, leaves its changes for orch to commit once the gates pass, and never pushes, merges, opens PRs, deploys or touches databases; those come back as decisions.
 
+Every brief tells the worker to make in-scope implementation and investigation calls itself and report them; it stops only for outward-facing or irreversible actions or a scope change. A worker question that carries a clear recommendation and stays in scope is steered back with "go with your recommendation" only after the user has approved that once for the worker; until then it is needs the user.
+
 When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, then push and merge as Autonomy allows; whatever it doesn't allow becomes a decision. Fail: steer the worker once with the failing output; a second failure is needs the user.
 
 Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree with uncommitted changes or commits on no other branch; abandoning those needs a decision, then `--abandon`.
@@ -37,6 +39,8 @@ Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree
 Workers are Claude unless the user says otherwise ("with Codex", "both") or the plan task carries a `(codex)` or `(both)` tag.
 
 orch tags a task `(both)` on its own when a miss is expensive: auth and permissions, money, data migrations or deletion, concurrency, security fixes. A pair is the same task given to a Claude and a Codex worker in separate worktrees; it takes two slots. When both are done, `orch judge` runs gates and a bimodel review on each and picks the winner. The winner is pushed and merged as Autonomy allows; the loser is cleaned up with `--abandon` after the user agrees.
+
+Codex and pair workers can run on any registered repo. There is no per-repo Codex marking; orch never asks for one or checks for one.
 
 Workers never commit (orch commits after the gates pass, and Codex's sandbox keeps `.git` read-only). They leave changes uncommitted; `orch gates` makes the one local commit on the worker branch when the gates pass. A Codex permission prompt is a decision, never answered by orch.
 
