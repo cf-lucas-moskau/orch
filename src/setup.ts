@@ -1,5 +1,5 @@
 // One-time setup: checks tools, creates the local ledger, installs the feed hook for Claude (and Codex),
-// and with --nightly the macOS learning jobs. Safe to rerun; it backs up any settings file before changing it.
+// the routine scheduler, and with --nightly the macOS learning jobs. Safe to rerun; it backs up any settings file before changing it.
 // Usage: npm run setup [-- --nightly] [-- --state] [-- --dry-run]
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -35,7 +35,7 @@ if (tools.some(t => !t[1])) { say('\nInstall the missing tools above, then run n
 
 // 2. Local ledger: never overwrites what exists.
 say('\nLedger');
-for (const d of ['feed', 'decisions', 'plans', 'notes', 'reviews', 'learned', 'briefs']) if (!dry) mkdirSync(join(root, d), { recursive: true });
+for (const d of ['feed', 'decisions', 'plans', 'notes', 'reviews', 'learned', 'briefs', 'routines']) if (!dry) mkdirSync(join(root, d), { recursive: true });
 const seed: [string, () => string][] = [
   ['local.md', () => readFileSync(join(root, 'local.example.md'), 'utf8')],
   ['projects.md', () => readFileSync(join(root, 'projects.example.md'), 'utf8')],
@@ -82,40 +82,49 @@ installHooks(join(home, '.claude', 'settings.json'), ['SessionStart', 'UserPromp
 if (has('codex')) installHooks(join(home, '.codex', 'hooks.json'), ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'SessionEnd'],
   `ORCH_DIR=${q(root)} ORCH_AGENT=codex /bin/bash ${q(hook)}`, 'Codex');
 
-// 5. Nightly learning jobs (macOS launchd): reflect at 23:40, weekly memory prune on Sundays at 22:10.
-if (nightly) {
-  say('\nNightly jobs');
-  if (process.platform !== 'darwin') say('  · launchd is macOS only; schedule `npm run -s reflect` (nightly) and `npm run -s reflect -- --weekly` with cron instead.');
-  else {
-    const x = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const jobs = [
-      { label: 'orch.reflect', cmd: 'npm run -s reflect', when: '<key>Hour</key><integer>23</integer><key>Minute</key><integer>40</integer>' },
-      { label: 'orch.prune', cmd: 'npm run -s reflect -- --weekly', when: '<key>Weekday</key><integer>0</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>10</integer>' },
-    ];
-    for (const j of jobs) {
-      const log = join(home, 'Library', 'Logs', `${j.label}.log`);
-      const plist = `<?xml version="1.0" encoding="UTF-8"?>
+// 5. launchd jobs (macOS): the routine scheduler always, the learning jobs with --nightly.
+const x = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function launchAgent(label: string, cmd: string, when: string) {
+  const log = join(home, 'Library', 'Logs', `${label}.log`);
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${j.label}</string>
-  <key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>${x(`cd ${q(root)} && ${j.cmd}`)}</string></array>
-  <key>StartCalendarInterval</key><dict>${j.when}</dict>
+  <key>Label</key><string>${label}</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>${x(`cd ${q(root)} && ${cmd}`)}</string></array>
+  ${when}
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>${x(process.env.PATH ?? '/usr/bin:/bin')}</string></dict>
   <key>StandardOutPath</key><string>${x(log)}</string>
   <key>StandardErrorPath</key><string>${x(log)}</string>
 </dict>
 </plist>
 `;
-      const dst = join(home, 'Library', 'LaunchAgents', `${j.label}.plist`);
-      if (!dry) {
-        mkdirSync(join(dst, '..'), { recursive: true });
-        spawnSync('launchctl', ['bootout', `gui/${process.getuid!()}`, dst]);
-        writeFileSync(dst, plist);
-        spawnSync('launchctl', ['bootstrap', `gui/${process.getuid!()}`, dst], { stdio: 'inherit' });
-      }
-      say(`  + ${j.label}`);
-    }
+  const dst = join(home, 'Library', 'LaunchAgents', `${label}.plist`);
+  if (!dry) {
+    mkdirSync(join(dst, '..'), { recursive: true });
+    spawnSync('launchctl', ['bootout', `gui/${process.getuid!()}`, dst]);
+    writeFileSync(dst, plist);
+    spawnSync('launchctl', ['bootstrap', `gui/${process.getuid!()}`, dst], { stdio: 'inherit' });
+  }
+}
+
+// Routines (routines/<name>.md) need a tick every minute that outlives any Claude session.
+say('\nRoutine scheduler');
+if (process.platform !== 'darwin') say('  · launchd is macOS only; run `npm run -s orch -- tick` every minute with cron instead.');
+else {
+  launchAgent('orch.routines', 'npm run -s orch -- tick', '<key>StartInterval</key><integer>60</integer><key>RunAtLoad</key><true/>');
+  say('  + orch.routines, checks routines/ every minute');
+}
+
+// Nightly learning jobs: reflect at 23:40, weekly memory prune on Sundays at 22:10.
+if (nightly) {
+  say('\nNightly jobs');
+  if (process.platform !== 'darwin') say('  · launchd is macOS only; schedule `npm run -s reflect` (nightly) and `npm run -s reflect -- --weekly` with cron instead.');
+  else {
+    launchAgent('orch.reflect', 'npm run -s reflect', '<key>StartCalendarInterval</key><dict><key>Hour</key><integer>23</integer><key>Minute</key><integer>40</integer></dict>');
+    say('  + orch.reflect');
+    launchAgent('orch.prune', 'npm run -s reflect -- --weekly', '<key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>10</integer></dict>');
+    say('  + orch.prune');
   }
 }
 
@@ -124,7 +133,6 @@ if (stateFeed) {
   say('\nState feed');
   if (process.platform !== 'darwin') say('  · launchd is macOS only; keep `npm run -s state` running with systemd or similar.');
   else {
-    const x = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const plist = readFileSync(join(root, 'launchd', 'orch.state.plist'), 'utf8')
       .replace('{{ORCH_DIR}}', x(q(root))).replace('{{PATH}}', x(process.env.PATH ?? '/usr/bin:/bin'))
       .replaceAll('{{LOG}}', x(join(home, 'Library', 'Logs', 'orch.state.log')));

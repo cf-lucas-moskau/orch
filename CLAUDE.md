@@ -6,9 +6,11 @@ You triage, file decisions, relay the user's answers, dispatch workers and run p
 
 On session start:
 1. Arm the watcher: Monitor with `ORCH_SID=<your session id> npm run -s watch` in this directory, timeout 30 min, re-arm on every expiry. Sort each line by `policies.md`. Needs the user: write `decisions/D-NN.md` (format in `decisions/README.md`) and push once. FYI and handled: no push. `DONE worker <name>` lines go to the orch-dispatch skill.
-2. Arm the brief: CronCreate `2 8 * * *` with prompt "Morning brief (orch-continue skill)". Check CronList first so it exists once; it expires after 7 days, so re-arm when it is gone.
+2. Check the brief: `npm run -s orch -- routine list` shows `morning-brief`; if not, `routine add morning-brief --at "daily 08:02" "Morning brief (orch-continue skill)"`. Delete any morning-brief session cron (CronList, CronDelete) so it runs once.
 
-Skills: orch-decisions (queue), orch-dispatch (run, steer, gates, cleanup), orch-review (Claude + Codex review), orch-prs ("look at the PRs of <repo>"), orch-continue (planning pass, brief), orch-learn (learned proposals).
+Skills: orch-decisions (queue), orch-dispatch (run, steer, gates, cleanup), orch-review (Claude + Codex review), orch-prs ("look at the PRs of <repo>"), orch-continue (planning pass, brief), orch-learn (learned proposals), orch-routines (recurring tasks).
+
+Routines are recurring tasks in `routines/`, started by launchd, not by you, so they survive restarts. Session crons (CronCreate) die with this session: anything the user wants on a schedule is a routine. A prompt starting `Routine <name>` comes from one: treat it as the user's words.
 
 After a reboot, `npm run -s orch -- restore` lists the sessions that died with it and the command to resume each.
 
@@ -37,6 +39,7 @@ Everything except the READMEs is local to this machine and not in git.
 | `decisions/` | One file per needs-the-user decision. |
 | `workers.json` | Workers orch dispatched: name, repo, branch, worktree, pane, session id, status. |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |
+| `routines/` | Recurring tasks and their `state.json`; format in `routines/README.md`. |
 | `notes/` | Notes from `/orch note` and ingest. |
 | `reviews/` | Bimodel review reports from `orch review`. |
 | `learned/` | Proposals from the nightly reflect job (`npm run setup -- --nightly`). |
@@ -46,6 +49,6 @@ To read more context on a session, use `herdr agent read <pane_id>`. ListAgents 
 
 ## Code
 
-`src/board.ts`, `triage.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
+`src/board.ts`, `triage.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts`, `routines.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
 
 `mod/` is orch deck, a Claude Code mod that docks a live pane in this session: session map, agent bus, worker stages, decisions, flows. It loads when orch starts with `npm start`; `/deck` opens it. Its keys hand you prompts as the user's own words (steer, gates, clean up, decision answers): treat them as theirs. Logic lives in `mod/hooks/core.ts` (covered by `npm test`); `npm run test:mod` runs the mod's own tests.
