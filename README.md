@@ -50,6 +50,7 @@ Just talk to it.
 | review my-app #118 | Claude and Codex review the PR separately; findings both agree on count, the rest get checked against the code. |
 | look at the PRs of my-app | Starts workers for review comments on your PRs and drafts reviews for your colleagues' PRs. |
 | continue my-app | Plans the next steps toward a goal you gave it and dispatches workers up to your cap. |
+| every weekday at 8:30, look at the PRs of my-app | Sets up a routine. launchd starts it on time, so it keeps running when orch restarts or the Mac reboots. "routines" lists them. |
 
 orch also sends a phone notification when something new needs you and a brief every morning at 08:00.
 

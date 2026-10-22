@@ -1,7 +1,7 @@
-// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, and the PR commands.
+// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, and routines.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
@@ -12,6 +12,7 @@ import {
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
 import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrState } from './prs.ts';
+import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -449,6 +450,150 @@ function merge([repoArg, n, ...args]: string[]) {
   console.log(`merged #${pr}`);
 }
 
+// Routines: routines/<name>.md, due ones started by `tick`, which launchd runs every minute (npm run setup installs it).
+const ROUTINE_DIR = join(root, 'routines');
+const SCHEDULER = join(homedir(), 'Library', 'LaunchAgents', 'orch.routines.plist');
+const DEFAULT_TOOLS = 'Read Grep Glob WebSearch WebFetch';
+const loadState = (): Record<string, RoutineState> => JSON.parse(read('routines/state.json', '{}'));
+function saveState(name: string, patch: Partial<RoutineState> | null) {
+  const all = loadState();
+  if (patch) all[name] = { ...all[name], ...patch }; else delete all[name];
+  mkdirSync(ROUTINE_DIR, { recursive: true });
+  const tmp = join(ROUTINE_DIR, `.state-${process.pid}.json`);
+  writeFileSync(tmp, JSON.stringify(all, null, 2) + '\n');
+  renameSync(tmp, join(ROUTINE_DIR, 'state.json'));
+}
+const routineNames = () => existsSync(ROUTINE_DIR) ? readdirSync(ROUTINE_DIR).filter(f => f.endsWith('.md') && f !== 'README.md').map(f => f.slice(0, -3)) : [];
+const loadRoutine = (name: string) => parseRoutine(read(`routines/${name}.md`), name);
+const alive = (pid?: number) => { try { return !!pid && process.kill(pid, 0); } catch { return false; } };
+const self = (...a: string[]) => spawnSync(process.execPath, [...process.execArgv, join(import.meta.dirname, 'orch.ts'), ...a], { cwd: root, encoding: 'utf8' });
+const when = (d: Date) => d.toLocaleString('sv-SE').slice(0, 16);
+const toOrch = (text: string) => {
+  const o = orchPane(live(), root);
+  if (!o) return { ok: false, msg: 'orch is not running' };
+  const r = self('steer', o.pane_id, text.replace(/\s*\n\s*/g, ' '));
+  return { ok: r.status === 0, msg: (r.stdout || r.stderr).trim() };
+};
+
+// retry: nothing happened and the same slot is tried again next tick (orch busy, cap full).
+function execRoutine(r: Routine, slot: Date): { ok: boolean; retry?: boolean; msg: string } {
+  if (r.mode === 'orch') {
+    const s = toOrch(`Routine ${r.name} (${r.schedule}): ${r.prompt}`);
+    return s.ok ? { ok: true, msg: 'handed to orch' } : { ok: false, retry: true, msg: s.msg };
+  }
+  const p = r.repo ? resolveProject(r.repo, projects(), gitTop) : null;
+  if (r.repo && !p) return { ok: false, msg: `${r.repo} is not a registered repo or a repo under the code dir` };
+  if (r.mode === 'worker') {
+    const name = runName(r, slot);
+    const w = self('run', r.repo, name, r.prompt);
+    if (w.status === 0) return { ok: true, msg: `worker ${name}: ${w.stdout.trim()}` };
+    return { ok: false, retry: /cap reached/.test(w.stderr), msg: w.stderr.trim().split('\n')[0] };
+  }
+  const c = spawnSync('claude', ['-p', '--output-format', 'text', '--allowedTools', r.tools || DEFAULT_TOOLS], {
+    cwd: p?.path ?? root, input: r.prompt, encoding: 'utf8', timeout: 30 * 60_000, env: { ...process.env, ORCH_DIR: '/nonexistent' },
+  });
+  if (c.status !== 0 || !c.stdout.trim()) return { ok: false, msg: `claude -p failed (${c.status ?? c.signal}): ${(c.stderr || '').trim().slice(0, 200)}` };
+  const note = `notes/routines/${when(slot).replace(' ', '-').replace(':', '')}-${r.name}.md`;
+  mkdirSync(join(root, 'notes', 'routines'), { recursive: true });
+  writeFileSync(join(root, note), `# Routine ${r.name}, ${when(slot)}\n\n${c.stdout.trim()}\n`);
+  toOrch(`Routine ${r.name} ran headless; its result is in ${note}. Read it and tell me what matters, briefly.`);
+  return { ok: true, msg: `result in ${note}` };
+}
+
+function routineExec(name: string, slotIso?: string) {
+  const r = loadRoutine(name) ?? die(`no valid routines/${name}.md`);
+  const slot = slotIso ? new Date(slotIso) : new Date();
+  let res: ReturnType<typeof execRoutine>;
+  try { res = execRoutine(r, slot); } catch (e: any) { res = { ok: false, msg: e.message }; }
+  const status = res.ok ? 'ok' : res.retry ? 'waiting' : 'failed';
+  const was = loadState()[name]?.result ?? '';
+  saveState(name, { running: undefined, result: `${when(new Date())} ${status}: ${res.msg}`, ...(res.retry ? {} : { last: slot.toISOString() }) });
+  if (!res.retry || !was.includes('waiting')) log(`routine ${name} (${r.mode}, slot ${when(slot)}): ${status}, ${res.msg.slice(0, 160)}`);
+  console.log(`${name}: ${status}, ${res.msg}`);
+}
+
+function tick() {
+  const now = new Date();
+  const state = loadState();
+  for (const name of routineNames()) {
+    const r = loadRoutine(name), s = state[name] ?? {};
+    if (!r) {
+      if (s.result !== 'invalid file') { saveState(name, { result: 'invalid file' }); log(`routine ${name}: invalid file, not run`); }
+      continue;
+    }
+    if (r.paused || alive(s.running)) continue;
+    // A routine written by hand starts counting from the first tick that sees it.
+    if (!s.last) { saveState(name, { last: now.toISOString() }); continue; }
+    const d = due(parseSchedule(r.schedule)!, new Date(s.last), now);
+    if (!d) continue;
+    if ('skip' in d) {
+      saveState(name, { last: d.skip.toISOString(), result: `${when(now)} skipped the ${when(d.skip)} run: missed by more than 12h` });
+      log(`routine ${name}: skipped the ${when(d.skip)} run, missed by more than 12h (asleep or off)`);
+      continue;
+    }
+    const c = spawn(process.execPath, [...process.execArgv, join(import.meta.dirname, 'orch.ts'), 'routine', 'exec', name, d.run.toISOString()],
+      { cwd: root, detached: true, stdio: 'ignore' });
+    c.unref();
+    saveState(name, { running: c.pid });
+  }
+}
+
+function routine([sub, name, ...args]: string[]) {
+  const usage = 'usage: orch routine add <name> --at "<schedule>" [--mode orch|worker|headless] [--repo <repo>] [--tools "<tools>"] <prompt>\n'
+    + '       orch routine list | run <name> | pause <name> | resume <name> | rm <name>';
+  if (sub === 'list' || !sub) {
+    const state = loadState();
+    const names = routineNames();
+    if (!names.length) return console.log('no routines');
+    for (const n of names) {
+      const r = loadRoutine(n), s = state[n] ?? {};
+      if (!r) { console.log(`${n}: invalid file`); continue; }
+      const next = r.paused ? 'paused' : `next ${when(nextRun(parseSchedule(r.schedule)!, new Date(s.last ?? Date.now()), new Date()))}`;
+      console.log(`${n} [${r.schedule}, ${r.mode}${r.repo ? ` on ${r.repo}` : ''}] ${next}; last: ${s.result ?? 'never ran'}`);
+    }
+    if (process.platform === 'darwin' && !existsSync(SCHEDULER)) console.log('scheduler not installed: run npm run setup');
+    return;
+  }
+  if (!name) die(usage);
+  if (sub === 'exec') return routineExec(name, args[0]);
+  if (sub === 'add') {
+    const flag = (f: string) => args.includes(f) ? args[args.indexOf(f) + 1] : '';
+    const flags = ['--at', '--mode', '--repo', '--tools'];
+    const prompt = args.filter((a, i) => !flags.includes(a) && !flags.includes(args[i - 1])).join(' ').trim();
+    if (!validRoutineName(name)) die('name must match [a-z][a-z0-9_-]{0,21}');
+    if (existsSync(join(ROUTINE_DIR, `${name}.md`))) die(`routines/${name}.md exists; edit it or rm it first`);
+    if (!parseSchedule(flag('--at'))) die('schedule examples: "weekdays 08:30", "mon,thu 09:00,14:00", "daily 23:00", "every 2h", "every 30m"');
+    const repo = flag('--repo');
+    if (repo) project(repo);
+    const r = parseRoutine(renderRoutine({ name, schedule: flag('--at'), mode: (flag('--mode') || (repo ? 'worker' : 'orch')) as Mode, repo, tools: flag('--tools'), paused: false, prompt }), name)
+      ?? die(`${usage}\nworker mode needs --repo; the prompt must not be empty`);
+    mkdirSync(ROUTINE_DIR, { recursive: true });
+    writeFileSync(join(ROUTINE_DIR, `${name}.md`), renderRoutine(r));
+    const now = new Date();
+    saveState(name, { last: now.toISOString(), result: undefined, running: undefined });
+    log(`routine add ${name} [${r.schedule}, ${r.mode}${r.repo ? ` on ${r.repo}` : ''}]: ${r.prompt.slice(0, 120)}`);
+    console.log(`added ${name}, next run ${when(nextRun(parseSchedule(r.schedule)!, now, now))}`);
+    if (process.platform === 'darwin' && !existsSync(SCHEDULER)) console.log('the scheduler is not installed yet: run npm run setup');
+    return;
+  }
+  const r = loadRoutine(name) ?? die(`no valid routines/${name}.md`);
+  if (sub === 'run') return routineExec(name);
+  if (sub === 'pause' || sub === 'resume') {
+    writeFileSync(join(ROUTINE_DIR, `${name}.md`), renderRoutine({ ...r, paused: sub === 'pause' }));
+    // Resuming starts from now, so paused slots are not made up.
+    if (sub === 'resume') saveState(name, { last: new Date().toISOString() });
+    log(`routine ${sub} ${name}`);
+    return console.log(`${name} ${sub === 'pause' ? 'paused' : 'resumed'}`);
+  }
+  if (sub === 'rm') {
+    rmSync(join(ROUTINE_DIR, `${name}.md`));
+    saveState(name, null);
+    log(`routine rm ${name}`);
+    return console.log(`${name} removed`);
+  }
+  die(usage);
+}
+
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, routine, tick };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

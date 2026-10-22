@@ -7,7 +7,10 @@ export type Worker = {
   name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
   workspace: string; pane: string; sid: string; started: string; status: 'running' | 'closed';
 };
-export type Live = { agent_status: string; focused?: boolean; pane_id: string; name?: string; agent_session?: { value?: string } };
+export type Live = {
+  agent_status: string; focused?: boolean; pane_id: string; name?: string; agent_session?: { value?: string };
+  agent?: string; cwd?: string; terminal_title_stripped?: string;
+};
 
 const cells = (line: string) => line.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
 const codeSpans = (s: string) => [...s.matchAll(/`([^`]+)`/g)].map(m => m[1]);
