@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
 import {
-  canDispatch, canSteer, cleanupBlocker, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
-  restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Kind, type Live, type Project, type Worker,
+  canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
+  restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
 import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrState } from './prs.ts';
@@ -45,6 +45,27 @@ const projectOf = (w: Worker): Project =>
 const project = (arg: string) => resolveProject(arg, projects(), gitTop) ?? die(`${arg} is not a registered repo, a git path, or a repo under ORCH_CODE_DIR (default ~/code)`);
 // local.md holds the user's own overrides, including the cap.
 const cap = () => parseCap(read('local.md') + read('policies.md'));
+
+// Free space on the volume orch (and the user's data) lives on; on macOS that is the Data volume, not /.
+function disk(): Disk | undefined {
+  const r = spawnSync('df', ['-k', root], { encoding: 'utf8' });
+  const kb = Number(r.stdout?.trim().split('\n')[1]?.split(/\s+/)[3]);
+  return Number.isFinite(kb) ? { freeGb: Math.floor(kb / 1048576), floorGb: parseDiskFloor(read('local.md') + read('policies.md')) } : undefined;
+}
+const CLAUDE_TMP = `/private/tmp/claude-${process.getuid?.() ?? 501}`;
+const sizeKb = (path: string) => Number(spawnSync('du', ['-sk', path], { encoding: 'utf8', timeout: 60_000 }).stdout?.split('\t')[0]) || 0;
+// What orch knows takes space: running workers' worktrees, Claude's scratch folders, Docker's disk image.
+function topConsumers(): string {
+  const paths = [...loadWorkers().filter(w => w.status === 'running').map(w => w.worktree), CLAUDE_TMP,
+    join(homedir(), 'Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw')].filter(p => existsSync(p));
+  return renderConsumers(paths.map(path => ({ path, kb: sizeKb(path) })));
+}
+function dispatchable(workers: Worker[], name: string) {
+  const blocker = canDispatch(workers, cap(), name, live(), disk());
+  if (blocker) die(blocker.startsWith('disk floor')
+    ? `${blocker}\ntop consumers orch knows about:\n${topConsumers()}\nfree space first: scripts/disk-hygiene.sh --dry-run`
+    : blocker);
+}
 // poteto-mode needs pstack; without it workers get the plain prompt.
 const hasPstack = () => { try { return readFileSync(join(homedir(), '.claude/plugins/installed_plugins.json'), 'utf8').includes('"pstack@'); } catch { return false; } };
 const worker = (name: string) => loadWorkers().find(w => w.name === name && w.status === 'running') ?? die(`no running worker ${name}`);
@@ -88,10 +109,7 @@ function run([repoArg, name, ...args]: string[]) {
   const workers = loadWorkers();
   const names = kind === 'both' ? [pairNames(name).claude, pairNames(name).codex] : [name];
   if (kind === 'both' && name.length > 29) die('pair names add -cl/-cx; keep the name to 29 characters');
-  for (let i = 0; i < names.length; i++) {
-    const blocker = canDispatch([...workers, ...names.slice(0, i).map(() => ({ status: 'running' }) as Worker)], cap(), names[i], live());
-    if (blocker) die(blocker);
-  }
+  for (let i = 0; i < names.length; i++) dispatchable([...workers, ...names.slice(0, i).map(() => ({ status: 'running' }) as Worker)], names[i]);
   const base = git(p.path, 'rev-parse', from ?? 'HEAD').trim();
   if (kind === 'both') {
     startWorker(p, names[0], 'claude', task, { pair: name, base }, from);
@@ -188,9 +206,18 @@ function cleanup([name, flag]: string[]) {
     const r = herdr('worktree', 'remove', '--workspace', w.workspace, ...(abandon ? ['--force'] : []));
     if (r.error) git(w.worktree, 'worktree', 'remove', ...(abandon ? ['--force'] : []), w.worktree);
   }
+  // A worker's local stack and scratch folder die with it. Docker being down is not an error.
+  const ls = spawnSync('docker', ['compose', 'ls', '-a', '--format', 'json'], { encoding: 'utf8', timeout: 20_000 });
+  let stacks: string[] = [];
+  try { stacks = ls.status === 0 ? workerComposeProjects(w, JSON.parse(ls.stdout || '[]')) : []; } catch {}
+  const downed = stacks.filter(s => spawnSync('docker', ['compose', '-p', s, 'down', '-v'], { cwd: homedir(), encoding: 'utf8', timeout: 120_000 }).status === 0);
+  const scratch = scratchDir(CLAUDE_TMP, w.worktree);
+  const hadScratch = existsSync(scratch);
+  rmSync(scratch, { recursive: true, force: true });
   saveWorkers(loadWorkers().map(x => x.name === name && x.status === 'running' ? { ...x, status: 'closed' } : x));
-  log(`cleanup ${name}${abandon ? ' (abandoned, the user decided)' : ''}: pane ${w.pane} closed, worktree removed, branch ${w.branch} kept`);
-  console.log(`${name} cleaned up; branch ${w.branch} kept`);
+  const extra = [downed.length ? `compose ${downed.join(', ')} down -v` : '', hadScratch ? 'scratch folder deleted' : ''].filter(Boolean).join(', ');
+  log(`cleanup ${name}${abandon ? ' (abandoned, the user decided)' : ''}: pane ${w.pane} closed, worktree removed${extra ? `, ${extra}` : ''}, branch ${w.branch} kept`);
+  console.log(`${name} cleaned up${extra ? ` (${extra})` : ''}; branch ${w.branch} kept`);
 }
 
 function workers() {
@@ -386,8 +413,7 @@ function address([repoArg, n, ...args]: string[]) {
   const { me, prs } = openPrs(p);
   const t = triagePrs(prs, me).find(x => x.pr.number === Number(n.replace('#', ''))) ?? die(`#${n} is not an open PR in ${p.repo}`);
   if (t.kind !== 'address') die(`#${t.pr.number} has no colleague feedback to address (${t.kind})`);
-  const blocker = canDispatch(loadWorkers(), cap(), `pr${t.pr.number}`, live());
-  if (blocker) die(blocker);
+  dispatchable(loadWorkers(), `pr${t.pr.number}`);
   git(p.path, 'fetch', '-q', 'origin', t.pr.headRefName);
   const from = `origin/${t.pr.headRefName}`;
   startWorker(p, `pr${t.pr.number}`, kind, addressTask(t.pr, t.feedback),
