@@ -71,13 +71,39 @@ export function parseCap(policies: string): number {
   return m ? Number(m[1]) : 4;
 }
 
+// Free space below this on the data volume stalls every worker, so none starts. local.md overrides it.
+export function parseDiskFloor(text: string): number {
+  const m = text.match(/disk floor[^\d]*(\d+)/i);
+  return m ? Number(m[1]) : 20;
+}
+
+export type Disk = { freeGb: number; floorGb: number };
+export const lowDisk = (d?: Disk) => !!d && d.freeGb < d.floorGb;
+
 export const validName = (n: string) => /^[a-z][a-z0-9_-]{0,31}$/.test(n);
 
-export function canDispatch(workers: Worker[], cap: number, name: string, live: Live[]): string | null {
+export function canDispatch(workers: Worker[], cap: number, name: string, live: Live[], disk?: Disk): string | null {
   if (!validName(name)) return `name must match [a-z][a-z0-9_-]{0,31}`;
   if (live.some(a => a.name === name)) return `a live agent is already named ${name}`;
+  if (lowDisk(disk)) return `disk floor: ${disk!.freeGb} GB free on the data volume, floor is ${disk!.floorGb} GB (Disk floor in local.md)`;
   const running = workers.filter(w => w.status === 'running').length;
   return running >= cap ? `concurrency cap reached (${running}/${cap})` : null;
+}
+
+// Biggest first, in GB with one decimal; what orch can point at when the disk is low.
+export const renderConsumers = (cs: { path: string; kb: number }[], n = 8) =>
+  [...cs].sort((a, b) => b.kb - a.kb).slice(0, n).map(c => `${(c.kb / 1048576).toFixed(1).padStart(6)} GB  ${c.path}`).join('\n');
+
+// Claude Code's per-folder scratch dir: the cwd with every non-alphanumeric character turned into a dash.
+export const scratchDir = (tmpRoot: string, cwd: string) => `${tmpRoot}/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}`;
+
+// Compose projects a worker started: config files inside its worktree, whatever -p it chose, or the
+// names workers have used (orch-<name>, <repo>-<name>, orch-<repo>-<name>, the worktree folder).
+export type ComposeProject = { Name: string; ConfigFiles?: string };
+export function workerComposeProjects(w: Pick<Worker, 'name' | 'repo' | 'worktree'>, ps: ComposeProject[]): string[] {
+  const names = new Set([`orch-${w.name}`, `${w.repo}-${w.name}`, `orch-${w.repo}-${w.name}`, w.worktree.split('/').at(-1)!].map(n => n.toLowerCase()));
+  const inside = (f: string) => w.worktree && f.trim().startsWith(`${w.worktree}/`);
+  return ps.filter(p => names.has(p.Name) || (p.ConfigFiles ?? '').split(',').some(inside)).map(p => p.Name);
 }
 
 // What the user has typed into a Claude (❯) or Codex (›) input box, from an ANSI screen.
@@ -155,6 +181,7 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     // Questions that stay in scope cost Lucas a round trip; settle them in the worker.
     `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
     `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done. Stop processes by PID, never by name pattern; other workers run on the same machine.`,
+    `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
 }

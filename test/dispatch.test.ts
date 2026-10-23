@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickWinner, resolveProject, score, canDispatch, canSteer, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -34,6 +34,36 @@ test('dispatch refuses bad names, taken names and a full cap', () => {
   assert.equal(canDispatch([w('a'), w('b', 'closed')], 2, 'c', []), null);
 });
 
+test('dispatch refuses below the disk floor, which local.md can set', () => {
+  assert.equal(parseDiskFloor('Disk floor: 35 GB'), 35);
+  assert.equal(parseDiskFloor('Concurrency cap: 2 workers'), 20);
+  assert.equal(canDispatch([], 4, 'c', [], { freeGb: 12, floorGb: 20 }), 'disk floor: 12 GB free on the data volume, floor is 20 GB (Disk floor in local.md)');
+  assert.equal(canDispatch([], 4, 'c', [], { freeGb: 20, floorGb: 20 }), null);
+  assert.match(canDispatch([], 4, 'Bad', [], { freeGb: 1, floorGb: 20 })!, /name must match/, 'a bad name is reported first');
+});
+
+test('top consumers are listed biggest first in GB', () => {
+  assert.equal(renderConsumers([{ path: '/a', kb: 1048576 }, { path: '/b', kb: 5 * 1048576 }, { path: '/c', kb: 524288 }], 2),
+    '   5.0 GB  /b\n   1.0 GB  /a');
+});
+
+test('a worker scratch dir is its worktree path with dashes', () => {
+  assert.equal(scratchDir('/private/tmp/claude-501', '/Users/lucas/.herdr/worktrees/orch/orch-disk'),
+    '/private/tmp/claude-501/-Users-lucas--herdr-worktrees-orch-orch-disk');
+});
+
+test('compose projects of a worker match by name or by config files in its worktree', () => {
+  const wk = { name: 'pulse-social', repo: 'tiki-pulse', worktree: '/h/.herdr/worktrees/tiki-pulse/orch-pulse-social' };
+  const ps = [
+    { Name: 'orch-pulse-social', ConfigFiles: '/elsewhere/docker-compose.yml' },
+    { Name: 'pulsesocialwk', ConfigFiles: '/h/.herdr/worktrees/tiki-pulse/orch-pulse-social/docker-compose.dev.yml' },
+    { Name: 'tiki-pulse-pulse-social' },
+    { Name: 'orch-pulse-social2', ConfigFiles: '/h/.herdr/worktrees/tiki-pulse/orch-pulse-social2/docker-compose.yml' },
+    { Name: 'tiki-pulse', ConfigFiles: '/h/code/tiki-pulse/docker-compose.yml' },
+  ];
+  assert.deepEqual(workerComposeProjects(wk, ps), ['orch-pulse-social', 'pulsesocialwk', 'tiki-pulse-pulse-social']);
+});
+
 test('steering skips focused and blocked panes', () => {
   assert.equal(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' }), null, 'focused but empty input: send');
   assert.match(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' }, 'half a sentence')!, /typing/);
@@ -63,6 +93,7 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /leave your changes uncommitted; orch runs the gates and commits/);
   assert.match(b, /in-scope implementation and investigation calls yourself/);
   assert.match(b, /bound to 127\.0\.0\.1/);
+  assert.match(b, /^Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal\.$/m);
   const p = workerPrompt({ name: 'flag', kind: 'claude' }, '/x/briefs/flag.md');
   assert.equal(p, '/pstack:poteto-mode You are worker flag, dispatched by orch. Read your brief at /x/briefs/flag.md and follow it.');
   assert.ok(!p.includes('\n'));

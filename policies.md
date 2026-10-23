@@ -26,6 +26,8 @@ orch relays an answer only after the user gives it, word for word, with `npm run
 
 Concurrency cap: 4 workers. Everything runs on one machine; raise it in `local.md` if yours has room.
 
+Disk floor: 20 GB. `orch run` starts no worker while the data volume has less free; `scripts/disk-hygiene.sh --dry-run` shows what can go. Set it in `local.md`.
+
 Each worker runs in its own herdr worktree on branch `orch/<name>`, leaves its changes for orch to commit once the gates pass, and never pushes, merges, opens PRs, deploys or touches databases; those come back as decisions.
 
 Every brief tells the worker to make in-scope implementation and investigation calls itself and report them; it stops only for outward-facing or irreversible actions or a scope change. A worker question that carries a clear recommendation and stays in scope is steered back with "go with your recommendation" only after the user has approved that once for the worker; until then it is needs the user.
