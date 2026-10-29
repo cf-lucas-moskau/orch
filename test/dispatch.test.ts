@@ -52,7 +52,7 @@ test('a worker scratch dir is its worktree path with dashes', () => {
     '/private/tmp/claude-501/-Users-lucas--herdr-worktrees-orch-orch-disk');
 });
 
-test('compose projects of a worker match by name or by config files in its worktree', () => {
+test('compose projects of a worker match by name only, never by config files', () => {
   const wk = { name: 'pulse-social', repo: 'tiki-pulse', worktree: '/h/.herdr/worktrees/tiki-pulse/orch-pulse-social' };
   const ps = [
     { Name: 'orch-pulse-social', ConfigFiles: '/elsewhere/docker-compose.yml' },
@@ -61,7 +61,9 @@ test('compose projects of a worker match by name or by config files in its workt
     { Name: 'orch-pulse-social2', ConfigFiles: '/h/.herdr/worktrees/tiki-pulse/orch-pulse-social2/docker-compose.yml' },
     { Name: 'tiki-pulse', ConfigFiles: '/h/code/tiki-pulse/docker-compose.yml' },
   ];
-  assert.deepEqual(workerComposeProjects(wk, ps), ['orch-pulse-social', 'pulsesocialwk', 'tiki-pulse-pulse-social']);
+  assert.deepEqual(workerComposeProjects(wk, ps), ['orch-pulse-social', 'tiki-pulse-pulse-social']);
+  const b1 = { name: 'b1', repo: 'evrloot-next', worktree: '/h/.herdr/worktrees/evrloot-next/orch-b1' };
+  assert.deepEqual(workerComposeProjects(b1, [{ Name: 'evr-b1', ConfigFiles: '/h/.herdr/worktrees/evrloot-next/orch-b1/packages/db/compose.yaml' }]), [], 'a kept stack started from the worktree survives');
 });
 
 test('steering skips focused and blocked panes', () => {

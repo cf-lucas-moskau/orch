@@ -8,7 +8,7 @@ Every event the watcher prints is sorted into one of three buckets.
 
 Needs the user: a session is blocked on a permission prompt, asks a question, or waits on an approval. Anything touching commits, pushes, merges, deploys, DB writes, outward-facing actions (PR comments, Slack, email, Jira) or money is always needs the user, even if the session only proposes it, except what Autonomy below switches on. A long task that finished and now sits idle waiting for "go" counts too.
 
-FYI: a session finished and reported, nothing pending. Shown when the user asks, never pushed.
+FYI: a session finished and reported, nothing pending. Shown when the user asks, never pushed. Exception: when a worker or session the user asked for finishes, orch says so in its own chat in one line with the result, right away.
 
 Handled: interim progress, subagent chatter, the user already typing in that pane (herdr `focused`), or orch's own session. Dropped.
 
@@ -31,6 +31,10 @@ Disk floor: 20 GB. `orch run` starts no worker while the data volume has less fr
 Each worker runs in its own herdr worktree on branch `orch/<name>`, leaves its changes for orch to commit once the gates pass, and never pushes, merges, opens PRs, deploys or touches databases; those come back as decisions.
 
 Every brief tells the worker to make in-scope implementation and investigation calls itself and report them; it stops only for outward-facing or irreversible actions or a scope change. A worker question that carries a clear recommendation and stays in scope is steered back with "go with your recommendation" only after the user has approved that once for the worker; until then it is needs the user.
+
+A deploy is done only when orch has had each changed feature played end to end on the deployed URL in a real browser, with every asset loading (no 404s), and has reviewed those screenshots. Passing tests on a worker's own stack don't count as proof of a deploy.
+
+Screenshots are evidence only after review. Every brief tells the worker to look at each screenshot critically before showing it and to list the flaws it sees. orch does the same before relaying any image to the user: open it, look for misplaced UI, clipping, characters where they can't stand, seams and wrong labels, and either send it back as a defect or name the flaws next to it.
 
 When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, then push and merge as Autonomy allows; whatever it doesn't allow becomes a decision. Fail: steer the worker once with the failing output; a second failure is needs the user.
 
