@@ -31,6 +31,8 @@ function follow(d: string) {
     const w = json('workers.json', []).find((x: any) => x.status === 'running' && x.worktree === e.cwd);
     const s = names()[e.sid] ?? (w ? { name: `worker ${w.name}`, pane: w.pane } : { name: e.sid.slice(0, 8), pane: '?' });
     const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
+    // Workers' helper subagents end with an empty DONE from a session orch doesn't know; nothing to act on.
+    if (kind === 'done' && !text.trim() && s.pane === '?') return;
     console.log(`${kind.toUpperCase()} ${s.name} [${s.pane}] ${e.sid.slice(0, 8)}: ${text}`);
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.

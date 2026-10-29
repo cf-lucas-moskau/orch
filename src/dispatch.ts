@@ -97,13 +97,15 @@ export const renderConsumers = (cs: { path: string; kb: number }[], n = 8) =>
 // Claude Code's per-folder scratch dir: the cwd with every non-alphanumeric character turned into a dash.
 export const scratchDir = (tmpRoot: string, cwd: string) => `${tmpRoot}/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}`;
 
-// Compose projects a worker started: config files inside its worktree, whatever -p it chose, or the
-// names workers have used (orch-<name>, <repo>-<name>, orch-<repo>-<name>, the worktree folder).
+// Compose projects a worker started, by the names workers use (orch-<name>, <repo>-<name>,
+// orch-<repo>-<name>, the worktree folder).
 export type ComposeProject = { Name: string; ConfigFiles?: string };
+// Cleanup runs `down -v` on these, so they match by name only. Compose keeps the config
+// path a project was first started from, so a stack a worker created and the user kept
+// (evr-b1, Lucas's live world) still points into the worktree long after.
 export function workerComposeProjects(w: Pick<Worker, 'name' | 'repo' | 'worktree'>, ps: ComposeProject[]): string[] {
   const names = new Set([`orch-${w.name}`, `${w.repo}-${w.name}`, `orch-${w.repo}-${w.name}`, w.worktree.split('/').at(-1)!].map(n => n.toLowerCase()));
-  const inside = (f: string) => w.worktree && f.trim().startsWith(`${w.worktree}/`);
-  return ps.filter(p => names.has(p.Name) || (p.ConfigFiles ?? '').split(',').some(inside)).map(p => p.Name);
+  return ps.filter(p => names.has(p.Name)).map(p => p.Name);
 }
 
 // What the user has typed into a Claude (❯) or Codex (›) input box, from an ANSI screen.
@@ -181,6 +183,10 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     // Questions that stay in scope cost Lucas a round trip; settle them in the worker.
     `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
     `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done. Stop processes by PID, never by name pattern; other workers run on the same machine.`,
+    // Lucas found a flaw in almost every screenshot workers presented as proof (2026-10-24).
+    `Screenshots: before you report or show one, open it and review it critically as a player would. List every flaw you see (misplaced UI, clipping, a character standing where it can't, seams, wrong labels) and fix it or name it. Never present a screenshot as proof without that review.`,
+    // Auto mode stops on rm with globs or variables (b3, ew2 on 2026-10-26); nobody is there to approve it.
+    `Deleting files: never rm with a glob or an unquoted variable; it stops on a permission prompt nobody answers. Write literal paths, or use find <dir> -mindepth 1 -delete, or write to a fresh folder instead.`,
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');

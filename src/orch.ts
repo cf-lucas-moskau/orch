@@ -71,8 +71,16 @@ const hasPstack = () => { try { return readFileSync(join(homedir(), '.claude/plu
 const worker = (name: string) => loadWorkers().find(w => w.name === name && w.status === 'running') ?? die(`no running worker ${name}`);
 
 // Submit and confirm the session picked it up, without waiting for the whole turn.
+// A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28):
+// clear the input line and send it once more before giving up.
 function submit(target: string, text: string) {
-  const r = herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
+  const send = () => herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
+  let r = send();
+  if (r.error?.code === 'agent_prompt_stalled') {
+    spawnSync('sleep', ['3']);
+    herdr('agent', 'send-keys', target, 'ctrl+u');
+    r = send();
+  }
   if (r.error) die(`prompt to ${target} failed: ${r.error.code} ${r.error.message}`);
   return r.result.agent.agent_status as string;
 }
@@ -97,7 +105,8 @@ function run([repoArg, name, ...args]: string[]) {
   const flag = (f: string) => args.includes(f) ? args[args.indexOf(f) + 1] : undefined;
   const k = args.indexOf('--kind');
   const rest = args.filter((a, i) => !['--kind', '--from'].includes(a) && !['--kind', '--from'].includes(args[i - 1]));
-  const from = flag('--from');
+  // Without --from, start from the remote's default branch: a stale local checkout put two audit workers 395 commits behind (2026-10-27).
+  const from = flag('--from') ?? remoteDefault(project(repoArg).path);
   const p = project(repoArg);
   const planFile = `plans/${p.repo}.md`;
   const plan = parsePlan(read(planFile));
@@ -116,6 +125,20 @@ function run([repoArg, name, ...args]: string[]) {
     startWorker(p, names[1], 'codex', task, { pair: name, base }, from);
   } else startWorker(p, name, kind as Kind, task, { base }, from);
   if (planned) writeFileSync(join(root, planFile), setTaskState(read(planFile), name, 'running'));
+}
+
+function remoteDefault(path: string): string | undefined {
+  try {
+    git(path, 'fetch', '-q', 'origin');
+    const remote = git(path, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').trim();
+    if (!remote) return undefined;
+    // A local default branch ahead of the remote (unpushed commits, as in kurswert on 2026-10-28) is the newer base.
+    const local = remote.replace(/^origin\//, '');
+    const ahead = spawnSync('git', ['-C', path, 'merge-base', '--is-ancestor', remote, local]).status === 0;
+    return ahead ? local : remote;
+  } catch {
+    return undefined;
+  }
 }
 
 function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string }, from?: string) {
@@ -165,7 +188,7 @@ function steer([target, ...rest]: string[]) {
 }
 
 // Runs the repo's gates in the worker's worktree and, on a pass, makes the worker's one local commit.
-function runGates(w: Worker): { passed: boolean; report: string } {
+function runGates(w: Worker, title?: string): { passed: boolean; report: string } {
   const p = projectOf(w);
   const lines: string[] = [];
   let failed = 0;
@@ -179,15 +202,16 @@ function runGates(w: Worker): { passed: boolean; report: string } {
   }
   if (!failed && git(w.worktree, 'status', '--porcelain').trim()) {
     git(w.worktree, 'add', '-A');
-    git(w.worktree, 'commit', '-q', '-m', `${w.task.split('\n')[0].slice(0, 72)}\n\nWritten by ${w.kind ?? 'claude'} worker ${w.name}, committed by orch after the gates passed.`);
+    git(w.worktree, 'commit', '-q', '-m', `${(title ?? w.task.split('\n')[0]).slice(0, 72)}\n\nWritten by ${w.kind ?? 'claude'} worker ${w.name}, committed by orch after the gates passed.`);
     lines.push(`committed: ${git(w.worktree, 'log', '--oneline', '-1').trim()}`);
   }
   log(`gates ${w.name}: ${failed ? `${failed} failed` : p.gates.length ? 'all passed' : 'none registered'}`);
   return { passed: !failed, report: lines.join('\n') };
 }
 
-function gates([name]: string[]) {
-  const r = runGates(worker(name));
+// gates <worker> [-m "<commit title>"]: reused workers keep their first brief, so name the round.
+function gates([name, flag, title]: string[]) {
+  const r = runGates(worker(name), flag === '-m' ? title : undefined);
   console.log(r.report);
   process.exit(r.passed ? 0 : 1);
 }
