@@ -12,12 +12,12 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | --- | --- |
 | `list` | Every idea with its state, and whether the bridge is on. |
 | `fake "<text>" --as <user> [--in <id>]` | Mock only: post as someone, in the channel or in an idea's thread. Mock user ids are names. |
-| `say <id> <text\|file>` | Reply in the idea's thread. |
-| `plan <id> <file\|text>` | Post the plan with "Reply **go** to build it". A new plan needs a new go. |
+| `say <id> <text\|file>` | Reply in the idea's thread. A file argument is read only from under `ideas/`; any other path is posted as text. |
+| `plan <id> <file\|text>` | Post the plan with "Reply **go** to build it". A new plan withdraws the old one and its go, and is approvable once its post is up. |
 | `start <id>` | After a go: dispatch worker `idea-<n>` on the configured repo with the plan as its task and the post quoted as untrusted data. |
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
 | `close <id> [reason]` | Done, dropped, or merged into another idea. |
-| `off` / `on` | Kill switch. Off, the bridge answers "paused" and `start` refuses. |
+| `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
 
 States go `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`.
 

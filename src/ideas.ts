@@ -4,9 +4,11 @@
 export type State = 'talk' | 'planned' | 'approved' | 'building' | 'shipped' | 'closed';
 export type Step = 'say' | 'plan' | 'go' | 'start' | 'ship' | 'close';
 export type User = { id: string; name: string };
+// Every message in the idea's thread, in full: the team's (sanitized) and orch's own posts.
+export type Message = { ts: string; by: string; text: string };
 export type Idea = {
   id: string; thread: string; message: string; author: User; text: string; state: State;
-  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string;
+  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
 };
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
@@ -16,7 +18,7 @@ export type Config = {
 export type Incoming = { id: string; channel: string; thread?: string; author: User; text: string };
 export type Route =
   | { kind: 'answer'; text: string; idea?: Idea }
-  | { kind: 'refuse'; answer: boolean; idea?: Idea }
+  | { kind: 'decline'; reason: 'stranger' | 'paused'; answer: boolean; idea?: Idea }
   | { kind: 'ignore' }
   | { kind: 'new'; text: string }
   | { kind: 'message'; idea: Idea; text: string }
@@ -44,10 +46,11 @@ export function advance(idea: Idea, step: Step, now: string): Idea | string {
 export const PAUSED = 'The idea bridge is paused right now. Try again later.';
 const day = (iso: string) => new Date(iso).toLocaleDateString('sv-SE');
 
-// Strangers hear the polite no once per day each, then the bridge stays silent so a busy channel stays quiet.
-export type Refused = { day: string; ids: string[] };
-export const refusedToday = (r: Refused, now: string) => r.day === day(now) ? r.ids : [];
-export const refuse = (r: Refused, id: string, now: string): Refused => ({ day: day(now), ids: [...new Set([...refusedToday(r, now), id])] });
+// A decline (stranger, paused) is said once per user per day, then the bridge stays silent so a busy channel stays quiet.
+// Keys are `<reason>:<user id>`.
+export type Told = { day: string; keys: string[] };
+const toldToday = (t: Told, now: string) => t.day === day(now) ? t.keys : [];
+export const tell = (t: Told, key: string, now: string): Told => ({ day: day(now), keys: [...new Set([...toldToday(t, now), key])] });
 export const STRANGER = "Thanks! Only members of the Evrloot team can post ideas here for now, so I can't take this one.";
 export const limitText = (perDay: number) => `You've posted ${perDay} ideas today, which is the daily limit. Post this one again tomorrow.`;
 
@@ -62,15 +65,15 @@ export function sanitize(text: string): string {
 
 const GO = /^[\s*_]*go[\s*_.!]*$/i;
 
-export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: boolean; now: string; refused: Refused }): Route {
-  if (o.off) return { kind: 'answer', text: PAUSED };
+export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: boolean; now: string; told: Told }): Route {
+  const idea = m.thread ? o.ideas.find(i => i.thread === m.thread) : undefined;
+  if (m.thread ? !idea : m.channel !== o.config.channel) return { kind: 'ignore' };
   const text = sanitize(m.text);
-  const allowed = o.config.allowlist.includes(m.author.id);
-  const answer = !refusedToday(o.refused, o.now).includes(m.author.id);
-  if (m.thread) {
-    const idea = o.ideas.find(i => i.thread === m.thread);
-    if (!idea) return { kind: 'ignore' };
-    if (!allowed && m.author.id !== idea.author.id) return { kind: 'refuse', answer, idea };
+  const allowed = o.config.allowlist.includes(m.author.id) || idea?.author.id === m.author.id;
+  const fresh = (reason: string) => !toldToday(o.told, o.now).includes(`${reason}:${m.author.id}`);
+  if (!allowed) return { kind: 'decline', reason: 'stranger', answer: !o.off && fresh('stranger'), idea };
+  if (o.off) return { kind: 'decline', reason: 'paused', answer: fresh('paused'), idea };
+  if (idea) {
     if (idea.state === 'closed') return { kind: 'answer', text: `This idea is closed. Post a new one in the channel to pick it up again.`, idea };
     if (GO.test(text)) {
       if (idea.state === 'planned') return { kind: 'go', idea };
@@ -78,8 +81,6 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
     }
     return text ? { kind: 'message', idea, text } : { kind: 'ignore' };
   }
-  if (m.channel !== o.config.channel) return { kind: 'ignore' };
-  if (!allowed) return { kind: 'refuse', answer };
   if (!text) return { kind: 'ignore' };
   const today = o.ideas.filter(i => i.author.id === m.author.id && day(i.created) === day(o.now)).length;
   if (today >= o.config.perDay) return { kind: 'answer', text: limitText(o.config.perDay) };
@@ -88,7 +89,7 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
 
 export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boolean): string | null {
   if (off) return 'the idea bridge is off (ideas/off); turn it on first';
-  if (idea.state !== 'approved') return `${idea.id} is ${idea.state}; start needs a plan with a go`;
+  if (idea.state !== 'approved' || !idea.plan) return `${idea.id} is ${idea.state}; start needs a plan with a go`;
   const busy = ideas.filter(i => i.state === 'building' && i.id !== idea.id);
   if (busy.length >= config.building) return `${busy.map(i => i.id).join(', ')} already building (limit ${config.building})`;
   return null;

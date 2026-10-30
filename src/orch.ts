@@ -645,9 +645,15 @@ function routine([sub, name, ...args]: string[]) {
   die(usage);
 }
 
-// The Discord idea bridge; `start` dispatches through run() like any other worker.
+// The Discord idea bridge; `start` dispatches through `orch run` like any other worker, in its own process,
+// so a failed run comes back as an error and the idea goes back to approved.
 async function idea(args: string[]) {
-  try { console.log(await ideaCmd(args, { root, log, run })); } catch (e: any) { die(e.message); }
+  const runWorker = (a: string[]) => {
+    const r = self('run', ...a);
+    if (r.status !== 0) throw new Error(`run failed: ${(r.stderr || r.stdout).trim()}`);
+    process.stdout.write(r.stdout);
+  };
+  try { console.log(await ideaCmd(args, { root, log, run: runWorker })); } catch (e: any) { die(e.message); }
 }
 
 const [cmd, ...args] = process.argv.slice(2);

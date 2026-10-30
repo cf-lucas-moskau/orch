@@ -20,6 +20,10 @@ export type Outgoing =
   | { kind: 'reply'; target: string; text: string }
   | { kind: 'react'; target: string; message: string; emoji: string };
 
+export type OnError = (msg: string) => void;
+const toConsole: OnError = msg => console.error(new Date().toISOString(), msg);
+const why = (e: unknown) => e instanceof Error ? e.message : String(e);
+
 const lines = (file: string) => existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
 
 export class MockChat implements Chat {
@@ -27,21 +31,24 @@ export class MockChat implements Chat {
   private timer?: NodeJS.Timeout;
   readonly dir: string;
   private channel: string;
-  constructor(root: string, channel: string) {
+  private onError: OnError;
+  constructor(root: string, channel: string, onError: OnError = toConsole) {
     this.channel = channel;
+    this.onError = onError;
     this.dir = join(root, 'ideas', 'mock');
     mkdirSync(this.dir, { recursive: true });
   }
   private out(o: Outgoing) { appendFileSync(join(this.dir, 'outbox.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...o }) + '\n'); }
   onMessage(handler: (m: Incoming) => Promise<void>) { this.handler = handler; }
-  // Handles inbox lines not seen yet; the count seen survives restarts.
+  // Handles inbox lines not seen yet; the count seen survives restarts. A line that fails is reported and skipped.
   async poll() {
     const seenFile = join(this.dir, 'inbox.seen');
     const seen = Number(existsSync(seenFile) ? readFileSync(seenFile, 'utf8') : 0) || 0;
     const all = lines(join(this.dir, 'inbox.jsonl'));
     for (let i = seen; i < all.length; i++) {
       writeFileSync(seenFile, String(i + 1));
-      await this.handler(JSON.parse(all[i]));
+      try { await this.handler(JSON.parse(all[i])); }
+      catch (e) { this.onError(`mock inbox line ${i + 1} failed: ${why(e)}: ${all[i].slice(0, 200)}`); }
     }
   }
   async start() {
@@ -49,7 +56,7 @@ export class MockChat implements Chat {
     this.timer = setInterval(async () => {
       if (busy) return;
       busy = true;
-      try { await this.poll(); } catch (e) { console.error(new Date().toISOString(), e); } finally { busy = false; }
+      try { await this.poll(); } catch (e) { this.onError(`mock inbox poll failed: ${why(e)}`); } finally { busy = false; }
     }, 1000);
   }
   async stop() { clearInterval(this.timer); }
@@ -79,11 +86,17 @@ export class DiscordChat implements Chat {
   private rest: any;
   private token: string;
   private channel: string;
-  constructor(token: string, channel: string) {
+  private onError: OnError;
+  private stub?: any;
+  // stub stands in for the discord.js module in tests.
+  constructor(token: string, channel: string, onError: OnError = toConsole, stub?: any) {
     this.token = token;
     this.channel = channel;
+    this.onError = onError;
+    this.stub = stub;
   }
-  private async lib() {
+  private async lib(): Promise<any> {
+    if (this.stub) return this.stub;
     try { return await import('discord.js'); }
     catch { throw new Error('discord.js is not installed: run npm install in orch'); }
   }
@@ -103,7 +116,7 @@ export class DiscordChat implements Chat {
       const inThread = m.channel.isThread();
       if ((inThread ? m.channel.parentId : m.channelId) !== this.channel) return;
       this.handler({ id: m.id, channel: m.channelId, ...(inThread ? { thread: m.channelId } : {}), author: { id: m.author.id, name: m.author.username }, text: m.content })
-        .catch(e => console.error(new Date().toISOString(), e));
+        .catch(e => this.onError(`discord message ${m.id} failed: ${why(e)}`));
     });
     await this.client.login(this.token);
   }
@@ -123,10 +136,10 @@ export class DiscordChat implements Chat {
   }
 }
 
-export function chatFor(root: string, config: Config): Chat {
-  if (config.adapter === 'mock') return new MockChat(root, config.channel);
+export function chatFor(root: string, config: Config, onError?: OnError): Chat {
+  if (config.adapter === 'mock') return new MockChat(root, config.channel, onError);
   const file = join(root, 'secrets', 'discord-token');
   if (!existsSync(file)) throw new Error('no secrets/discord-token; see docs/ideas.md');
   if (!/^\d+$/.test(config.channel)) throw new Error('ideas/config.json needs the Discord channel id in "channel"');
-  return new DiscordChat(readFileSync(file, 'utf8').trim(), config.channel);
+  return new DiscordChat(readFileSync(file, 'utf8').trim(), config.channel, onError);
 }
