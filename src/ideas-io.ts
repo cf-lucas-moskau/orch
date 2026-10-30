@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realp
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
 import {
-  advance, DEFAULT_CONFIG, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, workerName, workerTask,
+  advance, clears, DEFAULT_CONFIG, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Step, type Told,
 } from './ideas.ts';
 
@@ -24,10 +24,18 @@ export function loadConfig(root: string): Config {
   if (!Array.isArray(c.allowlist)) throw new Error('ideas/config.json: allowlist must be a list of user ids');
   return c;
 }
-export const loadIdeas = (root: string): Idea[] => existsSync(dir(root))
-  ? readdirSync(dir(root)).filter(f => /^I-\d+\.json$/.test(f)).map(f => JSON.parse(readFileSync(join(dir(root), f), 'utf8')))
-    .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
-  : [];
+const ideaFiles = (root: string) => existsSync(dir(root)) ? readdirSync(dir(root)).filter(f => /^I-\d+\.json$/.test(f)) : [];
+// An unreadable idea file is skipped and reported once per process; its id stays taken.
+const reported = new Set<string>();
+export function loadIdeas(root: string, log: (msg: string) => void = m => console.error(m)): Idea[] {
+  return ideaFiles(root).flatMap(f => {
+    try { return [JSON.parse(readFileSync(join(dir(root), f), 'utf8')) as Idea]; }
+    catch (e) {
+      if (!reported.has(join(dir(root), f))) { reported.add(join(dir(root), f)); log(`idea bridge: skipped ideas/${f}, unreadable: ${e instanceof Error ? e.message : e}`); }
+      return [];
+    }
+  }).sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)));
+}
 const file = (root: string, id: string) => join(dir(root), `${id}.json`);
 const save = (root: string, i: Idea) => writeAtomic(file(root, i.id), JSON.stringify(i, null, 2) + '\n');
 const said = (by: string, text: string, ts: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text }] });
@@ -88,18 +96,19 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
   // Decide and record under the lock; talk to Discord after it.
   const r = locked(d.root, () => {
     const told = loadTold(d.root);
-    const r = route(m, { ideas: loadIdeas(d.root), config, off: isOff(d.root), now, told });
+    const r = route(m, { ideas: loadIdeas(d.root, d.log), config, off: isOff(d.root), now, told });
     if (r.kind === 'decline' && r.answer) writeAtomic(join(dir(d.root), 'told.json'), JSON.stringify(tell(told, `${r.reason}:${m.author.id}`, now)) + '\n');
     if (r.kind === 'new') {
-      const id = nextId(loadIdeas(d.root).map(i => i.id));
+      const id = nextId(ideaFiles(d.root).map(f => f.slice(0, -5)));
       save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text }] });
       return { ...r, id };
     }
     if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go') {
-      const cur = said(m.author.name, text, now)(JSON.parse(readFileSync(file(d.root, r.idea!.id), 'utf8')));
+      const fresh: Idea = JSON.parse(readFileSync(file(d.root, r.idea!.id), 'utf8'));
+      const cur: Idea = { ...fresh, messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
       const next = r.kind === 'go' ? advance(cur, 'go', now) : cur;
       if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
-      save(d.root, r.kind === 'answer' ? next : { ...next, needsOrch: r.kind === 'go' ? 'go' as const : 'msg' as const, ...(r.kind === 'go' ? { goBy: m.author.id } : {}) });
+      save(d.root, r.kind === 'answer' ? next : { ...next, needsOrch: r.kind === 'go' ? 'go' as const : 'msg' as const, needsAt: now, ...(r.kind === 'go' ? { goBy: m.author.id } : {}) });
     }
     return r;
   });
@@ -133,7 +142,7 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
 }
 
 function opened(d: Deps, id: string, thread: string, now: string) {
-  const i = update(d.root, id, i => ({ ...i, thread, state: 'talk', needsOrch: 'new' }));
+  const i = update(d.root, id, i => ({ ...i, thread, state: 'talk', needsOrch: 'new', needsAt: now }));
   feed(d.root, ideaLine(id, 'new', i.author.name, i.text), now);
   d.log(`idea ${id} from ${i.author.name}: ${i.text.slice(0, 100)}`);
 }
@@ -142,7 +151,7 @@ function opened(d: Deps, id: string, thread: string, now: string) {
 // opened, or is dropped so the post is handled again.
 export async function reconcile(d: Deps & { chat: Chat }) {
   const now = (d.now ?? (() => new Date().toISOString()))();
-  for (const i of loadIdeas(d.root).filter(i => i.state === 'creating')) {
+  for (const i of loadIdeas(d.root, d.log).filter(i => i.state === 'creating')) {
     const thread = await d.chat.findThread(i.message);
     if (thread) { opened(d, i.id, thread, now); continue; }
     locked(d.root, () => rmSync(file(d.root, i.id), { force: true }));
@@ -150,24 +159,24 @@ export async function reconcile(d: Deps & { chat: Chat }) {
   }
 }
 
-const runningWorker = (root: string, name: string) => {
-  try { return JSON.parse(readFileSync(join(root, 'workers.json'), 'utf8')).some((w: any) => w.name === name && w.status === 'running'); }
-  catch { return false; }
-};
+const workers = (root: string): { name: string; status: string }[] => { try { return JSON.parse(readFileSync(join(root, 'workers.json'), 'utf8')); } catch { return []; } };
+const running = (root: string, name?: string) => !!name && workers(root).some(w => w.name === name && w.status === 'running');
 
 const USAGE = `usage: orch idea list | off | on
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
-       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | ship <id> <changelog file|text> | close <id> [reason]`;
+       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | ship <id> <changelog file|text> | close <id> [reason] [--force]
+       files are read only from ideas/drafts/`;
 
-// A single argument naming a file under ideas/ (relative, no ..) is that file's text; anything else is the text itself,
-// so a mistyped path can never post secrets/ or a file outside orch.
+// A single argument naming a file under ideas/drafts/ (relative, no ..) is that file's text; anything else is the text
+// itself, so a mistyped path can never post the config, secrets/ or a file outside orch.
 export function textOf(root: string, args: string[]): string {
   const a = args.length === 1 ? args[0] : '';
   const rel = a && !isAbsolute(a) ? normalize(a) : '';
-  if (rel.startsWith(`ideas${sep}`) && !a.split(/[\\/]/).includes('..')) {
+  const drafts = join(dir(root), 'drafts');
+  if (rel.startsWith(join('ideas', 'drafts') + sep) && !a.split(/[\\/]/).includes('..')) {
     const f = join(root, rel);
     try {
-      if (statSync(f).isFile() && realpathSync(f).startsWith(realpathSync(dir(root)) + sep)) return readFileSync(f, 'utf8').trim();
+      if (statSync(f).isFile() && realpathSync(f).startsWith(realpathSync(drafts) + sep)) return readFileSync(f, 'utf8').trim();
     } catch {}
   }
   return args.join(' ').trim();
@@ -179,7 +188,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const config = loadConfig(d.root);
   const chat = () => d.chat ?? chatFor(d.root, config, d.log);
   if (sub === 'list' || !sub) {
-    const all = loadIdeas(d.root);
+    const all = loadIdeas(d.root, d.log);
     return [`bridge ${isOff(d.root) ? 'off' : 'on'}, adapter ${config.adapter}`,
       ...all.map(i => `${i.id} [${i.state}${i.worker ? ` ${i.worker}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
   }
@@ -198,25 +207,29 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const text = all.filter((a, i) => !['--as', '--in'].includes(a) && !['--as', '--in'].includes(all[i - 1])).join(' ').trim();
     if (!as || !text) throw new Error(USAGE);
     const thread = into ? (loadIdeas(d.root).find(i => i.id === into) ?? fail(`no idea ${into}`)).thread : undefined;
-    const m = c.post(as, text, thread);
+    const m = c.post(as, text, thread, now);
     return `posted ${m.id} as ${as}${into ? ` in ${into}` : ''}`;
   }
   if (!id) throw new Error(USAGE);
-  const cur = loadIdeas(d.root).find(i => i.id === id) ?? fail(`no idea ${id}`);
+  const cur = loadIdeas(d.root, d.log).find(i => i.id === id) ?? fail(`no idea ${id}`);
   const check = (s: Step, i = cur) => { const next = advance(i, s, now); return typeof next === 'string' ? fail(next) : next; };
-  // orch answered, so the idea no longer waits on orch.
-  const answered = (i: Idea, text: string): Idea => ({ ...said('orch', text, now)(i), needsOrch: undefined });
+  const clock = d.now ?? (() => new Date().toISOString());
+  // orch answered what was flagged before the post went out; a message that came in meanwhile still waits.
+  const answered = (i: Idea, text: string, sentAt: string): Idea =>
+    ({ ...said('orch', text, now)(i), ...(clears(i, sentAt) ? { needsOrch: undefined, needsAt: undefined } : {}) });
   // Checked before posting, and again under the lock after: the daemon may have moved the idea meanwhile.
   const post = async (s: Step, text: string, patch: Partial<Idea> = {}) => {
     check(s);
+    const sentAt = clock();
     await chat().reply(cur.thread, text);
     return update(d.root, id, i => {
       const next = advance(i, s, now);
       if (typeof next === 'string') fail(`posted, but not recorded: ${next}`);
-      return answered({ ...(next as Idea), ...patch }, text);
+      return answered({ ...(next as Idea), ...patch }, text, sentAt);
     });
   };
-  const text = textOf(d.root, rest);
+  const force = rest.includes('--force');
+  const text = textOf(d.root, rest.filter(a => a !== '--force'));
   if (sub === 'say') {
     if (!text) throw new Error(USAGE);
     await post('say', text);
@@ -227,34 +240,42 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     if (!text) throw new Error(USAGE);
     // The old plan and any go on it are withdrawn first; the new one is approvable once its post is up.
     update(d.root, id, i => { check('plan', i); return { ...i, state: 'talk', plan: undefined, goBy: undefined, updated: now }; });
+    const sentAt = clock();
     await chat().reply(cur.thread, planPost(text));
-    update(d.root, id, i => answered({ ...check('plan', i), plan: text }, planPost(text)));
+    // A go counts only for the version that was on screen; planAt is taken once the post is up.
+    update(d.root, id, i => answered({ ...check('plan', i), plan: text, planVersion: (i.planVersion ?? 0) + 1, planAt: clock() }, planPost(text), sentAt));
     d.log(`idea ${id} plan posted: ${text.split('\n')[0].slice(0, 100)}`);
     return `plan posted in ${id}; waiting for go`;
   }
   if (sub === 'start') {
-    const name = workerName(id);
     // The building slot is taken under the lock, so two starts cannot both pass the limit.
+    const sentAt = clock();
     const building = locked(d.root, () => {
-      const fresh = loadIdeas(d.root);
-      const blocker = startBlocker(fresh.find(i => i.id === id)!, fresh, config, isOff(d.root));
+      const fresh = loadIdeas(d.root, d.log);
+      const me = fresh.find(i => i.id === id)!;
+      const blocker = startBlocker(me, fresh, config, isOff(d.root));
       if (blocker) fail(`not started: ${blocker}`);
-      const i: Idea = { ...check('start', fresh.find(i => i.id === id)), worker: name, needsOrch: undefined };
+      // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
+      const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
+      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name] };
       save(d.root, i);
       return i;
     });
+    const name = building.worker!;
     try { d.run([config.repo, name, workerTask(building)]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      // run can fail after the worker exists (not ready, prompt stalled): the idea builds with that worker.
-      if (!runningWorker(d.root, name)) {
-        update(d.root, id, i => i.state === 'building' && i.worker === name ? { ...i, state: 'approved', worker: undefined, updated: now } : i);
+      // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
+      // before this start, so a running worker with it is this start's.
+      if (!running(d.root, name)) {
+        update(d.root, id, i => i.state === 'building' && i.worker === name
+          ? { ...i, state: 'approved', worker: undefined, builds: (i.builds ?? []).filter(b => b !== name), updated: now } : i);
         throw e;
       }
       d.log(`idea ${id} start: run reported "${msg.slice(0, 120)}", but worker ${name} exists; building with it`);
     }
     await chat().reply(cur.thread, startPost());
-    update(d.root, id, i => answered(i, startPost()));
+    update(d.root, id, i => answered(i, startPost(), sentAt));
     d.log(`idea ${id} start: worker ${name} on ${config.repo}`);
     return `${id} building as worker ${name}`;
   }
@@ -265,6 +286,9 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     return `changelog posted in ${id}`;
   }
   if (sub === 'close') {
+    // A building idea's worker is cleaned up first, or the close is forced.
+    if (cur.state === 'building' && running(d.root, cur.worker) && !force)
+      fail(`not closed: ${id} is building with worker ${cur.worker}; clean it up first (orch cleanup ${cur.worker}) or close with --force`);
     const reason = text || 'done';
     await post('close', `Closing this idea: ${reason}`, { closed: reason });
     d.log(`idea ${id} closed: ${reason}`);

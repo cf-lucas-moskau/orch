@@ -84,9 +84,9 @@ export class MockChat implements Chat {
   async react(target: string, message: string, emoji: string) { this.out({ kind: 'react', target, message, emoji }); }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
   // `orch idea fake`: post as someone, at the top level or inside an idea's thread. Mock user ids are their names.
-  post(as: string, text: string, thread?: string): Incoming {
+  post(as: string, text: string, thread?: string, ts = new Date().toISOString()): Incoming {
     const file = join(this.dir, 'inbox.jsonl');
-    const m: Incoming = { id: `m${lines(file).length + 1}`, channel: thread ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text };
+    const m: Incoming = { id: `m${lines(file).length + 1}`, channel: thread ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text, ts };
     appendFileSync(file, JSON.stringify(m) + '\n');
     return m;
   }
@@ -103,10 +103,10 @@ const route = {
   reaction: (c: string, m: string, emoji: string) => `/channels/${c}/messages/${m}/reactions/${encodeURIComponent(emoji)}/@me`,
   activeThreads: (g: string) => `/guilds/${g}/threads/active`,
 };
-type Raw = { id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string };
+type Raw = { id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string; timestamp?: string };
 const byId = (a: { id: string }, b: { id: string }) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1);
 
-export type DiscordOptions = { token: string; channel: string; cursorFile: string; onError?: OnError; lib?: any };
+export type DiscordOptions = { token: string; channel: string; cursorFile: string; onError?: OnError; lib?: any; retryMs?: number };
 
 // Message ids grow over time, so the last handled id per channel and thread (the cursor) tells what came after.
 export class DiscordChat implements Chat {
@@ -114,7 +114,12 @@ export class DiscordChat implements Chat {
   private client: any;
   private rest: any;
   private o: DiscordOptions & { onError: OnError };
-  private early: Incoming[] | null = [];
+  // Live messages held while a catch-up runs (from before the first one too), so a newer one never moves a cursor
+  // past older ones. A channel or thread whose message failed is stalled: nothing after it is handled live, and the
+  // next catch-up starts again from its cursor.
+  private held: Incoming[] | null = [];
+  private stalled = new Set<string>();
+  private retry?: NodeJS.Timeout;
   constructor(o: DiscordOptions) { this.o = { onError: toConsole, ...o }; }
   // o.lib stands in for the discord.js module in tests.
   private async lib(): Promise<any> {
@@ -130,36 +135,61 @@ export class DiscordChat implements Chat {
     return this.rest;
   }
   private cursor(): Record<string, string> { try { return JSON.parse(readFileSync(this.o.cursorFile, 'utf8')); } catch { return {}; } }
+  private move(key: string, id: string) { writeAtomic(this.o.cursorFile, JSON.stringify({ ...this.cursor(), [key]: id }) + '\n'); }
   onMessage(handler: (m: Incoming) => Promise<void>) { this.handler = handler; }
 
+  // The cursor moves only past a message the handler took.
   private deliver = serial(async (m: Incoming) => {
     const key = m.thread ?? m.channel;
+    if (this.stalled.has(key)) return;
     const last = this.cursor()[key];
     if (last && BigInt(m.id) <= BigInt(last)) return;
-    try { await this.handler(m); } catch (e) { this.o.onError(`discord message ${m.id} failed: ${why(e)}`); }
-    writeAtomic(this.o.cursorFile, JSON.stringify({ ...this.cursor(), [key]: m.id }) + '\n');
+    try { await this.handler(m); }
+    catch (e) {
+      this.stalled.add(key);
+      this.o.onError(`discord message ${m.id} failed, retried from there on the next catch-up: ${why(e)}`);
+      this.retryLater();
+      return;
+    }
+    this.move(key, m.id);
+  });
+
+  private retryLater() {
+    if (this.retry) return;
+    this.retry = setTimeout(() => { this.retry = undefined; void this.catchUp(); }, this.o.retryMs ?? 60_000);
+    this.retry.unref?.();
+  }
+
+  private catchUp = serial(async () => {
+    this.held ??= [];
+    this.stalled.clear();
+    try { await this.backfill(); }
+    catch (e) { this.o.onError(`discord catch-up failed, retrying: ${why(e)}`); this.retryLater(); }
+    finally { const held = this.held ?? []; this.held = null; for (const m of held.sort(byId)) void this.deliver(m); }
   });
 
   private incoming(r: Raw, thread: boolean): Incoming | null {
     if (r.author.bot) return null;
-    return { id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}), author: { id: r.author.id, name: r.author.username }, text: r.content };
+    return { id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}), author: { id: r.author.id, name: r.author.username }, text: r.content, ...(r.timestamp ? { ts: new Date(r.timestamp).toISOString() } : {}) };
   }
 
-  // The channel from its cursor (nothing on a first start), and every active thread under it from its cursor or its start.
+  // The channel from its cursor, and every active thread under it from its cursor or its start. On a first start the
+  // channel's newest message becomes its cursor, so history is never replayed and a restart catches up from there.
   async backfill() {
     const rest = await this.api();
-    const cursor = this.cursor();
     const ch = await rest.get(route.channel(this.o.channel));
+    if (!this.cursor()[this.o.channel]) this.move(this.o.channel, ch.last_message_id ?? this.o.channel);
+    const cursor = this.cursor();
     const active = await rest.get(route.activeThreads(ch.guild_id));
     const targets = [
-      ...(cursor[this.o.channel] ? [{ id: this.o.channel, thread: false, after: cursor[this.o.channel] }] : []),
+      { id: this.o.channel, thread: false, after: cursor[this.o.channel] },
       ...(active.threads ?? []).filter((t: any) => t.parent_id === this.o.channel).map((t: any) => ({ id: t.id, thread: true, after: cursor[t.id] ?? t.id })),
     ];
     for (const t of targets) {
       for (let after = t.after; ;) {
         const page: Raw[] = (await rest.get(route.messages(t.id), { query: new URLSearchParams({ after, limit: '100' }) })).sort(byId);
         for (const r of page) { const m = this.incoming(r, t.thread); if (m) await this.deliver(m); }
-        if (page.length < 100) break;
+        if (page.length < 100 || this.stalled.has(t.id)) break;
         after = page.at(-1)!.id;
       }
     }
@@ -174,19 +204,15 @@ export class DiscordChat implements Chat {
     this.client.on('messageCreate', (m: any) => {
       const inThread = m.channel.isThread();
       if ((inThread ? m.channel.parentId : m.channelId) !== this.o.channel) return;
-      const i = this.incoming({ id: m.id, channel_id: m.channelId, author: m.author, content: m.content }, inThread);
+      const i = this.incoming({ id: m.id, channel_id: m.channelId, author: m.author, content: m.content, timestamp: m.createdTimestamp ? new Date(m.createdTimestamp).toISOString() : undefined }, inThread);
       if (!i) return;
-      // Live messages wait until the backfill is through, so a newer one never moves a cursor past older ones.
-      if (this.early) this.early.push(i); else void this.deliver(i);
+      if (this.held) this.held.push(i); else void this.deliver(i);
     });
-    this.client.once(lib.Events?.ClientReady ?? 'ready', () => {
-      this.backfill()
-        .catch(e => this.o.onError(`discord backfill failed: ${why(e)}`))
-        .finally(() => { const held = this.early ?? []; this.early = null; for (const m of held.sort(byId)) void this.deliver(m); });
-    });
+    // Every ready, the first and each new session after a lost connection, catches up on what was missed.
+    for (const ev of [lib.Events?.ClientReady ?? 'ready', 'shardReady']) this.client.on(ev, () => void this.catchUp());
     await this.client.login(this.o.token);
   }
-  async stop() { await this.client?.destroy(); }
+  async stop() { clearTimeout(this.retry); await this.client?.destroy(); }
   async createThread(message: string, name: string) {
     const t = await (await this.api()).post(route.threads(this.o.channel, message), { body: { name, auto_archive_duration: 10080 } });
     return t.id as string;

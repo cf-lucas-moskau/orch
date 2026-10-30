@@ -9,7 +9,7 @@ import { DiscordChat, MockChat } from '../src/discord.ts';
 import { buildBrief } from '../src/brief.ts';
 import { handle, idea, loadConfig, loadIdeas, locked, reconcile, textOf, type Deps } from '../src/ideas-io.ts';
 import {
-  advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerTask, type Idea, type Incoming,
+  advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -29,7 +29,7 @@ test('the state machine only allows the next steps', () => {
 });
 
 test('routing: strangers, go, closed ideas, other channels', () => {
-  const o = { ideas: [{ ...base, state: 'planned' as const }], config, off: false, now: NOW, told: { day: '', keys: [] } };
+  const o = { ideas: [{ ...base, state: 'planned' as const, planVersion: 1, planAt: NOW }], config, off: false, now: NOW, told: { day: '', keys: [] } };
   const told = (day: string, ...keys: string[]) => ({ ...o, told: { day, keys } });
   const m = (author: string, text: string, thread?: string) => ({ id: 'x', channel: thread ?? 'ideas', thread, author: { id: author, name: author }, text });
   const stranger = (answer: boolean) => ({ kind: 'decline', reason: 'stranger', text: STRANGER, answer, idea: undefined });
@@ -100,7 +100,8 @@ class FlakyChat extends MockChat {
     if (this.fail.has(what)) throw new Error(`${what} failed`);
   }
   async createThread(message: string, name: string) { await this.gate('thread'); return super.createThread(message, name); }
-  async reply(target: string, text: string) { await this.gate('reply'); return super.reply(target, text); }
+  onReply?: () => Promise<void>;
+  async reply(target: string, text: string) { await this.gate('reply'); await this.onReply?.(); return super.reply(target, text); }
   async react(target: string, message: string, emoji: string) { await this.gate('react'); return super.react(target, message, emoji); }
 }
 
@@ -132,8 +133,9 @@ test('end to end on mocks: post, talk, plan, go, start, ship', async () => {
   await w.post('--in', 'I-1', 'the bats', '--as', 'ann');
   assert.equal(w.feed()[1], 'IDEA I-1 msg ann: the bats');
 
-  writeFileSync(join(w.root, 'ideas', 'plan-I-1.md'), 'Bats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.');
-  await idea(['plan', 'I-1', 'ideas/plan-I-1.md'], w.d);
+  mkdirSync(join(w.root, 'ideas', 'drafts'));
+  writeFileSync(join(w.root, 'ideas', 'drafts', 'plan-I-1.md'), 'Bats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.');
+  await idea(['plan', 'I-1', 'ideas/drafts/plan-I-1.md'], w.d);
   assert.equal(w.replies().at(-1), '**Plan**\n\nBats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.\n\nReply **go** to build it.');
   await assert.rejects(idea(['start', 'I-1'], w.d), /not started: I-1 is planned/);
 
@@ -240,20 +242,23 @@ test('(1) a failed thread creation gives the reserved id back', async () => {
   assert.equal(loadIdeas(w.root).length, 0);
 });
 
-test('(3) only files under ideas/ are read; any other path is posted as text', () => {
+test('only files under ideas/drafts/ are read; any other path is posted as text', () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-ideas-files-'));
-  mkdirSync(join(root, 'ideas'));
+  mkdirSync(join(root, 'ideas', 'drafts'), { recursive: true });
   mkdirSync(join(root, 'secrets'));
   writeFileSync(join(root, 'secrets', 'discord-token'), 'TOKEN');
-  writeFileSync(join(root, 'ideas', 'plan.md'), 'the plan\n');
-  symlinkSync(join(root, 'secrets', 'discord-token'), join(root, 'ideas', 'sneaky.md'));
-  assert.equal(textOf(root, ['ideas/plan.md']), 'the plan');
-  assert.equal(textOf(root, ['./ideas/plan.md']), 'the plan');
-  for (const p of ['secrets/discord-token', 'ideas/../secrets/discord-token', join(root, 'secrets', 'discord-token'), join(root, 'ideas', 'plan.md'), 'ideas/sneaky.md', 'ideas/missing.md', 'ideas'])
+  writeFileSync(join(root, 'ideas', 'config.json'), '{"allowlist": ["ann"]}');
+  writeFileSync(join(root, 'ideas', 'told.json'), '{"day": "", "keys": []}');
+  writeFileSync(join(root, 'ideas', 'drafts', 'plan.md'), 'the plan\n');
+  symlinkSync(join(root, 'secrets', 'discord-token'), join(root, 'ideas', 'drafts', 'sneaky.md'));
+  symlinkSync(join(root, 'ideas', 'config.json'), join(root, 'ideas', 'drafts', 'config.md'));
+  assert.equal(textOf(root, ['ideas/drafts/plan.md']), 'the plan');
+  assert.equal(textOf(root, ['./ideas/drafts/plan.md']), 'the plan');
+  for (const p of ['secrets/discord-token', 'ideas/config.json', 'ideas/told.json', 'ideas/drafts/../config.json', 'ideas/drafts/../../secrets/discord-token',
+    join(root, 'secrets', 'discord-token'), join(root, 'ideas', 'drafts', 'plan.md'), 'ideas/drafts/sneaky.md', 'ideas/drafts/config.md', 'ideas/drafts/missing.md', 'ideas/drafts'])
     assert.equal(textOf(root, [p]), p, p);
-  assert.equal(textOf(root, ['ideas/plan.md', 'and', 'more']), 'ideas/plan.md and more');
+  assert.equal(textOf(root, ['ideas/drafts/plan.md', 'and', 'more']), 'ideas/drafts/plan.md and more');
 });
-
 test('(3) say with a secrets path posts the path, not the secret', async () => {
   const w = world();
   mkdirSync(join(w.root, 'secrets'));
@@ -325,8 +330,9 @@ function discordStub(routes: Record<string, unknown>) {
   const calls: unknown[][] = [];
   const answer = (path: string, query?: URLSearchParams) => {
     const v = routes[query ? `${path}?${query}` : path] ?? routes[path];
-    if (v instanceof Error) throw v;
-    return structuredClone(v ?? []);
+    const got = typeof v === 'function' ? v() : v;
+    if (got instanceof Error) throw got;
+    return structuredClone(got ?? []);
   };
   class REST {
     setToken() { return this; }
@@ -433,19 +439,24 @@ test('review 2 (3): the live adapter catches up from its cursors and logs client
   assert.deepEqual(errors, ['discord client error: socket hang up']);
 });
 
-test('review 2 (3): a first start does not replay the channel history', async () => {
+test('a first start saves the channel baseline and does not replay history', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
-  const { calls, lib } = discordStub({ '/channels/100': { guild_id: 'g' }, '/guilds/g/threads/active': { threads: [] } });
-  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'cursor.json'), onError: () => {}, lib });
+  const cursorFile = join(root, 'cursor.json');
+  const { calls, lib } = discordStub({ '/channels/100': { guild_id: 'g', last_message_id: '50' }, '/guilds/g/threads/active': { threads: [] } });
+  const got: string[] = [];
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile, onError: () => {}, lib });
+  chat.onMessage(async m => { got.push(m.id); });
   await chat.start();
   (chat as any).client.emit('clientReady');
   await settle();
-  assert.deepEqual(calls.map(c => c[1]), ['/channels/100', '/guilds/g/threads/active']);
+  assert.deepEqual(calls.map(c => [c[1], c[2]]), [['/channels/100', undefined], ['/guilds/g/threads/active', undefined], ['/channels/100/messages', 'after=50&limit=100']]);
+  assert.deepEqual(JSON.parse(readFileSync(cursorFile, 'utf8')), { 100: '50' }, 'the baseline is on disk before anything is handled');
+  assert.deepEqual(got, []);
 });
 
 test('review 2 (3): the live adapter keeps only people in the channel and its threads', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
-  const { lib } = discordStub({ '/channels/100': { guild_id: 'g' }, '/guilds/g/threads/active': { threads: [] } });
+  const { lib } = discordStub({ '/channels/100': { guild_id: 'g', last_message_id: '0' }, '/guilds/g/threads/active': { threads: [] } });
   const errors: string[] = [], got: Incoming[] = [];
   const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'cursor.json'), onError: e => errors.push(e), lib });
   chat.onMessage(async m => { if (m.text === 'boom') throw new Error('handler broke'); got.push(m); });
@@ -468,7 +479,7 @@ test('review 2 (3): the live adapter keeps only people in the channel and its th
     { id: '1', channel: '100', author: { id: 'u1', name: 'ann' }, text: 'top level' },
     { id: '4', channel: '300', thread: '300', author: { id: 'u1', name: 'ann' }, text: 'in a thread' },
   ]);
-  assert.deepEqual(errors, ['discord message 6 failed: handler broke']);
+  assert.deepEqual(errors, ['discord message 6 failed, retried from there on the next catch-up: handler broke']);
 });
 
 test('review 2 (4): a config that does not parse stops the bridge and orch idea', async () => {
@@ -562,4 +573,139 @@ test('review 2 (9): DiscordChat posts without pings on the right REST routes', a
     ['GET', '/channels/100/messages/m9', undefined],
     ['GET', '/channels/100/messages/m5', undefined],
   ]);
+});
+
+const ready = async (w: ReturnType<typeof world>) => {
+  await w.post('Bats drop more loot', '--as', 'ann');
+  await idea(['plan', 'I-1', 'Cave bats drop 2x.'], w.d);
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+};
+const LATER = (min: number) => new Date(Date.parse(NOW) + min * 60_000).toISOString();
+
+test('review 3 (1): a rebuild after ship gets a fresh worker name', async () => {
+  const w = world();
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1-2', status: 'running' }]));
+  await ready(w);
+  await idea(['start', 'I-1'], w.d);
+  await idea(['ship', 'I-1', 'Live.'], w.d);
+  await idea(['plan', 'I-1', 'Cave bats drop 3x.'], w.d);
+  w.setNow(LATER(1));
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+  assert.equal(await idea(['start', 'I-1'], w.d), 'I-1 building as worker idea-1-3', 'idea-1 was this idea, idea-1-2 is someone else');
+  assert.deepEqual(w.runs.map(r => r[1]), ['idea-1', 'idea-1-3']);
+  assert.deepEqual(loadIdeas(w.root)[0].builds, ['idea-1', 'idea-1-3']);
+  assert.equal(workerName('I-1', []), 'idea-1');
+});
+
+test('review 3 (1): after a failed run only a worker this start made counts', async () => {
+  const w = world();
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'running' }]));
+  await ready(w);
+  w.d.run = () => { throw new Error('run failed: cap reached'); };
+  await assert.rejects(idea(['start', 'I-1'], w.d), /cap reached/);
+  assert.equal(loadIdeas(w.root)[0].state, 'approved', 'the running idea-1 belongs to someone else');
+});
+
+test('review 3 (2): a failed message stalls its channel until a catch-up retries it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const cursorFile = join(root, 'cursor.json');
+  writeFileSync(cursorFile, JSON.stringify({ 100: '11' }));
+  const { lib } = discordStub({
+    '/channels/100': { guild_id: 'g' }, '/guilds/g/threads/active': { threads: [] },
+    '/channels/100/messages?after=11&limit=100': [raw('12', '100', 'fails once'), raw('13', '100', 'after it')],
+  });
+  const got: string[] = [], errors: string[] = [];
+  let failed = false;
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile, onError: e => errors.push(e), lib, retryMs: 200 });
+  chat.onMessage(async m => { got.push(m.id); if (m.id === '12' && !failed) { failed = true; throw new Error('discord is down'); } });
+  await chat.start();
+  (chat as any).client.emit('clientReady');
+  await settle();
+  assert.deepEqual(JSON.parse(readFileSync(cursorFile, 'utf8')), { 100: '11' }, 'the cursor stays before the failed message');
+  assert.deepEqual(got, ['12'], 'nothing after it is handled');
+  await new Promise(r => setTimeout(r, 300));
+  assert.deepEqual(got, ['12', '12', '13']);
+  assert.deepEqual(JSON.parse(readFileSync(cursorFile, 'utf8')), { 100: '13' });
+  assert.deepEqual(errors, ['discord message 12 failed, retried from there on the next catch-up: discord is down']);
+  await chat.stop();
+});
+
+test('review 3 (2): a failed catch-up retries, and every ready catches up', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  let channelCalls = 0;
+  const { calls, lib } = discordStub({
+    '/channels/100': () => ++channelCalls === 1 ? new Error('502 Bad Gateway') : { guild_id: 'g', last_message_id: '5' },
+    '/guilds/g/threads/active': { threads: [] },
+  });
+  const errors: string[] = [];
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), onError: e => errors.push(e), lib, retryMs: 20 });
+  await chat.start();
+  const client = (chat as any).client as EventEmitter;
+  client.emit('clientReady');
+  await new Promise(r => setTimeout(r, 60));
+  assert.deepEqual(errors, ['discord catch-up failed, retrying: 502 Bad Gateway']);
+  assert.equal(channelCalls, 2, 'retried on its own');
+  client.emit('shardReady');
+  await settle();
+  assert.equal(channelCalls, 3, 'a new session catches up again');
+  assert.equal(calls.filter(c => c[1] === '/channels/100/messages').length, 2);
+  await chat.stop();
+});
+
+test('review 3 (3): a go counts only for the plan that was on screen when it was posted', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  await idea(['plan', 'I-1', 'plan one'], w.d);
+  w.setNow(LATER(10));
+  await idea(['plan', 'I-1', 'plan two'], w.d);
+  const thread = { channel: 't-m1', thread: 't-m1', author: { id: 'ann', name: 'ann' }, text: 'go' };
+  await handle(w.d, { ...thread, id: 'g1', ts: LATER(5) });
+  assert.equal(w.replies().at(-1), 'A new plan went up after your go. Read it and reply **go** again.');
+  assert.equal(loadIdeas(w.root)[0].state, 'planned');
+  assert.deepEqual(loadIdeas(w.root)[0].messages!.at(-2)!.plan, 1, 'the go was for plan one');
+  await handle(w.d, { ...thread, id: 'g2', ts: LATER(11) });
+  assert.equal(loadIdeas(w.root)[0].state, 'approved');
+  assert.deepEqual([loadIdeas(w.root)[0].planVersion, loadIdeas(w.root)[0].messages!.at(-1)!.plan], [2, 2]);
+});
+
+test('review 3 (4): a reply does not clear a message that came in while it was sent', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  w.chat.onReply = async () => {
+    w.chat.onReply = undefined;
+    w.setNow(LATER(1));
+    await handle(w.d, { id: 'm9', channel: 't-m1', thread: 't-m1', author: { id: 'ann', name: 'ann' }, text: 'also the bats', ts: LATER(1) });
+  };
+  await idea(['say', 'I-1', 'Which cave?'], w.d);
+  assert.equal(loadIdeas(w.root)[0].needsOrch, 'msg');
+  assert.deepEqual(pendingLines(loadIdeas(w.root)), ['IDEA I-1 msg ann: also the bats']);
+  await idea(['say', 'I-1', 'Got it.'], w.d);
+  assert.equal(loadIdeas(w.root)[0].needsOrch, undefined);
+});
+
+test('review 3 (6): an unreadable idea file is skipped with one log line and keeps its id', async () => {
+  const w = world();
+  await w.post('one', '--as', 'ann');
+  writeFileSync(join(w.root, 'ideas', 'I-2.json'), '{ half a fi');
+  await w.post('three', '--as', 'bob');
+  assert.equal(await idea(['list'], w.d), 'bridge on, adapter mock\nI-1 [talk] ann: one (needs orch: new)\nI-3 [talk] bob: three (needs orch: new)');
+  assert.equal(readFileSync(join(w.root, 'ideas', 'I-2.json'), 'utf8'), '{ half a fi', 'the broken file is left for a person');
+  assert.equal(w.logs.filter(l => l.startsWith('idea bridge: skipped ideas/I-2.json, unreadable')).length, 1);
+});
+
+test('review 3 (7): a building idea closes only after its worker is cleaned up, or with --force', async () => {
+  const w = world();
+  await ready(w);
+  await idea(['start', 'I-1'], w.d);
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'running' }]));
+  await assert.rejects(idea(['close', 'I-1', 'dropped'], w.d), /not closed: I-1 is building with worker idea-1; clean it up first \(orch cleanup idea-1\) or close with --force/);
+  assert.equal(loadIdeas(w.root)[0].state, 'building');
+  await idea(['close', 'I-1', 'dropped', '--force'], w.d);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].closed], ['closed', 'dropped']);
+
+  const v = world();
+  await ready(v);
+  await idea(['start', 'I-1'], v.d);
+  writeFileSync(join(v.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'closed' }]));
+  assert.equal(await idea(['close', 'I-1'], v.d), 'I-1 closed');
 });

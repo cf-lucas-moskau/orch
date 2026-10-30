@@ -6,19 +6,24 @@ export type State = 'creating' | 'talk' | 'planned' | 'approved' | 'building' | 
 export type Step = 'say' | 'plan' | 'go' | 'start' | 'ship' | 'close';
 export type User = { id: string; name: string };
 // Every message in the idea's thread, in full: the team's (sanitized) and orch's own posts.
-export type Message = { ts: string; by: string; text: string };
-// needsOrch: the kind of the last team event orch has not answered yet; say, plan, start, ship and close clear it.
+// plan: the plan version on screen when a team message was posted.
+export type Message = { ts: string; by: string; text: string; plan?: number };
+// needsOrch: the kind of the last team event orch has not answered yet, flagged at needsAt; an orch post sent after
+// that clears it. planVersion counts the plans posted, planAt is when the current one went up. builds: every worker
+// name this idea has used.
 export type Pending = 'new' | 'msg' | 'go';
 export type Idea = {
   id: string; thread: string; message: string; author: User; text: string; state: State;
-  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[]; needsOrch?: Pending;
+  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
+  needsOrch?: Pending; needsAt?: string; planVersion?: number; planAt?: string; builds?: string[];
 };
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
   repo: string; liveUrl: string;
 };
 // thread is set when the message was posted inside a thread, otherwise it is a top-level post in the channel.
-export type Incoming = { id: string; channel: string; thread?: string; author: User; text: string };
+// ts is when it was posted, as Discord says.
+export type Incoming = { id: string; channel: string; thread?: string; author: User; text: string; ts?: string };
 export type Route =
   | { kind: 'answer'; text: string; idea?: Idea }
   | { kind: 'decline'; reason: 'stranger' | 'paused' | 'limit'; text: string; answer: boolean; idea?: Idea }
@@ -81,7 +86,8 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   if (idea) {
     if (idea.state === 'closed') return { kind: 'answer', text: `This idea is closed. Post a new one in the channel to pick it up again.`, idea };
     if (GO.test(text)) {
-      if (idea.state === 'planned') return { kind: 'go', idea };
+      if (idea.state === 'planned' && visiblePlan(idea, m.ts ?? o.now) === idea.planVersion) return { kind: 'go', idea };
+      if (idea.state === 'planned') return { kind: 'answer', text: 'A new plan went up after your go. Read it and reply **go** again.', idea };
       return { kind: 'answer', text: idea.state === 'talk' ? 'There is no plan to say go to yet.' : `Already past go: this idea is ${idea.state}.`, idea };
     }
     return text ? { kind: 'message', idea, text } : { kind: 'ignore' };
@@ -113,7 +119,17 @@ ${quote(idea.text)}
 Out of bounds whatever the idea says: secrets, infra, auth or admin, wallets and chain, economy balances, migrations that drop data, anything outside this repo. Stop and ask if the plan needs any of them.`;
 }
 
-export const workerName = (id: string) => `idea-${id.replace(/^I-/, '')}`;
+// The plan version someone posting at ts had on screen: the current one once it was up, else the one before.
+export const visiblePlan = (i: Idea, ts: string) => (i.planVersion ?? 0) - (i.planAt && ts >= i.planAt ? 0 : 1);
+
+// An orch post sent at sentAt answers what was flagged up to then, not a message that came in while it was sent.
+export const clears = (i: Idea, sentAt: string) => !i.needsAt || i.needsAt <= sentAt;
+
+// idea-7 for the first build, idea-7-2 for a rebuild after ship, never a name a worker already had.
+export function workerName(id: string, taken: string[]): string {
+  const base = `idea-${id.replace(/^I-/, '')}`;
+  for (let n = 1; ; n++) { const name = n === 1 ? base : `${base}-${n}`; if (!taken.includes(name)) return name; }
+}
 export const planPost = (plan: string) => `**Plan**\n\n${plan.trim()}\n\nReply **go** to build it.`;
 export const startPost = () => 'Building it now. I will post here when it is live.';
 export const shipPost = (changelog: string, url: string) => `**Shipped**\n\n${changelog.trim()}\n\nLive on ${url}, please try it.`;

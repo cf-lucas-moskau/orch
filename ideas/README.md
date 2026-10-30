@@ -12,3 +12,4 @@ The Discord idea bridge's ledger, local to this machine and not in git. Setup an
 | `off` | Kill switch. While it exists the bridge answers "paused" once a day per member, says nothing to strangers, and `orch idea start` refuses. |
 | `mock/inbox.jsonl` | Fake posts from `orch idea fake`; `mock/inbox.seen` counts the ones handled. |
 | `mock/outbox.jsonl` | Everything the bridge and orch posted while on the mock adapter. |
+| `drafts/` | Plans and changelogs orch writes before posting them; the only files `orch idea` reads. |
