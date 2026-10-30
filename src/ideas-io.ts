@@ -1,34 +1,78 @@
 // IO glue for the idea bridge: the ideas/ store, the daemon's message handler and `orch idea <sub>`.
 // Ideas live in ideas/<id>.json, settings in ideas/config.json, the kill switch is the file ideas/off.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+// The daemon and `orch idea` are separate processes: every read-modify-write of ideas/ runs under one lock (ideas/.lock),
+// never across an await, and every write replaces its file atomically.
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { chatFor, MockChat, type Chat } from './discord.ts';
+import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
 import {
-  advance, DEFAULT_CONFIG, ideaLine, nextId, PAUSED, planPost, route, sanitize, shipPost, startBlocker, startPost, STRANGER, tell, threadName, workerName, workerTask,
+  advance, DEFAULT_CONFIG, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, workerName, workerTask,
   type Config, type Idea, type Incoming, type Step, type Told,
 } from './ideas.ts';
 
 export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string };
 
 const dir = (root: string) => join(root, 'ideas');
-export const loadConfig = (root: string): Config => {
-  try { return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(join(dir(root), 'config.json'), 'utf8')) }; } catch { return DEFAULT_CONFIG; }
-};
+// A config that exists but does not parse stops everything: guessing could mean the wrong adapter or allowlist.
+export function loadConfig(root: string): Config {
+  const f = join(dir(root), 'config.json');
+  if (!existsSync(f)) return DEFAULT_CONFIG;
+  let c: Config;
+  try { c = { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(f, 'utf8')) }; }
+  catch (e) { throw new Error(`ideas/config.json does not parse: ${e instanceof Error ? e.message : e}`); }
+  if (!['mock', 'discord'].includes(c.adapter)) throw new Error(`ideas/config.json: adapter must be mock or discord, not ${JSON.stringify(c.adapter)}`);
+  if (!Array.isArray(c.allowlist)) throw new Error('ideas/config.json: allowlist must be a list of user ids');
+  return c;
+}
 export const loadIdeas = (root: string): Idea[] => existsSync(dir(root))
   ? readdirSync(dir(root)).filter(f => /^I-\d+\.json$/.test(f)).map(f => JSON.parse(readFileSync(join(dir(root), f), 'utf8')))
     .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
   : [];
 const file = (root: string, id: string) => join(dir(root), `${id}.json`);
-const save = (root: string, i: Idea) => { mkdirSync(dir(root), { recursive: true }); writeFileSync(file(root, i.id), JSON.stringify(i, null, 2) + '\n'); };
-// The bridge and `orch idea` both write ideas: re-read right before each write, with no await in between.
-function update(root: string, id: string, f: (i: Idea) => Idea): Idea {
-  const i = f(JSON.parse(readFileSync(file(root, id), 'utf8')));
-  save(root, i);
-  return i;
-}
+const save = (root: string, i: Idea) => writeAtomic(file(root, i.id), JSON.stringify(i, null, 2) + '\n');
 const said = (by: string, text: string, ts: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text }] });
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
+
+const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const alive = (pid: number) => { try { return pid > 0 && process.kill(pid, 0); } catch { return false; } };
+
+// A lock is stale when its owner process is gone, or it has had no owner for a few seconds (a crash right after mkdir).
+// It is taken over by renaming it away, which only one process can do; a process that renamed a lock that turned out
+// to be fresh puts it back.
+function takeStale(lock: string) {
+  let owner = '';
+  try { owner = readFileSync(join(lock, 'owner'), 'utf8'); }
+  catch { try { if (Date.now() - statSync(lock).mtimeMs < 3000) return; } catch { return; } }
+  if (owner && alive(Number(owner.split(' ')[0]))) return;
+  const aside = `${lock}.stale-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try { renameSync(lock, aside); } catch { return; }
+  let taken = '';
+  try { taken = readFileSync(join(aside, 'owner'), 'utf8'); } catch {}
+  if (taken !== owner) { try { renameSync(aside, lock); } catch {} return; }
+  rmSync(aside, { recursive: true, force: true });
+}
+
+export function locked<T>(root: string, f: () => T): T {
+  mkdirSync(dir(root), { recursive: true });
+  const lock = join(dir(root), '.lock');
+  const until = Date.now() + 15_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      writeFileSync(join(lock, 'owner'), `${process.pid} ${Math.random().toString(36).slice(2)}`);
+      break;
+    } catch (e: any) { if (e.code !== 'EEXIST') throw e; }
+    takeStale(lock);
+    if (Date.now() > until) throw new Error(`ideas/ is locked by another process (${lock})`);
+    pause(10);
+  }
+  try { return f(); } finally { rmSync(lock, { recursive: true, force: true }); }
+}
+
+// Re-reads the idea and writes it back, under the lock.
+const update = (root: string, id: string, f: (i: Idea) => Idea): Idea =>
+  locked(root, () => { const i = f(JSON.parse(readFileSync(file(root, id), 'utf8'))); save(root, i); return i; });
 
 // The watcher tails the feed, so a feed line is how an idea message reaches orch.
 function feed(root: string, line: string, now: string) {
@@ -37,52 +81,45 @@ function feed(root: string, line: string, now: string) {
   appendFileSync(join(root, 'feed', `${new Date(now).toLocaleDateString('sv-SE')}.jsonl`), JSON.stringify(e) + '\n');
 }
 
-// One message at a time: Discord delivers messages concurrently, and two new ideas must not race for an id.
-export function serial<T>(f: (x: T) => Promise<void>): (x: T) => Promise<void> {
-  let tail: Promise<void> = Promise.resolve();
-  return x => {
-    const p = tail.then(() => f(x));
-    tail = p.catch(() => {});
-    return p;
-  };
-}
-
 export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
   const now = (d.now ?? (() => new Date().toISOString()))();
-  const told = loadTold(d.root);
-  const r = route(m, { ideas: loadIdeas(d.root), config: loadConfig(d.root), off: isOff(d.root), now, told });
+  const config = loadConfig(d.root);
+  const text = sanitize(m.text);
+  // Decide and record under the lock; talk to Discord after it.
+  const r = locked(d.root, () => {
+    const told = loadTold(d.root);
+    const r = route(m, { ideas: loadIdeas(d.root), config, off: isOff(d.root), now, told });
+    if (r.kind === 'decline' && r.answer) writeAtomic(join(dir(d.root), 'told.json'), JSON.stringify(tell(told, `${r.reason}:${m.author.id}`, now)) + '\n');
+    if (r.kind === 'new') {
+      const id = nextId(loadIdeas(d.root).map(i => i.id));
+      save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text }] });
+      return { ...r, id };
+    }
+    if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go') {
+      const cur = said(m.author.name, text, now)(JSON.parse(readFileSync(file(d.root, r.idea!.id), 'utf8')));
+      const next = r.kind === 'go' ? advance(cur, 'go', now) : cur;
+      if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
+      save(d.root, r.kind === 'answer' ? next : { ...next, needsOrch: r.kind === 'go' ? 'go' as const : 'msg' as const, ...(r.kind === 'go' ? { goBy: m.author.id } : {}) });
+    }
+    return r;
+  });
   const react = (emoji: string, id: string) => d.chat.react(m.channel, m.id, emoji)
     .catch(e => d.log(`idea ${id}: ${emoji} reaction failed: ${e instanceof Error ? e.message : e}`));
   if (r.kind === 'ignore') return;
   if (r.kind === 'decline') {
-    if (r.answer) {
-      await d.chat.reply(m.thread ?? m.channel, r.reason === 'paused' ? PAUSED : STRANGER);
-      mkdirSync(dir(d.root), { recursive: true });
-      writeFileSync(join(dir(d.root), 'told.json'), JSON.stringify(tell(told, `${r.reason}:${m.author.id}`, now)) + '\n');
-    }
-    d.log(`idea bridge declined ${m.author.name} (${m.author.id}, ${r.reason === 'paused' ? 'bridge paused' : 'not allowlisted'}${r.answer ? '' : ', no reply'}): ${sanitize(m.text).replace(/\s+/g, ' ').slice(0, 80)}`);
+    if (r.answer) await d.chat.reply(m.thread ?? m.channel, r.text);
+    d.log(`idea bridge declined ${m.author.name} (${m.author.id}, ${{ stranger: 'not allowlisted', paused: 'bridge paused', limit: 'over the daily limit' }[r.reason]}${r.answer ? '' : ', no reply'}): ${text.replace(/\s+/g, ' ').slice(0, 80)}`);
     return;
   }
   if (r.kind === 'new') {
-    // The id is taken on disk before the first await.
-    const id = nextId(loadIdeas(d.root).map(i => i.id));
-    save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'talk', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text }] });
     let thread: string;
     try { thread = await d.chat.createThread(m.id, threadName(r.text)); }
-    catch (e) { rmSync(file(d.root, id), { force: true }); throw e; }
-    update(d.root, id, i => ({ ...i, thread }));
-    feed(d.root, ideaLine(id, 'new', m.author.name, r.text), now);
-    d.log(`idea ${id} from ${m.author.name}: ${r.text.slice(0, 100)}`);
-    await react('👀', id);
-    return;
-  }
-  if (r.kind === 'answer' && !r.idea) {
-    await d.chat.reply(m.channel, r.text);
-    d.log(`idea bridge answered ${m.author.name}: ${r.text.slice(0, 80)}`);
+    catch (e) { locked(d.root, () => rmSync(file(d.root, r.id), { force: true })); throw e; }
+    opened(d, r.id, thread, now);
+    await react('👀', r.id);
     return;
   }
   const id = r.idea!.id;
-  update(d.root, id, said(m.author.name, sanitize(m.text), now));
   if (r.kind === 'answer') {
     await d.chat.reply(m.thread!, r.text);
     update(d.root, id, said('orch', r.text, now));
@@ -90,38 +127,33 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     return;
   }
   if (r.kind === 'message') return feed(d.root, ideaLine(id, 'msg', m.author.name, r.text), now);
-  let went = false;
-  update(d.root, id, i => {
-    const next = advance(i, 'go', now);
-    if (typeof next === 'string') return i;
-    went = true;
-    return { ...next, goBy: m.author.id };
-  });
-  if (!went) return;
   feed(d.root, ideaLine(id, 'go', m.author.name, 'go'), now);
   d.log(`idea ${id}: go from ${m.author.name}`);
   await react('✅', id);
 }
 
-// Held from the building check through the dispatch, so two starts cannot both pass the limit.
-// A lock whose process is gone is stale and taken over.
-async function withLock<T>(lock: string, f: () => Promise<T>): Promise<T> {
-  let fd: number | undefined;
-  for (let tries = 0; fd === undefined; tries++) {
-    try { fd = openSync(lock, 'wx'); }
-    catch (e: any) {
-      if (e.code !== 'EEXIST' || tries) throw e.code === 'EEXIST' ? new Error(`another idea start is running (${lock})`) : e;
-      const pid = Number(readFileSync(lock, 'utf8'));
-      let alive = false;
-      try { alive = !!pid && process.kill(pid, 0); } catch {}
-      if (alive) throw new Error(`another idea start is running (pid ${pid}, ${lock})`);
-      rmSync(lock, { force: true });
-    }
-  }
-  writeSync(fd, String(process.pid));
-  closeSync(fd);
-  try { return await f(); } finally { rmSync(lock, { force: true }); }
+function opened(d: Deps, id: string, thread: string, now: string) {
+  const i = update(d.root, id, i => ({ ...i, thread, state: 'talk', needsOrch: 'new' }));
+  feed(d.root, ideaLine(id, 'new', i.author.name, i.text), now);
+  d.log(`idea ${id} from ${i.author.name}: ${i.text.slice(0, 100)}`);
 }
+
+// On daemon start: an idea left in creating (the bridge died while opening its thread) gets the thread that was
+// opened, or is dropped so the post is handled again.
+export async function reconcile(d: Deps & { chat: Chat }) {
+  const now = (d.now ?? (() => new Date().toISOString()))();
+  for (const i of loadIdeas(d.root).filter(i => i.state === 'creating')) {
+    const thread = await d.chat.findThread(i.message);
+    if (thread) { opened(d, i.id, thread, now); continue; }
+    locked(d.root, () => rmSync(file(d.root, i.id), { force: true }));
+    d.log(`idea ${i.id} dropped: its thread was never opened (post ${i.message} by ${i.author.name})`);
+  }
+}
+
+const runningWorker = (root: string, name: string) => {
+  try { return JSON.parse(readFileSync(join(root, 'workers.json'), 'utf8')).some((w: any) => w.name === name && w.status === 'running'); }
+  catch { return false; }
+};
 
 const USAGE = `usage: orch idea list | off | on
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
@@ -149,7 +181,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   if (sub === 'list' || !sub) {
     const all = loadIdeas(d.root);
     return [`bridge ${isOff(d.root) ? 'off' : 'on'}, adapter ${config.adapter}`,
-      ...all.map(i => `${i.id} [${i.state}${i.worker ? ` ${i.worker}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}`)].join('\n');
+      ...all.map(i => `${i.id} [${i.state}${i.worker ? ` ${i.worker}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
   }
   if (sub === 'off' || sub === 'on') {
     mkdirSync(dir(d.root), { recursive: true });
@@ -172,11 +204,17 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   if (!id) throw new Error(USAGE);
   const cur = loadIdeas(d.root).find(i => i.id === id) ?? fail(`no idea ${id}`);
   const check = (s: Step, i = cur) => { const next = advance(i, s, now); return typeof next === 'string' ? fail(next) : next; };
-  // Posts first, records after: a failed post changes nothing.
+  // orch answered, so the idea no longer waits on orch.
+  const answered = (i: Idea, text: string): Idea => ({ ...said('orch', text, now)(i), needsOrch: undefined });
+  // Checked before posting, and again under the lock after: the daemon may have moved the idea meanwhile.
   const post = async (s: Step, text: string, patch: Partial<Idea> = {}) => {
     check(s);
     await chat().reply(cur.thread, text);
-    return update(d.root, id, i => said('orch', text, now)({ ...check(s, i), ...patch }));
+    return update(d.root, id, i => {
+      const next = advance(i, s, now);
+      if (typeof next === 'string') fail(`posted, but not recorded: ${next}`);
+      return answered({ ...(next as Idea), ...patch }, text);
+    });
   };
   const text = textOf(d.root, rest);
   if (sub === 'say') {
@@ -187,26 +225,36 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   }
   if (sub === 'plan') {
     if (!text) throw new Error(USAGE);
-    check('plan');
     // The old plan and any go on it are withdrawn first; the new one is approvable once its post is up.
-    update(d.root, id, i => ({ ...i, state: 'talk', plan: undefined, goBy: undefined, updated: now }));
+    update(d.root, id, i => { check('plan', i); return { ...i, state: 'talk', plan: undefined, goBy: undefined, updated: now }; });
     await chat().reply(cur.thread, planPost(text));
-    update(d.root, id, i => said('orch', planPost(text), now)({ ...check('plan', i), plan: text }));
+    update(d.root, id, i => answered({ ...check('plan', i), plan: text }, planPost(text)));
     d.log(`idea ${id} plan posted: ${text.split('\n')[0].slice(0, 100)}`);
     return `plan posted in ${id}; waiting for go`;
   }
   if (sub === 'start') {
     const name = workerName(id);
-    await withLock(join(dir(d.root), 'start.lock'), async () => {
+    // The building slot is taken under the lock, so two starts cannot both pass the limit.
+    const building = locked(d.root, () => {
       const fresh = loadIdeas(d.root);
       const blocker = startBlocker(fresh.find(i => i.id === id)!, fresh, config, isOff(d.root));
       if (blocker) fail(`not started: ${blocker}`);
-      const building = update(d.root, id, i => ({ ...check('start', i), worker: name }));
-      try { d.run([config.repo, name, workerTask(building)]); }
-      catch (e) { update(d.root, id, i => ({ ...i, state: 'approved', worker: undefined, updated: now })); throw e; }
+      const i: Idea = { ...check('start', fresh.find(i => i.id === id)), worker: name, needsOrch: undefined };
+      save(d.root, i);
+      return i;
     });
+    try { d.run([config.repo, name, workerTask(building)]); }
+    catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // run can fail after the worker exists (not ready, prompt stalled): the idea builds with that worker.
+      if (!runningWorker(d.root, name)) {
+        update(d.root, id, i => i.state === 'building' && i.worker === name ? { ...i, state: 'approved', worker: undefined, updated: now } : i);
+        throw e;
+      }
+      d.log(`idea ${id} start: run reported "${msg.slice(0, 120)}", but worker ${name} exists; building with it`);
+    }
     await chat().reply(cur.thread, startPost());
-    update(d.root, id, said('orch', startPost(), now));
+    update(d.root, id, i => answered(i, startPost()));
     d.log(`idea ${id} start: worker ${name} on ${config.repo}`);
     return `${id} building as worker ${name}`;
   }

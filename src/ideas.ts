@@ -1,14 +1,17 @@
 // The Discord idea bridge, pure parts: idea state machine, who may do what, and every text the bridge posts.
 // Discord text is untrusted: it is stripped of links and mentions on the way in and only ever quoted to workers.
 
-export type State = 'talk' | 'planned' | 'approved' | 'building' | 'shipped' | 'closed';
+// creating: the post is recorded and its thread is being opened.
+export type State = 'creating' | 'talk' | 'planned' | 'approved' | 'building' | 'shipped' | 'closed';
 export type Step = 'say' | 'plan' | 'go' | 'start' | 'ship' | 'close';
 export type User = { id: string; name: string };
 // Every message in the idea's thread, in full: the team's (sanitized) and orch's own posts.
 export type Message = { ts: string; by: string; text: string };
+// needsOrch: the kind of the last team event orch has not answered yet; say, plan, start, ship and close clear it.
+export type Pending = 'new' | 'msg' | 'go';
 export type Idea = {
   id: string; thread: string; message: string; author: User; text: string; state: State;
-  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
+  created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[]; needsOrch?: Pending;
 };
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
@@ -18,7 +21,7 @@ export type Config = {
 export type Incoming = { id: string; channel: string; thread?: string; author: User; text: string };
 export type Route =
   | { kind: 'answer'; text: string; idea?: Idea }
-  | { kind: 'decline'; reason: 'stranger' | 'paused'; answer: boolean; idea?: Idea }
+  | { kind: 'decline'; reason: 'stranger' | 'paused' | 'limit'; text: string; answer: boolean; idea?: Idea }
   | { kind: 'ignore' }
   | { kind: 'new'; text: string }
   | { kind: 'message'; idea: Idea; text: string }
@@ -29,6 +32,7 @@ export const DEFAULT_CONFIG: Config = {
 };
 
 const NEXT: Record<State, Partial<Record<Step, State>>> = {
+  creating: {},
   talk: { say: 'talk', plan: 'planned', close: 'closed' },
   planned: { say: 'planned', plan: 'planned', go: 'approved', close: 'closed' },
   approved: { say: 'approved', plan: 'planned', start: 'building', close: 'closed' },
@@ -46,7 +50,7 @@ export function advance(idea: Idea, step: Step, now: string): Idea | string {
 export const PAUSED = 'The idea bridge is paused right now. Try again later.';
 const day = (iso: string) => new Date(iso).toLocaleDateString('sv-SE');
 
-// A decline (stranger, paused) is said once per user per day, then the bridge stays silent so a busy channel stays quiet.
+// A decline (stranger, paused, over the daily limit) is said once per user per day, then the bridge stays silent so a busy channel stays quiet.
 // Keys are `<reason>:<user id>`.
 export type Told = { day: string; keys: string[] };
 const toldToday = (t: Told, now: string) => t.day === day(now) ? t.keys : [];
@@ -69,10 +73,11 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   const idea = m.thread ? o.ideas.find(i => i.thread === m.thread) : undefined;
   if (m.thread ? !idea : m.channel !== o.config.channel) return { kind: 'ignore' };
   const text = sanitize(m.text);
-  const allowed = o.config.allowlist.includes(m.author.id) || idea?.author.id === m.author.id;
+  // Only the allowlist counts, also for an idea's own author: taking someone off the list takes them out of their threads.
+  const allowed = o.config.allowlist.includes(m.author.id);
   const fresh = (reason: string) => !toldToday(o.told, o.now).includes(`${reason}:${m.author.id}`);
-  if (!allowed) return { kind: 'decline', reason: 'stranger', answer: !o.off && fresh('stranger'), idea };
-  if (o.off) return { kind: 'decline', reason: 'paused', answer: fresh('paused'), idea };
+  if (!allowed) return { kind: 'decline', reason: 'stranger', text: STRANGER, answer: !o.off && fresh('stranger'), idea };
+  if (o.off) return { kind: 'decline', reason: 'paused', text: PAUSED, answer: fresh('paused'), idea };
   if (idea) {
     if (idea.state === 'closed') return { kind: 'answer', text: `This idea is closed. Post a new one in the channel to pick it up again.`, idea };
     if (GO.test(text)) {
@@ -83,7 +88,7 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   }
   if (!text) return { kind: 'ignore' };
   const today = o.ideas.filter(i => i.author.id === m.author.id && day(i.created) === day(o.now)).length;
-  if (today >= o.config.perDay) return { kind: 'answer', text: limitText(o.config.perDay) };
+  if (today >= o.config.perDay) return { kind: 'decline', reason: 'limit', text: limitText(o.config.perDay), answer: fresh('limit') };
   return { kind: 'new', text };
 }
 
@@ -117,6 +122,24 @@ export const threadName = (text: string) => (text.split('\n')[0].slice(0, 90).tr
 // One line for orch's watcher. The text is untrusted; orch reads it as data.
 export const ideaLine = (id: string, kind: string, author: string, text: string) =>
   `IDEA ${id} ${kind} ${author.replace(/\s+/g, '_')}: ${text.replace(/\s+/g, ' ').trim().slice(0, 300)}`;
+
+// What orch has not answered yet, as watcher lines: the last team message of each flagged idea.
+export function pendingLines(ideas: Idea[]): string[] {
+  return ideas.filter(i => i.needsOrch).map(i => {
+    const last = (i.messages ?? []).filter(m => m.by !== 'orch').at(-1) ?? { by: i.author.name, text: i.text };
+    return ideaLine(i.id, i.needsOrch!, last.by, last.text);
+  });
+}
+
+// One call at a time, in arrival order; a failed call does not stop the ones after it.
+export function serial<T>(f: (x: T) => Promise<void>): (x: T) => Promise<void> {
+  let tail: Promise<void> = Promise.resolve();
+  return x => {
+    const p = tail.then(() => f(x));
+    tail = p.catch(() => {});
+    return p;
+  };
+}
 
 export const nextId = (ids: string[]) => `I-${Math.max(0, ...ids.map(i => Number(i.replace(/^I-/, '')) || 0)) + 1}`;
 

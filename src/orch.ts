@@ -13,7 +13,8 @@ import {
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
 import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrState } from './prs.ts';
 import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
-import { idea as ideaCmd } from './ideas-io.ts';
+import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
+import { pendingLines } from './ideas.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -290,6 +291,7 @@ function brief() {
     plans: dir('plans').filter(f => f !== 'README.md').map(f => parsePlan(read(`plans/${f}`))),
     learned: dir('learned').flatMap(f => parseLearned(read(`learned/${f}`)).map(l => ({ ...l, id: `${f.replace('.md', '')}/${l.id}` }))),
     workers: loadWorkers(),
+    ideas: pendingLines(loadIdeas(root)),
   }));
 }
 

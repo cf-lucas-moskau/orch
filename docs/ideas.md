@@ -19,11 +19,13 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `close <id> [reason]` | Done, dropped, or merged into another idea. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
 
-States go `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`.
+States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
+
+Every new idea, thread message and go marks the idea as needing orch until orch answers with `say`, `plan`, `start`, `ship` or `close`. `list` and the morning brief show those ideas, and the watcher prints their IDEA lines again when it starts, so nothing posted while orch was down is missed.
 
 ## Settings
 
-`ideas/config.json`, every key optional:
+`ideas/config.json`, every key optional. A file that exists but does not parse stops the bridge and `orch idea` until it is fixed.
 
 ```json
 {
@@ -37,7 +39,9 @@ States go `talk`, `planned`, `approved` (someone said go), `building`, `shipped`
 }
 ```
 
-Only allowlisted user ids can post ideas and say go (the idea's author always can). Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day, `building` caps ideas building at once.
+Only allowlisted user ids can post ideas, talk in their threads and say go; taking someone off the list also takes them out of their own ideas. Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day (the limit is also said once a day), `building` caps ideas building at once.
+
+The live bridge remembers the last message it handled in the channel and in each thread. After a restart it catches up on everything posted since, in the channel and its active threads, before it handles new messages.
 
 ## Try it on mocks
 

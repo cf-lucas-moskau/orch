@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChat, MockChat } from '../src/discord.ts';
-import { handle, idea, loadIdeas, serial, textOf, type Deps } from '../src/ideas-io.ts';
+import { buildBrief } from '../src/brief.ts';
+import { handle, idea, loadConfig, loadIdeas, locked, reconcile, textOf, type Deps } from '../src/ideas-io.ts';
 import {
-  advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, route, sanitize, shipPost, split, startBlocker, STRANGER, workerTask, type Idea, type Incoming,
+  advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerTask, type Idea, type Incoming,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -31,7 +32,7 @@ test('routing: strangers, go, closed ideas, other channels', () => {
   const o = { ideas: [{ ...base, state: 'planned' as const }], config, off: false, now: NOW, told: { day: '', keys: [] } };
   const told = (day: string, ...keys: string[]) => ({ ...o, told: { day, keys } });
   const m = (author: string, text: string, thread?: string) => ({ id: 'x', channel: thread ?? 'ideas', thread, author: { id: author, name: author }, text });
-  const stranger = (answer: boolean) => ({ kind: 'decline', reason: 'stranger', answer, idea: undefined });
+  const stranger = (answer: boolean) => ({ kind: 'decline', reason: 'stranger', text: STRANGER, answer, idea: undefined });
   assert.deepEqual(route(m('eve', 'idea'), o), stranger(true));
   assert.deepEqual(route(m('eve', 'idea'), told('2026-10-30', 'stranger:eve')), stranger(false));
   assert.deepEqual(route(m('eve', 'idea'), told('2026-10-29', 'stranger:eve')), stranger(true), 'a new day, a new answer');
@@ -43,7 +44,7 @@ test('routing: strangers, go, closed ideas, other channels', () => {
   assert.equal(route(m('ann', 'go further', 't-m1'), o).kind, 'message');
   assert.deepEqual(route(m('ann', 'go', 't-m1'), { ...o, ideas: [base] }), { kind: 'answer', text: 'There is no plan to say go to yet.', idea: base });
   assert.equal(route(m('ann', 'more', 't-m1'), { ...o, ideas: [{ ...base, state: 'closed' }] }).kind, 'answer');
-  const paused = (answer: boolean, idea?: Idea) => ({ kind: 'decline', reason: 'paused', answer, idea });
+  const paused = (answer: boolean, idea?: Idea) => ({ kind: 'decline', reason: 'paused', text: PAUSED, answer, idea });
   assert.deepEqual(route(m('ann', 'idea'), { ...o, off: true }), paused(true));
   assert.deepEqual(route(m('ann', 'idea'), { ...told('2026-10-30', 'paused:ann'), off: true }), paused(false));
   assert.deepEqual(route(m('eve', 'idea'), { ...o, off: true }), stranger(false), 'off, strangers hear nothing');
@@ -185,7 +186,7 @@ test('kill switch: the bridge answers paused and nothing builds', async () => {
   await idea(['on'], w.d);
   await w.post('third idea', '--as', 'ann');
   assert.equal(loadIdeas(w.root).length, 2);
-  assert.match(await idea(['list'], w.d), /^bridge on, adapter mock\nI-1 \[approved\] ann: first idea\nI-2 \[talk\] ann: third idea$/);
+  assert.equal(await idea(['list'], w.d), 'bridge on, adapter mock\nI-1 [approved] ann: first idea (needs orch: go)\nI-2 [talk] ann: third idea (needs orch: new)');
 });
 
 test('rate limit: N ideas a day per person', async () => {
@@ -193,7 +194,9 @@ test('rate limit: N ideas a day per person', async () => {
   await w.post('one', '--as', 'ann');
   await w.post('two', '--as', 'ann');
   await w.post('three', '--as', 'ann');
-  assert.equal(w.replies().at(-1), limitText(2));
+  await w.post('four', '--as', 'ann');
+  assert.deepEqual(w.replies(), [limitText(2)], 'the limit is said once a day');
+  assert.ok(w.logs.includes('idea bridge declined ann (ann, over the daily limit, no reply): four'));
   await w.post('bob has his own budget', '--as', 'bob');
   assert.equal(loadIdeas(w.root).length, 3);
   w.setNow('2026-10-31T10:00:00.000Z');
@@ -210,7 +213,7 @@ test('orch idea and the daemon work as processes', () => {
   assert.equal(node('orch.ts', 'idea', 'fake', 'Pets', 'follow', 'you', '--as', 'ann'), 'posted m1 as ann');
   node('ideas-run.ts', '--once');
   node('ideas-run.ts', '--once');
-  assert.equal(node('orch.ts', 'idea', 'list'), 'bridge on, adapter mock\nI-1 [talk] ann: Pets follow you');
+  assert.equal(node('orch.ts', 'idea', 'list'), 'bridge on, adapter mock\nI-1 [talk] ann: Pets follow you (needs orch: new)');
   assert.match(readFileSync(join(root, 'log.md'), 'utf8'), /idea I-1 from ann: Pets follow you/);
 });
 
@@ -280,30 +283,6 @@ test('(4) a replacement plan is approvable only after its post is up', async () 
   assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].plan], ['planned', 'second plan']);
 });
 
-test('(5) start holds a lock across the check and the dispatch, and rolls back a failed run', async () => {
-  const w = world();
-  await w.post('idea', '--as', 'ann');
-  await idea(['plan', 'I-1', 'plan'], w.d);
-  await w.post('--in', 'I-1', 'go', '--as', 'ann');
-  const lock = join(w.root, 'ideas', 'start.lock');
-
-  writeFileSync(lock, String(process.pid));
-  await assert.rejects(idea(['start', 'I-1'], w.d), new RegExp(`another idea start is running \\(pid ${process.pid}`));
-  assert.deepEqual([w.runs.length, loadIdeas(w.root)[0].state], [0, 'approved']);
-
-  w.d.run = () => { throw new Error('run failed: cap reached'); };
-  writeFileSync(lock, '999999');
-  await assert.rejects(idea(['start', 'I-1'], w.d), /cap reached/);
-  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].worker], ['approved', undefined], 'a failed run frees the building slot');
-  assert.equal(existsSync(lock), false, 'a stale lock is taken over and released');
-
-  let seen: string[] = [];
-  w.d.run = a => { seen = [loadIdeas(w.root)[0].state, String(existsSync(lock))]; };
-  await idea(['start', 'I-1'], w.d);
-  assert.deepEqual(seen, ['building', 'true'], 'the slot is reserved and the lock held while run dispatches');
-  assert.equal(existsSync(lock), false);
-});
-
 test('(6) a failed reaction neither loses the feed line nor fails the message', async () => {
   const w = world();
   w.chat.fail.add('react');
@@ -328,14 +307,152 @@ test('(7) the idea keeps every thread message in full; only the watcher line is 
   assert.equal(w.feed()[1].length, 'IDEA I-1 msg ann: '.length + 300);
 });
 
-test('(8) the discord adapter keeps only people in the channel and its threads', async () => {
+test('(8) mock inbox lines that fail are logged and skipped', async () => {
+  const w = world();
+  await idea(['fake', 'first', '--as', 'ann'], w.d);
+  appendFileSync(join(w.chat.dir, 'inbox.jsonl'), 'not json\n');
+  await idea(['fake', 'third', '--as', 'ann'], w.d);
+  await w.chat.poll();
+  assert.deepEqual(loadIdeas(w.root).map(i => i.text), ['first', 'third']);
+  assert.ok(w.logs.some(l => l.startsWith('mock inbox line 2 failed: ') && l.endsWith(': not json')), w.logs.join('\n'));
+});
+
+const SRC = join(import.meta.dirname, '..', 'src');
+const nodeArgs = ['--experimental-strip-types', '--no-warnings'];
+const exited = (c: ReturnType<typeof spawn>) => new Promise<number>(r => c.on('exit', code => r(code ?? -1)));
+
+function discordStub(routes: Record<string, unknown>) {
+  const calls: unknown[][] = [];
+  const answer = (path: string, query?: URLSearchParams) => {
+    const v = routes[query ? `${path}?${query}` : path] ?? routes[path];
+    if (v instanceof Error) throw v;
+    return structuredClone(v ?? []);
+  };
+  class REST {
+    setToken() { return this; }
+    async get(path: string, o?: { query?: URLSearchParams }) { calls.push(['GET', path, o?.query?.toString()]); return answer(path, o?.query); }
+    async post(path: string, o: { body: unknown }) { calls.push(['POST', path, o.body]); return { id: 'thread-1' }; }
+    async put(path: string) { calls.push(['PUT', path]); }
+  }
   class Client extends EventEmitter { async login() {} async destroy() {} }
-  const stub = { Client, GatewayIntentBits: { Guilds: 1, GuildMessages: 2, MessageContent: 3 } };
+  return { calls, lib: { REST, Client, GatewayIntentBits: { Guilds: 1, GuildMessages: 2, MessageContent: 3 }, Events: { ClientReady: 'clientReady' } } };
+}
+const raw = (id: string, channel: string, content: string, bot = false) => ({ id, channel_id: channel, content, author: { id: 'u1', username: 'ann', bot } });
+const settle = () => new Promise(r => setTimeout(r, 30));
+
+test('review 2 (1): two processes writing the same idea lose nothing', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  const script = join(w.root, 'say-many.ts');
+  writeFileSync(script, `import { idea } from '${SRC}/ideas-io.ts';
+import { MockChat } from '${SRC}/discord.ts';
+const [root, tag] = process.argv.slice(2);
+const chat = new MockChat(root, 'ideas');
+for (let i = 0; i < 25; i++) await idea(['say', 'I-1', tag + i], { root, chat, log: () => {}, run: () => {} });
+`);
+  const codes = await Promise.all(['a', 'b'].map(tag => exited(spawn(process.execPath, [...nodeArgs, script, w.root, tag], { stdio: 'inherit' }))));
+  assert.deepEqual(codes, [0, 0]);
+  const said = loadIdeas(w.root)[0].messages!.filter(m => m.by === 'orch').map(m => m.text);
+  assert.equal(said.length, 50);
+  assert.deepEqual([...said].sort(), [...Array.from({ length: 25 }, (_, i) => `a${i}`), ...Array.from({ length: 25 }, (_, i) => `b${i}`)].sort());
+});
+
+test('review 2 (1): the ideas lock waits for its holder, and stale locks are taken over', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-lock-'));
+  const lock = join(root, 'ideas', '.lock');
+  const script = join(root, 'hold.ts');
+  writeFileSync(script, `import { writeFileSync } from 'node:fs';
+import { locked } from '${SRC}/ideas-io.ts';
+locked(process.argv[2], () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400); writeFileSync(process.argv[2] + '/held-done', ''); });
+`);
+  const child = spawn(process.execPath, [...nodeArgs, script, root], { stdio: 'inherit' });
+  while (!existsSync(join(lock, 'owner'))) await new Promise(r => setTimeout(r, 5));
+  assert.equal(locked(root, () => existsSync(join(root, 'held-done'))), true, 'ran only after the holder finished');
+  assert.equal(await exited(child), 0);
+
+  mkdirSync(lock);
+  writeFileSync(join(lock, 'owner'), '999999 dead');
+  assert.equal(locked(root, () => 'taken'), 'taken', 'a dead owner is stale');
+  mkdirSync(lock);
+  utimesSync(lock, new Date(Date.now() - 10_000), new Date(Date.now() - 10_000));
+  assert.equal(locked(root, () => 'taken'), 'taken', 'an old lock without owner is stale');
+  assert.equal(existsSync(lock), false);
+});
+
+test('review 2 (2): ideas waiting on orch are flagged, listed, briefed and replayed by the watcher', async () => {
+  const w = world();
+  const flag = () => loadIdeas(w.root)[0].needsOrch;
+  await w.post('Bats drop more loot', '--as', 'ann');
+  assert.equal(flag(), 'new');
+  await idea(['say', 'I-1', 'Which bats?'], w.d);
+  assert.equal(flag(), undefined);
+  await w.post('--in', 'I-1', 'the cave ones', '--as', 'ann');
+  assert.equal(flag(), 'msg');
+  assert.deepEqual(pendingLines(loadIdeas(w.root)), ['IDEA I-1 msg ann: the cave ones']);
+  await idea(['plan', 'I-1', 'Cave bats drop 2x.'], w.d);
+  assert.equal(flag(), undefined);
+  await w.post('--in', 'I-1', 'go', '--as', 'bob');
+  assert.equal(flag(), 'go');
+  assert.match(await idea(['list'], w.d), /I-1 \[approved\] ann: Bats drop more loot \(needs orch: go\)$/);
+  const brief = buildBrief({ date: '2026-10-30', feed: [], since: NOW, names: {}, decisions: [], plans: [], learned: [], workers: [], ideas: pendingLines(loadIdeas(w.root)) });
+  assert.match(brief, /## Ideas waiting on orch \(1\)\nIDEA I-1 go bob: go\n/);
+
+  const watch = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: w.root } });
+  const first = await new Promise<string>(r => watch.stdout.once('data', d => r(String(d).split('\n')[0])));
+  watch.kill();
+  assert.equal(first, 'IDEA I-1 go bob: go');
+
+  await idea(['start', 'I-1'], w.d);
+  assert.equal(flag(), undefined);
+});
+
+test('review 2 (3): the live adapter catches up from its cursors and logs client errors', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const cursorFile = join(root, 'cursor.json');
+  writeFileSync(cursorFile, JSON.stringify({ 100: '10' }));
+  const { calls, lib } = discordStub({
+    '/channels/100': { guild_id: 'g' },
+    '/guilds/g/threads/active': { threads: [{ id: '300', parent_id: '100' }, { id: '500', parent_id: '999' }] },
+    '/channels/100/messages?after=10&limit=100': [raw('12', '100', 'second'), raw('11', '100', 'first'), raw('13', '100', 'bot', true)],
+    '/channels/300/messages?after=300&limit=100': [raw('301', '300', 'in thread')],
+  });
+  const errors: string[] = [], got: string[] = [];
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile, onError: e => errors.push(e), lib });
+  chat.onMessage(async m => { got.push(`${m.id}${m.thread ? '@' + m.thread : ''}`); });
+  await chat.start();
+  const client = (chat as any).client as EventEmitter;
+  const live = (id: string) => client.emit('messageCreate', { id, channelId: '100', content: 'live', author: { id: 'u1', username: 'ann', bot: false }, channel: { isThread: () => false, parentId: null } });
+  live('14');
+  live('12');
+  client.emit('clientReady');
+  await settle();
+  assert.deepEqual(got, ['11', '12', '301@300', '14'], 'backfill in order, live messages after it, nothing twice, no bots');
+  assert.deepEqual(JSON.parse(readFileSync(cursorFile, 'utf8')), { 100: '14', 300: '301' });
+  assert.ok(!calls.some(c => String(c[1]).startsWith('/channels/500/')), 'threads of other channels are left alone');
+  client.emit('error', new Error('socket hang up'));
+  assert.deepEqual(errors, ['discord client error: socket hang up']);
+});
+
+test('review 2 (3): a first start does not replay the channel history', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const { calls, lib } = discordStub({ '/channels/100': { guild_id: 'g' }, '/guilds/g/threads/active': { threads: [] } });
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'cursor.json'), onError: () => {}, lib });
+  await chat.start();
+  (chat as any).client.emit('clientReady');
+  await settle();
+  assert.deepEqual(calls.map(c => c[1]), ['/channels/100', '/guilds/g/threads/active']);
+});
+
+test('review 2 (3): the live adapter keeps only people in the channel and its threads', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const { lib } = discordStub({ '/channels/100': { guild_id: 'g' }, '/guilds/g/threads/active': { threads: [] } });
   const errors: string[] = [], got: Incoming[] = [];
-  const chat = new DiscordChat('token', '100', e => errors.push(e), stub);
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'cursor.json'), onError: e => errors.push(e), lib });
   chat.onMessage(async m => { if (m.text === 'boom') throw new Error('handler broke'); got.push(m); });
   await chat.start();
-  const client = (chat as any).client as Client;
+  const client = (chat as any).client as EventEmitter;
+  client.emit('clientReady');
+  await settle();
   const send = (id: string, o: { bot?: boolean; channelId: string; thread?: string; content: string }) => client.emit('messageCreate', {
     id, channelId: o.channelId, content: o.content, author: { id: 'u1', username: 'ann', bot: !!o.bot },
     channel: { isThread: () => !!o.thread, parentId: o.thread ?? null },
@@ -346,7 +463,7 @@ test('(8) the discord adapter keeps only people in the channel and its threads',
   send('4', { channelId: '300', thread: '100', content: 'in a thread' });
   send('5', { channelId: '400', thread: '200', content: 'thread elsewhere' });
   send('6', { channelId: '100', content: 'boom' });
-  await new Promise(r => setImmediate(r));
+  await settle();
   assert.deepEqual(got, [
     { id: '1', channel: '100', author: { id: 'u1', name: 'ann' }, text: 'top level' },
     { id: '4', channel: '300', thread: '300', author: { id: 'u1', name: 'ann' }, text: 'in a thread' },
@@ -354,12 +471,95 @@ test('(8) the discord adapter keeps only people in the channel and its threads',
   assert.deepEqual(errors, ['discord message 6 failed: handler broke']);
 });
 
-test('(8) mock inbox lines that fail are logged and skipped', async () => {
+test('review 2 (4): a config that does not parse stops the bridge and orch idea', async () => {
   const w = world();
-  await idea(['fake', 'first', '--as', 'ann'], w.d);
-  appendFileSync(join(w.chat.dir, 'inbox.jsonl'), 'not json\n');
-  await idea(['fake', 'third', '--as', 'ann'], w.d);
-  await w.chat.poll();
-  assert.deepEqual(loadIdeas(w.root).map(i => i.text), ['first', 'third']);
-  assert.ok(w.logs.some(l => l.startsWith('mock inbox line 2 failed: ') && l.endsWith(': not json')), w.logs.join('\n'));
+  assert.equal(loadConfig(w.root).adapter, 'mock');
+  writeFileSync(join(w.root, 'ideas', 'config.json'), '{"adapter": "discord", "channel": "1",}');
+  assert.throws(() => loadConfig(w.root), /^Error: ideas\/config.json does not parse/);
+  await assert.rejects(handle(w.d, w.msg('ann', 'idea', 1)), /does not parse/);
+  await assert.rejects(idea(['list'], w.d), /does not parse/);
+  assert.equal(w.chat.outbox().length, 0);
+  writeFileSync(join(w.root, 'ideas', 'config.json'), '{"adapter": "dicsord"}');
+  assert.throws(() => loadConfig(w.root), /adapter must be mock or discord, not "dicsord"/);
+  rmSync(join(w.root, 'ideas', 'config.json'));
+  assert.equal(loadConfig(w.root).adapter, 'mock', 'no file at all means the defaults');
+});
+
+test('review 2 (5): an author taken off the allowlist is a stranger in their own thread', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  await idea(['plan', 'I-1', 'plan'], w.d);
+  writeFileSync(join(w.root, 'ideas', 'config.json'), JSON.stringify({ allowlist: ['bob'] }));
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+  assert.equal(w.replies().at(-1), STRANGER);
+  assert.equal(loadIdeas(w.root)[0].state, 'planned');
+});
+
+test('review 2 (7): a failed run rolls back, unless the worker exists; the slot is held during run', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  await idea(['plan', 'I-1', 'plan'], w.d);
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+
+  w.d.run = () => { throw new Error('run failed: cap reached'); };
+  await assert.rejects(idea(['start', 'I-1'], w.d), /cap reached/);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].worker], ['approved', undefined]);
+
+  w.d.run = () => {
+    assert.equal(loadIdeas(w.root)[0].state, 'building', 'the slot is taken before run');
+    writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'running' }]));
+    throw new Error('run failed: worker idea-1 is not ready (agent_not_ready)');
+  };
+  assert.equal(await idea(['start', 'I-1'], w.d), 'I-1 building as worker idea-1');
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].worker], ['building', 'idea-1']);
+  assert.ok(w.logs.some(l => l.includes('but worker idea-1 exists; building with it')));
+  assert.equal(w.replies().at(-1), 'Building it now. I will post here when it is live.');
+});
+
+test('review 2 (8): ideas left creating get their thread back or are dropped', async () => {
+  const w = world();
+  const creating = (id: string, message: string): Idea => ({ ...base, id, message, thread: '', state: 'creating' });
+  writeFileSync(join(w.root, 'ideas', 'I-1.json'), JSON.stringify(creating('I-1', 'm1')));
+  writeFileSync(join(w.root, 'ideas', 'I-2.json'), JSON.stringify(creating('I-2', 'm2')));
+  await w.chat.createThread('m1', 'More loot');
+  await reconcile(w.d);
+  const ideas = loadIdeas(w.root);
+  assert.deepEqual(ideas.map(i => [i.id, i.state, i.thread, i.needsOrch]), [['I-1', 'talk', 't-m1', 'new']]);
+  assert.deepEqual(w.feed(), ['IDEA I-1 new ann: More loot']);
+  assert.ok(w.logs.includes('idea I-2 dropped: its thread was never opened (post m2 by ann)'));
+});
+
+test('review 2 (8): the reservation is on disk as creating while the thread opens', async () => {
+  const w = world();
+  let during: string | undefined;
+  const create = w.chat.createThread.bind(w.chat);
+  w.chat.createThread = async (m, n) => { during = loadIdeas(w.root)[0]?.state; return create(m, n); };
+  await handle(w.d, w.msg('ann', 'idea', 1));
+  assert.equal(during, 'creating');
+  assert.equal(loadIdeas(w.root)[0].state, 'talk');
+});
+
+test('review 2 (9): DiscordChat posts without pings on the right REST routes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const notFound = Object.assign(new Error('Unknown Message'), { status: 404 });
+  const boom = Object.assign(new Error('Internal'), { status: 500 });
+  const { calls, lib } = discordStub({ '/channels/100/messages/m1': { thread: { id: 'm1' } }, '/channels/100/messages/m9': notFound, '/channels/100/messages/m5': boom });
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib });
+  const long = 'word '.repeat(500).trim();
+  await chat.reply('t1', long);
+  assert.equal(await chat.createThread('m1', 'More loot'), 'thread-1');
+  await chat.react('t1', 'm2', '👀');
+  assert.equal(await chat.findThread('m1'), 'm1');
+  assert.equal(await chat.findThread('m9'), null);
+  await assert.rejects(chat.findThread('m5'), /Internal/);
+  const parts = split(long);
+  assert.deepEqual(calls, [
+    ['POST', '/channels/t1/messages', { content: parts[0], allowed_mentions: { parse: [] } }],
+    ['POST', '/channels/t1/messages', { content: parts[1], allowed_mentions: { parse: [] } }],
+    ['POST', '/channels/100/messages/m1/threads', { name: 'More loot', auto_archive_duration: 10080 }],
+    ['PUT', '/channels/t1/messages/m2/reactions/%F0%9F%91%80/@me'],
+    ['GET', '/channels/100/messages/m1', undefined],
+    ['GET', '/channels/100/messages/m9', undefined],
+    ['GET', '/channels/100/messages/m5', undefined],
+  ]);
 });

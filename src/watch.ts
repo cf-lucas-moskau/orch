@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
 import { classify } from './triage.ts';
+import { loadIdeas } from './ideas-io.ts';
+import { pendingLines } from './ideas.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -43,6 +45,9 @@ function follow(d: string) {
   tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => follow(day()), 1000); } });
 }
 
+// Ideas still waiting on orch, so nothing posted while orch was down is missed.
+try { for (const l of pendingLines(loadIdeas(root))) console.log(l); }
+catch (e) { console.log(`IDEA - error: ideas/ could not be read: ${e instanceof Error ? e.message : e}`); }
 follow(day());
 
 // Keep board.md and sessions.json fresh so new sessions get names (the plan's 10-minute refresh).
