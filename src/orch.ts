@@ -1,4 +1,4 @@
-// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, and routines.
+// orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, routines and ideas.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,6 +13,7 @@ import {
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
 import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrState } from './prs.ts';
 import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
+import { idea as ideaCmd } from './ideas-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -644,6 +645,11 @@ function routine([sub, name, ...args]: string[]) {
   die(usage);
 }
 
+// The Discord idea bridge; `start` dispatches through run() like any other worker.
+async function idea(args: string[]) {
+  try { console.log(await ideaCmd(args, { root, log, run })); } catch (e: any) { die(e.message); }
+}
+
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, routine, tick };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, routine, tick, idea };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

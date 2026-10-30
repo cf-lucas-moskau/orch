@@ -20,5 +20,7 @@ routines/*
 notes/
 reviews/
 learned/
+ideas/*
+!ideas/README.md
 .playwright-mcp/
 secrets/

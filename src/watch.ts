@@ -25,6 +25,8 @@ function follow(d: string) {
   createInterface({ input: tail.stdout }).on('line', line => {
     let e: FeedEvent; try { e = JSON.parse(line); } catch { return; }
     if (!e.sid || e.sid === self) return;
+    // The idea bridge writes its watcher line ready-made: IDEA <id> <kind> <author>: <text>.
+    if (e.event === 'Idea') return console.log(e.msg);
     const kind = classify(e);
     if (kind === 'skip') return;
     // Codex panes have no session id in herdr, so a worker is also found by its worktree.
