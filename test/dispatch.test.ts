@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { isGarbledPrompt, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -173,4 +173,9 @@ test('inputDraft keeps truecolor typed text, reads multi-line drafts, ignores me
   assert.equal(inputDraft(`\u276f 1. Option one\n  2. Option two\n\u2500\u2500\n\u276f ${E}[2mTry something${E}[0m\n\u2500\u2500`), '');
   assert.equal(inputDraft(`\u276f ${E}[38;5;245mgrey 256${E}[0m`), '');
   assert.equal(inputDraft(`\u276f ${E}[38;2;120;120;120mreal grey text${E}[0m`), 'real grey text');
+});
+
+test('a prompt pasted before the input took over is spotted on screen', () => {
+  assert.ok(isGarbledPrompt('  ^U[?2026;2$y^[[?62;22c\n^[[200~/pstack:poteto-mode You are worker idea-3^[[201~'));
+  assert.ok(!isGarbledPrompt('⏺ Reading the brief\n❯ '));
 });

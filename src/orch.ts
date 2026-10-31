@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import {
+import { isGarbledPrompt,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -84,6 +84,10 @@ function submit(target: string, text: string) {
     r = send();
   }
   if (r.error) die(`prompt to ${target} failed: ${r.error.code} ${r.error.message}`);
+  // herdr can report working while the pasted prompt sits on screen as raw codes; check what the pane shows.
+  spawnSync('sleep', ['4']);
+  const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible'], { encoding: 'utf8' }).stdout;
+  if (isGarbledPrompt(screen)) die(`prompt to ${target} arrived garbled (raw paste codes on screen); the agent did not get it. Clean up the worker and run it again.`);
   return r.result.agent.agent_status as string;
 }
 

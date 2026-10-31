@@ -233,3 +233,7 @@ export function parseAutonomy(...texts: string[]): Set<Autonomous> {
   }
   return on;
 }
+
+// A prompt that reached the pane before Claude's input took over shows up as raw bracketed-paste codes on screen
+// (idea-2 and idea-3 on 2026-10-31): the worker never got its task even when herdr reports it working.
+export const isGarbledPrompt = (screen: string) => /\^\[\[20[01]~|\x1b\[20[01]~/.test(screen);
