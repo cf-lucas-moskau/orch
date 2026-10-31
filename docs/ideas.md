@@ -13,15 +13,21 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `list` | Every idea with its state, and whether the bridge is on. |
 | `fake "<text>" --as <user> [--in <id>]` | Mock only: post as someone, in the channel or in an idea's thread. Mock user ids are names. |
 | `say <id> <text\|file>` | Reply in the idea's thread. A file argument is read only from `ideas/drafts/`; any other path, the config included, is posted as text. |
+| `ask <id> <question file\|text> [--recommend <text>] [--wait]` | Ask the idea's author in the thread, with a real ping for them alone. Any allowed reply in the thread answers it and reaches orch as a normal `msg` line. With a recommendation and no `--wait`, ten minutes without an allowed reply makes the bridge post "No answer in 10 minutes, so I'm going with my recommendation: ..." and write `IDEA <id> timeout <author>: <recommendation>`. If the timeout post fails, the question stays open and the next minute tries again; an answer that arrives before or while it posts wins. Only replies posted after the question, by Discord's timestamps, answer it; a go-shaped reply ("go") answers it too and reaches orch as a `msg`, unless it is a valid go on the plan on screen. `--wait` questions, and questions without a recommendation, never time out; after an hour the bridge writes `IDEA <id> unanswered <author>: <question>` once and flags the idea, so the watcher replays it until orch answers. |
 | `plan <id> <file\|text>` | Post the plan with "Reply **go** to build it". A new plan withdraws the old one and its go, and is approvable once its post is up. |
-| `start <id>` | After a go: dispatch worker `idea-<n>` on the configured repo with the plan as its task and the post quoted as untrusted data. |
+| `start <id>` | After a go: dispatch worker `idea-<n>` on the configured repo with the plan as its task, the post quoted as untrusted data, and the progress note rules. |
+| `stage <id> <building\|checking\|deploying\|playtesting>` | Where a building idea is, named in its stage pulses. |
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
 | `close <id> [reason] [--force]` | Done, dropped, or merged into another idea. A building idea needs its worker cleaned up first, or `--force`. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
 
-Every new idea, thread message and go marks the idea as needing orch until orch answers with `say`, `plan`, `start`, `ship` or `close`. `list` and the morning brief show those ideas, and the watcher prints their IDEA lines again when it starts, so nothing posted while orch was down is missed.
+## While an idea builds
+
+The worker writes progress notes to `ideas/progress/<id>/notes.jsonl` under orch's directory, one JSON line each: `{"ts": "<ISO>", "text": "<one or two sentences for players>", "media": "<optional file name>"}`, with the media file (png, jpg, gif, mp4, webm, up to 8 MB) in the same folder. Every minute the bridge posts the newest note it has not posted yet, text plus attachment, once orch has said nothing in the thread for 2 minutes; older unposted notes are skipped. With no new note, a stage pulse ("Still on it: running the tests and a code review (12 min in).") goes out after 5 quiet minutes. Note text loses links, mentions, paths (starting with / or ~, or naming a file like game/boat.ts; left/right stays) and token-like strings on the way out. Media is read once through one file descriptor and goes only when the folder resolves to the idea's own progress folder, the file opens without following a symlink and is regular, is at most 8 MB, and is a png, jpg, gif, mp4 or webm by both extension and first bytes; anything else is left out with a log line and the text still posts. `notesSeen` in the idea's JSON holds a key (hash of ts and text) for every note handled, so nothing posts twice, even when the worker rewrites notes.jsonl; a note is recorded only once its post is out, so a failed post is tried again the next minute; an idea that started building before progress notes existed takes the notes already in its file as posted on the first tick, and a rebuild starts after the notes of the build before.
+
+Every new idea, thread message, go, question timeout and unanswered nudge marks the idea as needing orch until orch answers with `say`, `ask`, `plan`, `start`, `ship` or `close`. `list` and the morning brief show those ideas, and the watcher prints their IDEA lines again when it starts, so nothing posted while orch was down is missed.
 
 ## Settings
 
@@ -62,9 +68,9 @@ For a running bridge, `npm run -s ideas` polls the mock inbox every second.
    ```bash
    mkdir -p secrets && pbpaste > secrets/discord-token && chmod 600 secrets/discord-token
    ```
-3. Invite the bot to the server. Copy the Application ID from General Information and open this URL with it (the permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, Read Message History):
+3. Invite the bot to the server. Copy the Application ID from General Information and open this URL with it (the permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, Read Message History, Attach Files):
    ```
-   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=309237713984
+   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=309237746752
    ```
 4. Get the ids. In Discord, Settings, Advanced, switch on Developer Mode. Right-click the ideas channel and Copy Channel ID; right-click each team member and Copy User ID.
 5. Write the config:
@@ -81,4 +87,4 @@ For a running bridge, `npm run -s ideas` polls the mock inbox every second.
    ```
    Its log is `~/Library/Logs/orch.ideas.log`. To stop it: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/orch.ideas.plist`.
 
-Posts from orch never ping anyone: mentions in replies are sent with pings switched off.
+Posts from orch ping nobody, mentions in replies are sent with pings switched off, except an `ask`, which pings the idea's author and only them.

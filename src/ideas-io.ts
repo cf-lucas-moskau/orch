@@ -2,12 +2,12 @@
 // Ideas live in ideas/<id>.json, settings in ideas/config.json, the kill switch is the file ideas/off.
 // The daemon and `orch idea` are separate processes: every read-modify-write of ideas/ runs under one lock (ideas/.lock),
 // never across an await, and every write replaces its file atomically.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
+import { chatFor, MockChat, writeAtomic, type Attachment, type Chat } from './discord.ts';
 import {
-  advance, clears, DEFAULT_CONFIG, pulse, STAGES, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
-  type Config, type Idea, type Incoming, type Step, type Told,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dueQuestions, MAX_MEDIA, mediaOk, parseNotes, progress, STAGES, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
 export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string };
@@ -38,7 +38,32 @@ export function loadIdeas(root: string, log: (msg: string) => void = m => consol
 }
 const file = (root: string, id: string) => join(dir(root), `${id}.json`);
 const save = (root: string, i: Idea) => writeAtomic(file(root, i.id), JSON.stringify(i, null, 2) + '\n');
-const said = (by: string, text: string, ts: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text }] });
+const said = (by: string, text: string, ts: string, media?: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text, ...(media ? { media } : {}) }] });
+// Where a building idea's worker leaves progress notes and their media.
+export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
+const readNotes = (root: string, id: string) => { try { return parseNotes(readFileSync(join(progressDir(root, id), 'notes.jsonl'), 'utf8')); } catch { return []; } };
+
+// A note's media, read once through one file descriptor, or why it stays out: the folder must resolve to exactly
+// ideas/progress/<id>, the file opens without following a symlink, is regular, at most 8 MB, and a png, jpg, gif,
+// mp4 or webm by extension and by its bytes. The bytes checked are the bytes sent.
+export function mediaFile(root: string, id: string, name: string): { file: Attachment } | { refused: string } {
+  let fd: number | undefined;
+  try {
+    const folder = realpathSync(progressDir(root, id));
+    if (folder !== join(realpathSync(dir(root)), 'progress', id)) return { refused: 'outside its progress folder' };
+    try { fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (e: any) { return { refused: e?.code === 'ELOOP' ? 'not a regular file' : 'not found' }; }
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { refused: 'not a regular file' };
+    if (st.size > MAX_MEDIA) return { refused: `${(st.size / 1048576).toFixed(1)} MB is over 8 MB` };
+    const data = Buffer.alloc(st.size);
+    let got = 0;
+    for (let n; got < data.length && (n = readSync(fd, data, got, data.length - got, got)) > 0;) got += n;
+    if (got !== data.length) return { refused: 'changed while it was read' };
+    return mediaOk(name, data) ? { file: { name, data } } : { refused: 'not a png, jpg, gif, mp4 or webm file' };
+  } catch { return { refused: 'not found' }; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
 
@@ -105,7 +130,8 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     }
     if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go') {
       const fresh: Idea = JSON.parse(readFileSync(file(d.root, r.idea!.id), 'utf8'));
-      const cur: Idea = { ...fresh, messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
+      // Any allowed reply in the thread answers orch's open questions.
+      const cur: Idea = { ...answer(fresh, m.ts ?? now), messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
       const next = r.kind === 'go' ? advance(cur, 'go', now) : cur;
       if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
       save(d.root, r.kind === 'answer' ? next : { ...next, needsOrch: r.kind === 'go' ? 'go' as const : 'msg' as const, needsAt: now, ...(r.kind === 'go' ? { goBy: m.author.id } : {}) });
@@ -164,7 +190,7 @@ const running = (root: string, name?: string) => !!name && workers(root).some(w 
 
 const USAGE = `usage: orch idea list | off | on
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
-       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
+       orch idea say <id> <text|file> | ask <id> <question file|text> [--recommend <text>] [--wait] | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
        files are read only from ideas/drafts/`;
 
 // A single argument naming a file under ideas/drafts/ (relative, no ..) is that file's text; anything else is the text
@@ -228,6 +254,29 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       return answered({ ...(next as Idea), ...patch }, text, sentAt);
     });
   };
+  if (sub === 'ask') {
+    // --recommend takes every word after it up to the next flag; the question is what comes before the flags.
+    const wait = rest.includes('--wait');
+    const at = rest.indexOf('--recommend');
+    const words = rest.filter((a, n) => a !== '--wait' && (at < 0 || n < at));
+    const recommend = at < 0 ? undefined : rest.slice(at + 1).filter(a => a !== '--wait').join(' ').trim();
+    const question = textOf(d.root, words);
+    if (!question || recommend === '') throw new Error(USAGE);
+    check('say');
+    const text = askPost(cur.author.id, question, recommend, wait);
+    const sentAt = clock();
+    // Replies carry Discord's timestamps, so the question's time is its post's, as Discord says.
+    const askedAt = (await chat().reply(cur.thread, text, { ping: cur.author.id })).ts ?? sentAt;
+    update(d.root, id, i => {
+      // A reply that came in while the question went out answers it.
+      const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > askedAt);
+      const asked = { ...answered(i, text, sentAt), questions: [...i.questions ?? [],
+        { askedAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}) }] };
+      return early ? answer(asked, early.ts) : asked;
+    });
+    d.log(`idea ${id} ask${wait ? ' (wait)' : ''}: ${question.slice(0, 120)}`);
+    return `asked ${cur.author.name} in ${id}${recommend && !wait ? `; going with the recommendation in 10 minutes without an answer` : ''}`;
+  }
   const force = rest.includes('--force');
   const text = textOf(d.root, rest.filter(a => a !== '--force'));
   if (sub === 'say') {
@@ -257,12 +306,14 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
-      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now };
+      // Notes left from an earlier build stay handled; this build's start with the next line.
+      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now, notesSeen: readNotes(d.root, id).map(n => n.key) };
       save(d.root, i);
       return i;
     });
     const name = building.worker!;
-    try { d.run([config.repo, name, workerTask(building)]); }
+    mkdirSync(progressDir(d.root, id), { recursive: true });
+    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id))]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
@@ -306,13 +357,55 @@ export async function idea(args: string[], d: Deps): Promise<string> {
 
 const fail = (msg: string): never => { throw new Error(msg); };
 
-// The bridge calls this every minute: building ideas whose thread heard nothing from orch for a while get a note.
-export async function pulses(d: Deps & { chat: Chat }) {
+// The bridge calls this every minute, one call at a time: building ideas get a progress note or a stage pulse, and
+// open questions time out or nudge orch.
+export async function tick(d: Deps & { chat: Chat }) {
   const now = (d.now ?? (() => new Date().toISOString()))();
   for (const i of loadIdeas(d.root, d.log)) {
-    const text = pulse(i, now);
-    if (!text) continue;
-    await d.chat.reply(i.thread, text);
-    update(d.root, i.id, x => said('orch', text, now)(x));
+    for (const due of dueQuestions(i, now)) {
+      const q = i.questions![due.index];
+      const fresh = () => (loadIdeas(d.root, d.log).find(x => x.id === i.id)?.questions ?? [])[due.index];
+      if (due.kind === 'nudge') {
+        let claimed = false;
+        update(d.root, i.id, x => {
+          const y = x.questions?.[due.index];
+          if (!y || y.answered || y.timedOut || y.nudged) return x;
+          claimed = true;
+          return { ...x, needsOrch: 'unanswered', needsAt: now, questions: x.questions!.map((z, n) => n === due.index ? { ...z, nudged: now } : z) };
+        });
+        if (claimed) feed(d.root, ideaLine(i.id, 'unanswered', i.author.name, q.text), now);
+        continue;
+      }
+      // An answer wins, checked right before the post and under the lock after it. timedOut is set only once the post
+      // is out: a failed post is retried on the next tick, and ticks never overlap, so it goes out once.
+      const open = (y?: Question) => !!y && !y.answered && !y.timedOut;
+      if (!open(locked(d.root, fresh))) continue;
+      const text = timeoutPost(q.recommend!);
+      await d.chat.reply(i.thread, text);
+      let won = false;
+      update(d.root, i.id, x => {
+        const posted = said('orch', text, now)(x);
+        if (!open(x.questions?.[due.index])) return posted;
+        won = true;
+        return { ...posted, needsOrch: 'timeout', needsAt: now, questions: x.questions!.map((z, n) => n === due.index ? { ...z, timedOut: now } : z) };
+      });
+      if (!won) { d.log(`idea ${i.id}: an answer came in while the timeout posted; the answer wins`); continue; }
+      feed(d.root, ideaLine(i.id, 'timeout', i.author.name, q.recommend!), now);
+      d.log(`idea ${i.id}: no answer in 10 minutes, going with: ${q.recommend!.slice(0, 100)}`);
+    }
+    const p = progress(i, readNotes(d.root, i.id), now);
+    if (!p) continue;
+    const seen = p.seen ? { notesSeen: p.seen } : {};
+    if (!p.post) { update(d.root, i.id, x => ({ ...x, ...seen })); continue; }
+    let files: Attachment[] = [];
+    if (p.post.media) {
+      const m = mediaFile(d.root, i.id, p.post.media);
+      if ('file' in m) files = [m.file];
+      else d.log(`idea ${i.id}: note media ${p.post.media} left out, ${m.refused}; posting the text alone`);
+    }
+    // Recorded once the post is out: a failed post leaves the note new, and the next tick tries again.
+    await d.chat.reply(i.thread, p.post.text, { files });
+    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
   }
 }
+
