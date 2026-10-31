@@ -132,7 +132,10 @@ function run([repoArg, name, ...args]: string[]) {
 function remoteDefault(path: string): string | undefined {
   try {
     git(path, 'fetch', '-q', 'origin');
-    const remote = git(path, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').trim();
+    // A clone made without origin/HEAD (orch and evrloot-next on 2026-10-30) learns it from the remote first.
+    const head = () => spawnSync('git', ['-C', path, 'symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD'], { encoding: 'utf8' }).stdout.trim();
+    if (!head()) spawnSync('git', ['-C', path, 'remote', 'set-head', 'origin', '-a']);
+    const remote = head();
     if (!remote) return undefined;
     // A local default branch ahead of the remote (unpushed commits, as in kurswert on 2026-10-28) is the newer base.
     const local = remote.replace(/^origin\//, '');
