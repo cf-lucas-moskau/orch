@@ -10,6 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { handle, idea, loadConfig, loadIdeas, locked, reconcile, textOf, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
+  bridgeShouldStart,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -720,4 +721,11 @@ test('a "*" allowlist lets in everyone who can write in the channel', () => {
   const o = { ideas: [], config: { ...config, allowlist: ['*'] }, off: false, now: NOW, told: { day: '', keys: [] } };
   const r = route({ id: 'x', channel: 'ideas', author: { id: 'eve', name: 'eve' }, text: 'idea' }, o);
   assert.notEqual(r.kind, 'decline');
+});
+
+test('the watcher starts the bridge only when live, on and down', () => {
+  assert.equal(bridgeShouldStart('discord', false, false), true);
+  assert.equal(bridgeShouldStart('discord', false, true), false);
+  assert.equal(bridgeShouldStart('discord', true, false), false, 'kill switch wins');
+  assert.equal(bridgeShouldStart('mock', false, false), false);
 });

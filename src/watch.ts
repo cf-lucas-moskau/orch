@@ -1,12 +1,13 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
 import { classify } from './triage.ts';
-import { loadIdeas } from './ideas-io.ts';
-import { pendingLines } from './ideas.ts';
+import { loadConfig, loadIdeas } from './ideas-io.ts';
+import { bridgeShouldStart, pendingLines } from './ideas.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -55,3 +56,18 @@ const refresh = () => spawn(process.execPath, ['--experimental-strip-types', '--
   .on('error', () => {});
 refresh();
 setInterval(refresh, 10 * 60_000);
+
+// The idea bridge must always run while it is live: start it when it is down, check every minute.
+// Detached, so re-arming the watcher never takes it down; launchd's copy counts as running too.
+function ensureBridge() {
+  let adapter: 'mock' | 'discord';
+  try { adapter = loadConfig(root).adapter; } catch (e) { console.log(`BRIDGE error: ideas/config.json: ${e instanceof Error ? e.message : e}`); return; }
+  const running = spawnSync('pgrep', ['-f', 'src/ideas-run.ts'], { encoding: 'utf8' }).stdout.trim() !== '';
+  if (!bridgeShouldStart(adapter, existsSync(join(root, 'ideas', 'off')), running)) return;
+  // Double fork through sh, so the bridge's parent is launchd and stopping the watcher's process tree leaves it running.
+  const log = join(homedir(), 'Library', 'Logs', 'orch.ideas.log');
+  const r = spawnSync('/bin/sh', ['-c', `nohup npm run -s ideas >> '${log}' 2>&1 < /dev/null &`], { cwd: root, encoding: 'utf8' });
+  console.log(r.status === 0 ? 'BRIDGE started (it was down)' : `BRIDGE error: could not start: ${r.stderr.trim()}`);
+}
+ensureBridge();
+setInterval(ensureBridge, 60_000);

@@ -6,7 +6,8 @@ You triage, file decisions, relay the user's answers, dispatch workers and run p
 
 On session start:
 1. Arm the watcher: Monitor with `ORCH_SID=<your session id> npm run -s watch` in this directory, timeout 30 min, re-arm on every expiry. Sort each line by `policies.md`. Needs the user: write `decisions/D-NN.md` (format in `decisions/README.md`) and push once. FYI and handled: no push. `DONE worker <name>` lines go to the orch-dispatch skill, `IDEA` lines to orch-ideas.
-2. Check the brief: `npm run -s orch -- routine list` shows `morning-brief`; if not, `routine add morning-brief --at "daily 08:02" "Morning brief (orch-continue skill)"`. Delete any morning-brief session cron (CronList, CronDelete) so it runs once.
+2. The idea bridge (Evrloot Discord, `docs/ideas.md`) must always run while `ideas/config.json` says `discord`. The watcher starts it when it is down and checks every minute (`BRIDGE started` lines); if you see `BRIDGE error`, fix it before anything else. `IDEA` lines go to the orch-ideas skill.
+3. Check the brief: `npm run -s orch -- routine list` shows `morning-brief`; if not, `routine add morning-brief --at "daily 08:02" "Morning brief (orch-continue skill)"`. Delete any morning-brief session cron (CronList, CronDelete) so it runs once.
 
 Skills: orch-decisions (queue), orch-dispatch (run, steer, gates, cleanup), orch-review (Claude + Codex review), orch-prs ("look at the PRs of <repo>"), orch-continue (planning pass, brief), orch-learn (learned proposals), orch-routines (recurring tasks), orch-ideas (Discord idea threads).
 

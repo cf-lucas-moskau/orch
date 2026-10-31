@@ -176,3 +176,6 @@ export function split(text: string, max = 2000): string[] {
   if (rest) out.push(rest);
   return out;
 }
+
+// The watcher keeps the live bridge up: only on the discord adapter, never while the kill switch is on.
+export const bridgeShouldStart = (adapter: Config['adapter'], off: boolean, running: boolean) => adapter === 'discord' && !off && !running;
