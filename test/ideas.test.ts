@@ -111,8 +111,8 @@ function world(extra: object = {}) {
   mkdirSync(join(root, 'ideas'));
   writeFileSync(join(root, 'ideas', 'config.json'), JSON.stringify({ allowlist: ['ann', 'bob'], perDay: 2, ...extra }));
   const runs: string[][] = [], logs: string[] = [];
-  const chat = new FlakyChat(root, 'ideas', m => logs.push(m));
   let now = NOW;
+  const chat = new FlakyChat(root, 'ideas', m => logs.push(m), () => now);
   const d: Deps & { chat: FlakyChat; run: (a: string[]) => void } = { root, chat, log: m => logs.push(m), run: a => runs.push(a), now: () => now };
   chat.onMessage(m => handle(d, m));
   const post = async (...a: string[]) => { await idea(['fake', ...a], d); await chat.poll(); };
@@ -343,7 +343,7 @@ function discordStub(routes: Record<string, unknown>) {
     async post(path: string, o: { body: unknown; files?: { name: string; data: Buffer }[] }) {
       calls.push(['POST', path, o.body]);
       if (o.files) files.push(...o.files.map(f => `${f.name}:${f.data.length}`));
-      return { id: 'thread-1' };
+      return { id: 'thread-1', timestamp: '2026-10-30T10:00:05.123000+00:00' };
     }
     async put(path: string) { calls.push(['PUT', path]); }
   }
@@ -748,6 +748,11 @@ test('a building idea gets a progress note every few minutes, naming its stage',
   assert.equal(pulse({ ...b, stage: undefined }, '2026-10-30T10:30:00.000Z'), 'Still on it: building the change (30 min in).');
 });
 
+test('note text keeps words with a slash and loses real paths', () => {
+  assert.equal(scrub('Swipe left/right to steer, and/or tap. Half the map, 1/2 done.'), 'Swipe left/right to steer, and/or tap. Half the map, 1/2 done.');
+  assert.equal(scrub('Changed game/boat.ts and assets/sprites/boat.png, see ~/notes and ./build/out'), 'Changed and, see and');
+});
+
 test('note text loses links, mentions, paths and tokens on the way out', () => {
   assert.equal(scrub('Boats now float, see https://x.example/a and www.y.io <@123> @everyone'), 'Boats now float, see and');
   assert.equal(scrub('Saved in /Users/lucas/evrloot/shot.png and src/game/boat.ts, ok'), 'Saved in and, ok');
@@ -929,27 +934,27 @@ test('end to end on mocks: a --wait question never times out and nudges orch onc
   assert.equal(loadIdeas(w.root)[0].questions![0].timedOut, undefined);
 });
 
-test('DiscordChat attaches files, pings only the asked user and leaves out files over 8 MB', async () => {
+test('DiscordChat sends the buffers it was given, pings only the asked user and refuses bad or over-8 MB media', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
   const errors: string[] = [];
   const { calls, files, lib } = discordStub({});
   const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib, onError: m => errors.push(m) });
-  writeFileSync(join(root, 'boat.png'), 'png');
-  writeFileSync(join(root, 'big.mp4'), Buffer.alloc(8 * 1024 * 1024 + 1));
-  await chat.reply('t1', 'Boat', { files: [join(root, 'boat.png'), join(root, 'big.mp4')] });
+  const big = Buffer.concat([Buffer.from('\0\0\0\x20ftypisom', 'latin1'), Buffer.alloc(8 * 1024 * 1024)]);
+  const posted = await chat.reply('t1', 'Boat', { files: [{ name: 'boat.png', data: PNG }, { name: 'big.mp4', data: big }, { name: 'x.png', data: Buffer.from('#!/bin/sh') }] });
+  assert.deepEqual(posted, { ts: '2026-10-30T10:00:05.123Z' }, 'the time Discord gives the post');
   await chat.reply('t1', '<@42> Red or blue?', { ping: '42' });
   assert.deepEqual(calls, [
     ['POST', '/channels/t1/messages', { content: 'Boat', allowed_mentions: { parse: [] }, attachments: [{ id: 0, filename: 'boat.png' }] }],
     ['POST', '/channels/t1/messages', { content: '<@42> Red or blue?', allowed_mentions: { parse: [], users: ['42'] } }],
   ]);
-  assert.deepEqual(files, ['boat.png:3']);
-  assert.deepEqual(errors, ['attachment big.mp4 left out: 8.0 MB is over 8 MB']);
+  assert.deepEqual(files, [`boat.png:${PNG.length}`]);
+  assert.deepEqual(errors, ['attachment big.mp4 left out: 8.0 MB is over 8 MB', 'attachment x.png left out: not a png, jpg, gif, mp4 or webm file']);
 });
 
 test('a reply that lands while the question goes out answers it', async () => {
   const w = world();
   await w.post('Boats for the lake', '--as', 'ann');
-  w.chat.onReply = async () => { w.chat.onReply = undefined; w.setNow(LATER(1)); await w.post('--in', 'I-1', 'blue!', '--as', 'ann'); };
+  w.chat.onReply = async () => { w.chat.onReply = undefined; w.setNow(LATER(1)); await w.post('--in', 'I-1', 'blue!', '--as', 'ann'); w.setNow(LATER(0.5)); };
   await idea(['ask', 'I-1', 'Red or blue sails?', '--recommend', 'blue'], w.d);
   assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(1));
   w.setNow(LATER(20)); await tick(w.d);
@@ -969,7 +974,7 @@ test('note media must be a real file of its type inside its own progress folder'
   mkdirSync(join(w.root, 'elsewhere'));
   writeFileSync(join(w.root, 'elsewhere', 'b.png'), PNG);
   symlinkSync(join(w.root, 'elsewhere'), join(w.root, 'ideas', 'progress', 'I-9'));
-  assert.deepEqual(mediaFile(w.root, 'I-1', 'ok.png'), { file: join(folder, 'ok.png') });
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'ok.png'), { file: { name: 'ok.png', data: PNG } });
   assert.deepEqual(mediaFile(w.root, 'I-1', 'link.png'), { refused: 'not a regular file' });
   assert.deepEqual(mediaFile(w.root, 'I-1', 'fake.png'), { refused: 'not a png, jpg, gif, mp4 or webm file' });
   assert.deepEqual(mediaFile(w.root, 'I-1', 'dir.png'), { refused: 'not a regular file' });
@@ -1033,4 +1038,59 @@ test('a valid go on the plan on screen stays a go, and answers the open question
   assert.equal(loadIdeas(w.root)[0].state, 'approved');
   assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(1));
   assert.equal(w.feed().at(-1), 'IDEA I-1 go bob: go');
+});
+
+test('a failed note post leaves the note new; the next tick posts it once', async () => {
+  const w = world();
+  await building(w);
+  appendFileSync(join(progressDir(w.root, 'I-1'), 'notes.jsonl'), JSON.stringify({ ts: LATER(1), text: 'Sails up.' }) + '\n');
+  w.chat.fail.add('reply');
+  w.setNow(LATER(3));
+  await assert.rejects(tick(w.d), /reply failed/);
+  assert.deepEqual(loadIdeas(w.root)[0].notesSeen, []);
+  w.chat.fail.delete('reply');
+  w.setNow(LATER(4)); await tick(w.d);
+  w.setNow(LATER(7)); await tick(w.d);
+  assert.deepEqual(w.replies().filter(r => r === 'Sails up.'), ['Sails up.']);
+});
+
+test('an answer that lands while the timeout posts wins: no timeout line, the question stays answered', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['ask', 'I-1', 'Red or blue sails?', '--recommend', 'blue sails'], w.d);
+  w.setNow(LATER(10));
+  w.chat.onReply = async () => { w.chat.onReply = undefined; await w.post('--in', 'I-1', 'red', '--as', 'ann'); };
+  await tick(w.d);
+  const q = loadIdeas(w.root)[0].questions![0];
+  assert.deepEqual([q.answered, q.timedOut], [LATER(10), undefined]);
+  assert.ok(!w.feed().some(l => l.includes('timeout')));
+  assert.equal(loadIdeas(w.root)[0].needsOrch, 'msg');
+  assert.ok(w.logs.includes('idea I-1: an answer came in while the timeout posted; the answer wins'));
+});
+
+test('an answer that came in during an earlier post stops the next timeout before it posts', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['ask', 'I-1', 'Red or blue sails?', '--recommend', 'blue sails'], w.d);
+  await idea(['ask', 'I-1', 'Oars too?', '--recommend', 'no oars'], w.d);
+  w.setNow(LATER(10));
+  w.chat.onReply = async () => { w.chat.onReply = undefined; await w.post('--in', 'I-1', 'red, and oars please', '--as', 'ann'); };
+  await tick(w.d);
+  assert.equal(w.replies().filter(r => r.startsWith('No answer')).length, 1, 'only the post already under way went out');
+  assert.ok(!w.replies().includes(timeoutPost('no oars')));
+  assert.ok(!w.feed().some(l => l.includes('timeout')));
+  assert.deepEqual(loadIdeas(w.root)[0].questions!.map(q => q.timedOut), [undefined, undefined]);
+});
+
+test('a question is timed by its post as the chat says, not by the local clock', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  const reply = w.chat.reply.bind(w.chat);
+  w.chat.reply = async (t, x, o) => { await reply(t, x, o); return { ts: LATER(1) }; };
+  await idea(['ask', 'I-1', 'Red or blue sails?', '--recommend', 'blue'], w.d);
+  assert.equal(loadIdeas(w.root)[0].questions![0].askedAt, LATER(1));
+  await handle(w.d, { ...w.msg('ann', 'red', 90), channel: 't-m1', thread: 't-m1', ts: LATER(0.5) });
+  assert.equal(loadIdeas(w.root)[0].questions![0].answered, undefined, 'posted before the question by Discord time');
+  await handle(w.d, { ...w.msg('ann', 'red', 91), channel: 't-m1', thread: 't-m1', ts: LATER(2) });
+  assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(2));
 });

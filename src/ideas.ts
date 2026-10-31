@@ -220,6 +220,9 @@ export function pulse(i: Idea, now: string): string | null {
 const lastOrch = (i: Idea) => [i.startedAt, ...(i.messages ?? []).filter(m => m.by === 'orch').map(m => m.ts)].filter(Boolean).sort().at(-1);
 const minsSince = (from: string | undefined, now: string) => from ? (Date.parse(now) - Date.parse(from)) / 60_000 : Infinity;
 
+// A relative path that names a file: words with a slash and a known file extension after it (src/game/boat.ts).
+// Plain words with a slash (left/right, and/or) stay.
+const PATH_WITH_FILE = /[\w.-]*(\/[\w.-]+)*\/[\w-][\w.-]*\.(tsx?|jsx?|mjs|cjs|json|md|png|jpe?g|gif|mp4|webm|svg|css|html?|ya?ml|toml|sh|py|rs|go|env|lock|txt|log|sql|plist|pem|key)\b/gi;
 // Outgoing text a worker wrote: no links, mentions, paths or anything that looks like a token.
 export function scrub(text: string): string {
   return text
@@ -228,7 +231,7 @@ export function scrub(text: string): string {
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+|\bwww\.\S+/gi, '')
     .replace(/(^|[\s(])(~|\.{1,2})?\/[^\s)]+/g, '$1')
     .replace(/(^|[\s(])[A-Za-z]:\\\S+/g, '$1')
-    .replace(/\b[\w.-]+(\/[\w.-]+)+\b/g, '')
+    .replace(PATH_WITH_FILE, '')
     .replace(/\b(sk|pk|ghp|gho|ghs|xox[abp]|AKIA)[-_A-Za-z0-9]{8,}/g, '')
     .replace(/\b(?=[A-Za-z0-9_\-.]*\d)(?=[A-Za-z0-9_\-.]*[A-Za-z])[A-Za-z0-9_\-.]{24,}\b/g, '')
     .replace(/[ \t]+/g, ' ')

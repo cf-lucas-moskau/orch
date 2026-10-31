@@ -1,8 +1,8 @@
 // Chat adapters for the idea bridge. mock: JSONL files under ideas/mock/ (inbox written by `orch idea fake`,
 // outbox read by tests and people). discord: the discord.js gateway for incoming messages, REST for posting.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { MAX_MEDIA, serial, split, type Config, type Incoming } from './ideas.ts';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { MAX_MEDIA, mediaOk, serial, split, type Config, type Incoming } from './ideas.ts';
 
 export interface Chat {
   onMessage(handler: (m: Incoming) => Promise<void>): void;
@@ -13,13 +13,17 @@ export interface Chat {
   createThread(message: string, name: string): Promise<string>;
   // The thread already opened on a top-level post, if any.
   findThread(message: string): Promise<string | null>;
-  // target is a thread or channel id; long text goes out as several messages, files (absolute paths) with the last.
+  // target is a thread or channel id; long text goes out as several messages, files with the last.
   // ping: the one user id a mention in the text may notify; without it nobody is pinged.
-  reply(target: string, text: string, o?: ReplyOptions): Promise<void>;
+  // Resolves to the time the first message was posted, as the chat says.
+  reply(target: string, text: string, o?: ReplyOptions): Promise<Posted>;
   react(target: string, message: string, emoji: string): Promise<void>;
 }
 
-export type ReplyOptions = { files?: string[]; ping?: string };
+// files: media already read and checked by the caller; the adapter never reads a path.
+export type Attachment = { name: string; data: Buffer };
+export type ReplyOptions = { files?: Attachment[]; ping?: string };
+export type Posted = { ts?: string };
 export type Outgoing =
   | { kind: 'thread'; message: string; thread: string; name: string }
   | { kind: 'reply'; target: string; text: string; files?: string[]; ping?: string }
@@ -45,13 +49,15 @@ export class MockChat implements Chat {
   readonly dir: string;
   private channel: string;
   private onError: OnError;
-  constructor(root: string, channel: string, onError: OnError = toConsole) {
+  private now: () => string;
+  constructor(root: string, channel: string, onError: OnError = toConsole, now = () => new Date().toISOString()) {
     this.channel = channel;
     this.onError = onError;
+    this.now = now;
     this.dir = join(root, 'ideas', 'mock');
     mkdirSync(this.dir, { recursive: true });
   }
-  private out(o: Outgoing) { appendFileSync(join(this.dir, 'outbox.jsonl'), JSON.stringify({ ts: new Date().toISOString(), ...o }) + '\n'); }
+  private out(o: Outgoing) { const ts = this.now(); appendFileSync(join(this.dir, 'outbox.jsonl'), JSON.stringify({ ts, ...o }) + '\n'); return ts; }
   onMessage(handler: (m: Incoming) => Promise<void>) { this.handler = handler; }
   // Handles inbox lines not seen yet; the count seen survives restarts. A line that fails is reported and skipped.
   async poll() {
@@ -82,13 +88,14 @@ export class MockChat implements Chat {
     const t = this.outbox().find(o => o.kind === 'thread' && o.message === message);
     return t?.kind === 'thread' ? t.thread : null;
   }
-  async reply(target: string, text: string, o: ReplyOptions = {}) {
+  async reply(target: string, text: string, o: ReplyOptions = {}): Promise<Posted> {
     const parts = split(text);
-    parts.forEach((t, n) => this.out({
+    const ts = parts.map((t, n) => this.out({
       kind: 'reply', target, text: t,
-      ...(o.files?.length && n === parts.length - 1 ? { files: o.files.map(f => basename(f)) } : {}),
+      ...(o.files?.length && n === parts.length - 1 ? { files: o.files.map(f => f.name) } : {}),
       ...(o.ping ? { ping: o.ping } : {}),
     }));
+    return { ts: ts[0] };
   }
   async react(target: string, message: string, emoji: string) { this.out({ kind: 'react', target, message, emoji }); }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
@@ -230,24 +237,26 @@ export class DiscordChat implements Chat {
     try { return (await (await this.api()).get(route.message(this.o.channel, message))).thread?.id ?? null; }
     catch (e: any) { if (e?.status === 404) return null; throw e; }
   }
-  // A file over Discord's 8 MB limit, or one that cannot be read, is left out with a log line; the text still goes.
-  async reply(target: string, text: string, o: ReplyOptions = {}) {
-    const files = (o.files ?? []).flatMap(f => {
-      try {
-        const size = statSync(f).size;
-        if (size > MAX_MEDIA) { this.o.onError(`attachment ${basename(f)} left out: ${(size / 1048576).toFixed(1)} MB is over 8 MB`); return []; }
-        return [{ name: basename(f), data: readFileSync(f) }];
-      } catch (e) { this.o.onError(`attachment ${basename(f)} left out: ${why(e)}`); return []; }
+  // An attachment over Discord's 8 MB limit, or not an allowed media type by its bytes, is left out with a log line;
+  // the text still goes. The buffer checked is the buffer sent.
+  async reply(target: string, text: string, o: ReplyOptions = {}): Promise<Posted> {
+    const files = (o.files ?? []).filter(f => {
+      if (f.data.length > MAX_MEDIA) { this.o.onError(`attachment ${f.name} left out: ${(f.data.length / 1048576).toFixed(1)} MB is over 8 MB`); return false; }
+      if (!mediaOk(f.name, f.data)) { this.o.onError(`attachment ${f.name} left out: not a png, jpg, gif, mp4 or webm file`); return false; }
+      return true;
     });
     const allowed_mentions = o.ping ? { parse: [], users: [o.ping] } : NO_PINGS;
     const parts = split(text);
+    let ts: string | undefined;
     for (const [n, content] of parts.entries()) {
       const last = n === parts.length - 1 && files.length > 0;
-      await (await this.api()).post(route.messages(target), {
+      const sent = await (await this.api()).post(route.messages(target), {
         body: { content, allowed_mentions, ...(last ? { attachments: files.map((f, id) => ({ id, filename: f.name })) } : {}) },
         ...(last ? { files } : {}),
       });
+      if (n === 0 && typeof sent?.timestamp === 'string') ts = new Date(sent.timestamp).toISOString();
     }
+    return { ts };
   }
   async react(target: string, message: string, emoji: string) {
     await (await this.api()).put(route.reaction(target, message, emoji));

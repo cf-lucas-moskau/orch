@@ -2,12 +2,12 @@
 // Ideas live in ideas/<id>.json, settings in ideas/config.json, the kill switch is the file ideas/off.
 // The daemon and `orch idea` are separate processes: every read-modify-write of ideas/ runs under one lock (ideas/.lock),
 // never across an await, and every write replaces its file atomically.
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
+import { chatFor, MockChat, writeAtomic, type Attachment, type Chat } from './discord.ts';
 import {
   advance, answer, askPost, clears, DEFAULT_CONFIG, dueQuestions, MAX_MEDIA, mediaOk, parseNotes, progress, STAGES, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
-  type Config, type Idea, type Incoming, type Step, type Told,
+  type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
 export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string };
@@ -43,19 +43,26 @@ const said = (by: string, text: string, ts: string, media?: string) => (i: Idea)
 export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
 const readNotes = (root: string, id: string) => { try { return parseNotes(readFileSync(join(progressDir(root, id), 'notes.jsonl'), 'utf8')); } catch { return []; } };
 
-// A note's media file, or why it stays out: a regular file (no symlink) that resolves to exactly
-// ideas/progress/<id>/<name>, at most 8 MB, of an allowed type by extension and by its first bytes.
-export function mediaFile(root: string, id: string, name: string): { file: string } | { refused: string } {
-  const f = join(progressDir(root, id), name);
+// A note's media, read once through one file descriptor, or why it stays out: the folder must resolve to exactly
+// ideas/progress/<id>, the file opens without following a symlink, is regular, at most 8 MB, and a png, jpg, gif,
+// mp4 or webm by extension and by its bytes. The bytes checked are the bytes sent.
+export function mediaFile(root: string, id: string, name: string): { file: Attachment } | { refused: string } {
+  let fd: number | undefined;
   try {
-    const st = lstatSync(f);
-    if (st.isSymbolicLink() || !st.isFile()) return { refused: 'not a regular file' };
-    if (realpathSync(f) !== join(realpathSync(dir(root)), 'progress', id, name)) return { refused: 'outside its progress folder' };
+    const folder = realpathSync(progressDir(root, id));
+    if (folder !== join(realpathSync(dir(root)), 'progress', id)) return { refused: 'outside its progress folder' };
+    try { fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (e: any) { return { refused: e?.code === 'ELOOP' ? 'not a regular file' : 'not found' }; }
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { refused: 'not a regular file' };
     if (st.size > MAX_MEDIA) return { refused: `${(st.size / 1048576).toFixed(1)} MB is over 8 MB` };
-    const head = Buffer.alloc(16), fd = openSync(f, 'r');
-    try { readSync(fd, head, 0, 16, 0); } finally { closeSync(fd); }
-    return mediaOk(name, head) ? { file: f } : { refused: 'not a png, jpg, gif, mp4 or webm file' };
+    const data = Buffer.alloc(st.size);
+    let got = 0;
+    for (let n; got < data.length && (n = readSync(fd, data, got, data.length - got, got)) > 0;) got += n;
+    if (got !== data.length) return { refused: 'changed while it was read' };
+    return mediaOk(name, data) ? { file: { name, data } } : { refused: 'not a png, jpg, gif, mp4 or webm file' };
   } catch { return { refused: 'not found' }; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
@@ -258,12 +265,13 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     check('say');
     const text = askPost(cur.author.id, question, recommend, wait);
     const sentAt = clock();
-    await chat().reply(cur.thread, text, { ping: cur.author.id });
+    // Replies carry Discord's timestamps, so the question's time is its post's, as Discord says.
+    const askedAt = (await chat().reply(cur.thread, text, { ping: cur.author.id })).ts ?? sentAt;
     update(d.root, id, i => {
       // A reply that came in while the question went out answers it.
-      const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > sentAt);
+      const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > askedAt);
       const asked = { ...answered(i, text, sentAt), questions: [...i.questions ?? [],
-        { askedAt: sentAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}) }] };
+        { askedAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}) }] };
       return early ? answer(asked, early.ts) : asked;
     });
     d.log(`idea ${id} ask${wait ? ' (wait)' : ''}: ${question.slice(0, 120)}`);
@@ -368,16 +376,20 @@ export async function tick(d: Deps & { chat: Chat }) {
         if (claimed) feed(d.root, ideaLine(i.id, 'unanswered', i.author.name, q.text), now);
         continue;
       }
-      // A reply that came in meanwhile wins. timedOut is set only once the post is out: a failed post is retried on
-      // the next tick, and ticks never overlap, so it goes out once.
-      const y = fresh();
-      if (!y || y.answered || y.timedOut) continue;
+      // An answer wins, checked right before the post and under the lock after it. timedOut is set only once the post
+      // is out: a failed post is retried on the next tick, and ticks never overlap, so it goes out once.
+      const open = (y?: Question) => !!y && !y.answered && !y.timedOut;
+      if (!open(locked(d.root, fresh))) continue;
       const text = timeoutPost(q.recommend!);
       await d.chat.reply(i.thread, text);
-      update(d.root, i.id, x => ({
-        ...said('orch', text, now)(x), needsOrch: 'timeout', needsAt: now,
-        questions: x.questions!.map((z, n) => n === due.index ? { ...z, timedOut: now } : z),
-      }));
+      let won = false;
+      update(d.root, i.id, x => {
+        const posted = said('orch', text, now)(x);
+        if (!open(x.questions?.[due.index])) return posted;
+        won = true;
+        return { ...posted, needsOrch: 'timeout', needsAt: now, questions: x.questions!.map((z, n) => n === due.index ? { ...z, timedOut: now } : z) };
+      });
+      if (!won) { d.log(`idea ${i.id}: an answer came in while the timeout posted; the answer wins`); continue; }
       feed(d.root, ideaLine(i.id, 'timeout', i.author.name, q.recommend!), now);
       d.log(`idea ${i.id}: no answer in 10 minutes, going with: ${q.recommend!.slice(0, 100)}`);
     }
@@ -385,15 +397,15 @@ export async function tick(d: Deps & { chat: Chat }) {
     if (!p) continue;
     const seen = p.seen ? { notesSeen: p.seen } : {};
     if (!p.post) { update(d.root, i.id, x => ({ ...x, ...seen })); continue; }
-    let files: string[] = [];
+    let files: Attachment[] = [];
     if (p.post.media) {
       const m = mediaFile(d.root, i.id, p.post.media);
       if ('file' in m) files = [m.file];
       else d.log(`idea ${i.id}: note media ${p.post.media} left out, ${m.refused}; posting the text alone`);
     }
-    // Recorded before the post: a crash in between loses a note rather than posting it twice.
-    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
+    // Recorded once the post is out: a failed post leaves the note new, and the next tick tries again.
     await d.chat.reply(i.thread, p.post.text, { files });
+    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
   }
 }
 
