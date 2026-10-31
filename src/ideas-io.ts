@@ -244,10 +244,10 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const answered = (i: Idea, text: string, sentAt: string): Idea =>
     ({ ...said('orch', text, now)(i), ...(clears(i, sentAt) ? { needsOrch: undefined, needsAt: undefined } : {}) });
   // Checked before posting, and again under the lock after: the daemon may have moved the idea meanwhile.
-  const post = async (s: Step, text: string, patch: Partial<Idea> = {}) => {
+  const post = async (s: Step, text: string, patch: Partial<Idea> = {}, files: Attachment[] = []) => {
     check(s);
     const sentAt = clock();
-    await chat().reply(cur.thread, text);
+    await chat().reply(cur.thread, text, files.length ? { files } : {});
     return update(d.root, id, i => {
       const next = advance(i, s, now);
       if (typeof next === 'string') fail(`posted, but not recorded: ${next}`);
@@ -339,7 +339,14 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   }
   if (sub === 'ship') {
     if (!text) throw new Error(USAGE);
-    await post('ship', shipPost(text, config.liveUrl));
+    // The changelog carries the newest note's media that has not gone out yet (the bridge posts notes only while an
+    // idea builds), and every note so far counts as posted.
+    const notes = readNotes(d.root, id);
+    const fresh = notes.filter(n => !(cur.notesSeen ?? []).includes(n.key));
+    const last = fresh.filter(n => n.media).at(-1);
+    const m = last?.media ? mediaFile(d.root, id, last.media) : undefined;
+    if (m && 'refused' in m) d.log(`idea ${id}: ship media ${last!.media} left out, ${m.refused}`);
+    await post('ship', shipPost(text, config.liveUrl), { notesSeen: notes.map(n => n.key) }, m && 'file' in m ? [m.file] : []);
     d.log(`idea ${id} shipped: ${text.split('\n')[0].slice(0, 100)}`);
     return `changelog posted in ${id}`;
   }

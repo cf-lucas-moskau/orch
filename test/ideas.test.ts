@@ -1094,3 +1094,15 @@ test('a question is timed by its post as the chat says, not by the local clock',
   await handle(w.d, { ...w.msg('ann', 'red', 91), channel: 't-m1', thread: 't-m1', ts: LATER(2) });
   assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(2));
 });
+
+test('ship carries the newest unposted note media and marks every note posted', async () => {
+  const w = world();
+  await building(w);
+  const folder = progressDir(w.root, 'I-1');
+  writeFileSync(join(folder, 'live.png'), PNG);
+  appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify({ ts: LATER(1), text: 'Taken live.', media: 'live.png' }) + '\n');
+  await idea(['ship', 'I-1', 'It is live.'], w.d);
+  const out = w.chat.outbox().at(-1) as any;
+  assert.deepEqual(out.files, ['live.png']);
+  assert.deepEqual(loadIdeas(w.root)[0].notesSeen, [noteKey(LATER(1), 'Taken live.')]);
+});
