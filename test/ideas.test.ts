@@ -709,3 +709,9 @@ test('review 3 (7): a building idea closes only after its worker is cleaned up, 
   writeFileSync(join(v.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'closed' }]));
   assert.equal(await idea(['close', 'I-1'], v.d), 'I-1 closed');
 });
+
+test('ideas never build outside evrloot-next', () => {
+  const a = { ...base, state: 'approved' as const, plan: 'p' };
+  assert.match(startBlocker(a, [a], { ...config, repo: 'orch' }, false)!, /only on evrloot-next/);
+  assert.equal(startBlocker(a, [a], { ...config, repo: 'evrloot-next' }, false), null);
+});
