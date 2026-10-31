@@ -10,9 +10,13 @@
     "watch": "node --experimental-strip-types --no-warnings src/watch.ts",
     "state": "node --experimental-strip-types --no-warnings src/state-run.ts",
     "orch": "node --experimental-strip-types --no-warnings src/orch.ts",
+    "ideas": "node --experimental-strip-types --no-warnings src/ideas-run.ts",
     "reflect": "node --experimental-strip-types --no-warnings src/reflect-run.ts",
     "test:mod": "claude plugin test mod"
   },
   "description": "An orchestrator for your Claude Code and Codex sessions: one chat that watches every agent, queues what needs you, and runs workers.",
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "discord.js": "^14.27.0"
+  }
 }

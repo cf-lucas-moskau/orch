@@ -25,7 +25,7 @@ const oneLine = (s: string, n = 140) => { const t = s.replace(/\s+/g, ' ').trim(
 
 export function buildBrief(o: {
   date: string; feed: FeedEvent[]; since: string; names: Record<string, { name: string }>;
-  decisions: Decision[]; plans: Plan[]; learned: Learned[]; workers: Worker[];
+  decisions: Decision[]; plans: Plan[]; learned: Learned[]; workers: Worker[]; ideas?: string[];
 }): string {
   const moved = new Map<string, FeedEvent>();
   for (const e of o.feed) if (e.ts >= o.since && e.event === 'Stop') moved.set(e.sid, e);
@@ -37,6 +37,7 @@ export function buildBrief(o: {
   out.push(`## Decisions waiting (${open.length})`, ...open.map(d => `${d.id} ${d.question} (${d.session})`), '');
   out.push(`## Moved overnight (${moved.size})`,
     ...[...moved.values()].map(e => `${o.names[e.sid]?.name ?? `${e.cwd.split('/').at(-1)} ${e.sid.slice(0, 4)}`}: ${oneLine(e.msg)}`), '');
+  if (o.ideas) out.push(`## Ideas waiting on orch (${o.ideas.length})`, ...o.ideas, '');
   out.push(`## Workers (${running.length})`, ...running.map(w => `${w.name} on ${w.repo}: ${oneLine(w.task, 80)}`), '');
   out.push('## Plans', ...o.plans.map(p => {
     const c = (s: string) => p.tasks.filter(t => t.state === s).length;

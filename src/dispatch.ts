@@ -206,6 +206,8 @@ export function restoreList(feed: import('./board.ts').FeedEvent[], liveSids: Se
   const last = new Map<string, import('./board.ts').FeedEvent>();
   const asked = new Map<string, string>();
   for (const e of [...feed].sort((a, b) => a.ts.localeCompare(b.ts))) {
+    // The idea bridge writes to the feed too, but it is no session to resume.
+    if (e.event === 'Idea') continue;
     last.set(e.sid, e);
     if (e.event === 'UserPromptSubmit' && e.prompt) asked.set(e.sid, e.prompt);
   }

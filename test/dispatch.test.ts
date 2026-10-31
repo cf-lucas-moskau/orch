@@ -112,6 +112,7 @@ test('restore list keeps recent sessions that died without SessionEnd', async ()
     ev('c', 'Stop', '2026-10-06T08:00Z', { agent: 'codex' }),
     ev('d', 'Stop', '2026-10-06T08:00Z'),
     ev('e', 'Stop', '2026-10-01T08:00Z'),
+    ev('idea-bridge', 'Idea', '2026-10-06T08:00Z', { msg: 'IDEA I-1 new ann: more loot' }),
   ];
   const lost = restoreList(feed, new Set(['d']), '2026-10-04T00:00Z');
   assert.deepEqual(lost.map(l => l.sid), ['a', 'c']);
