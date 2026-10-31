@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realp
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
 import {
-  advance, clears, DEFAULT_CONFIG, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  advance, clears, DEFAULT_CONFIG, pulse, STAGES, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Step, type Told,
 } from './ideas.ts';
 
@@ -164,7 +164,7 @@ const running = (root: string, name?: string) => !!name && workers(root).some(w 
 
 const USAGE = `usage: orch idea list | off | on
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
-       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | ship <id> <changelog file|text> | close <id> [reason] [--force]
+       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
        files are read only from ideas/drafts/`;
 
 // A single argument naming a file under ideas/drafts/ (relative, no ..) is that file's text; anything else is the text
@@ -257,7 +257,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
-      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name] };
+      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now };
       save(d.root, i);
       return i;
     });
@@ -279,6 +279,13 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     d.log(`idea ${id} start: worker ${name} on ${config.repo}`);
     return `${id} building as worker ${name}`;
   }
+  if (sub === 'stage') {
+    const stage = rest[0] as Stage;
+    if (!(stage in STAGES)) fail(`stage is one of ${Object.keys(STAGES).join(', ')}`);
+    if (cur.state !== 'building') fail(`${id} is ${cur.state}; stages are for building ideas`);
+    update(d.root, id, i => ({ ...i, stage, updated: now }));
+    return `${id} stage ${stage}`;
+  }
   if (sub === 'ship') {
     if (!text) throw new Error(USAGE);
     await post('ship', shipPost(text, config.liveUrl));
@@ -298,3 +305,14 @@ export async function idea(args: string[], d: Deps): Promise<string> {
 }
 
 const fail = (msg: string): never => { throw new Error(msg); };
+
+// The bridge calls this every minute: building ideas whose thread heard nothing from orch for a while get a note.
+export async function pulses(d: Deps & { chat: Chat }) {
+  const now = (d.now ?? (() => new Date().toISOString()))();
+  for (const i of loadIdeas(d.root, d.log)) {
+    const text = pulse(i, now);
+    if (!text) continue;
+    await d.chat.reply(i.thread, text);
+    update(d.root, i.id, x => said('orch', text, now)(x));
+  }
+}

@@ -16,7 +16,13 @@ export type Idea = {
   id: string; thread: string; message: string; author: User; text: string; state: State;
   created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
   needsOrch?: Pending; needsAt?: string; planVersion?: number; planAt?: string; builds?: string[];
+  stage?: Stage; startedAt?: string;
 };
+// Where a building idea is, in words a player understands. orch sets it with `idea stage`.
+export const STAGES = { building: 'building the change', checking: 'running the tests and a code review', deploying: 'putting it live', playtesting: 'trying it out on the live game' } as const;
+export type Stage = keyof typeof STAGES;
+export const PULSE_MIN = 5;
+
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
   repo: string; liveUrl: string;
@@ -179,3 +185,13 @@ export function split(text: string, max = 2000): string[] {
 
 // The watcher keeps the live bridge up: only on the discord adapter, never while the kill switch is on.
 export const bridgeShouldStart = (adapter: Config['adapter'], off: boolean, running: boolean) => adapter === 'discord' && !off && !running;
+
+// A short note every few minutes while an idea builds, so the thread knows work goes on. Null when anything was
+// posted in the thread by orch within the last PULSE_MIN minutes.
+export function pulse(i: Idea, now: string): string | null {
+  if (i.state !== 'building') return null;
+  const last = [i.startedAt, ...(i.messages ?? []).filter(m => m.by === 'orch').map(m => m.ts)].filter(Boolean).sort().at(-1);
+  if (last && Date.parse(now) - Date.parse(last) < PULSE_MIN * 60_000) return null;
+  const mins = i.startedAt ? Math.max(1, Math.round((Date.parse(now) - Date.parse(i.startedAt)) / 60_000)) : undefined;
+  return `Still on it: ${STAGES[i.stage ?? 'building']}${mins ? ` (${mins} min in)` : ''}.`;
+}

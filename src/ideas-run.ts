@@ -4,7 +4,7 @@
 import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chatFor, MockChat } from './discord.ts';
-import { handle, loadConfig, reconcile } from './ideas-io.ts';
+import { handle, isOff, loadConfig, pulses, reconcile } from './ideas-io.ts';
 import { serial } from './ideas.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -21,6 +21,8 @@ if (process.argv.includes('--once')) {
 } else {
   await chat.start();
   console.log(`${new Date().toISOString()} idea bridge up, adapter ${config.adapter}, channel ${config.channel}`);
+  // Progress notes in building threads; off while the kill switch is on.
+  setInterval(() => { if (!isOff(root)) pulses(deps).catch(e => log(`idea bridge: pulse failed: ${e instanceof Error ? e.message : e}`)); }, 60_000);
   const down = async () => { await chat.stop(); process.exit(0); };
   process.on('SIGTERM', down);
   process.on('SIGINT', down);

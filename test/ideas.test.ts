@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { handle, idea, loadConfig, loadIdeas, locked, reconcile, textOf, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart,
+  bridgeShouldStart, pulse,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -728,4 +728,16 @@ test('the watcher starts the bridge only when live, on and down', () => {
   assert.equal(bridgeShouldStart('discord', false, true), false);
   assert.equal(bridgeShouldStart('discord', true, false), false, 'kill switch wins');
   assert.equal(bridgeShouldStart('mock', false, false), false);
+});
+
+test('a building idea gets a progress note every few minutes, naming its stage', () => {
+  const b = { ...base, state: 'building' as const, stage: 'checking' as const, startedAt: '2026-10-30T10:00:00.000Z',
+    messages: [{ ts: '2026-10-30T10:00:00.000Z', by: 'orch', text: 'Building it now.' }] };
+  assert.equal(pulse(b, '2026-10-30T10:03:00.000Z'), null, 'too soon');
+  assert.equal(pulse(b, '2026-10-30T10:05:00.000Z'), 'Still on it: running the tests and a code review (5 min in).');
+  const later = { ...b, messages: [...b.messages, { ts: '2026-10-30T10:06:00.000Z', by: 'orch', text: 'x' }] };
+  assert.equal(pulse(later, '2026-10-30T10:08:00.000Z'), null, 'any orch post resets the clock');
+  assert.equal(pulse(later, '2026-10-30T10:11:00.000Z'), 'Still on it: running the tests and a code review (11 min in).');
+  assert.equal(pulse({ ...b, state: 'approved' as const }, '2026-10-30T11:00:00.000Z'), null);
+  assert.equal(pulse({ ...b, stage: undefined }, '2026-10-30T10:30:00.000Z'), 'Still on it: building the change (30 min in).');
 });
