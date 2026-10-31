@@ -715,3 +715,9 @@ test('ideas never build outside evrloot-next', () => {
   assert.match(startBlocker(a, [a], { ...config, repo: 'orch' }, false)!, /only on evrloot-next/);
   assert.equal(startBlocker(a, [a], { ...config, repo: 'evrloot-next' }, false), null);
 });
+
+test('a "*" allowlist lets in everyone who can write in the channel', () => {
+  const o = { ideas: [], config: { ...config, allowlist: ['*'] }, off: false, now: NOW, told: { day: '', keys: [] } };
+  const r = route({ id: 'x', channel: 'ideas', author: { id: 'eve', name: 'eve' }, text: 'idea' }, o);
+  assert.notEqual(r.kind, 'decline');
+});

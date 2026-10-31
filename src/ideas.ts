@@ -79,7 +79,8 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   if (m.thread ? !idea : m.channel !== o.config.channel) return { kind: 'ignore' };
   const text = sanitize(m.text);
   // Only the allowlist counts, also for an idea's own author: taking someone off the list takes them out of their threads.
-  const allowed = o.config.allowlist.includes(m.author.id);
+  // "*" lets in everyone who can write in the channel, so Discord's channel permissions are the gate.
+  const allowed = o.config.allowlist.includes('*') || o.config.allowlist.includes(m.author.id);
   const fresh = (reason: string) => !toldToday(o.told, o.now).includes(`${reason}:${m.author.id}`);
   if (!allowed) return { kind: 'decline', reason: 'stranger', text: STRANGER, answer: !o.off && fresh('stranger'), idea };
   if (o.off) return { kind: 'decline', reason: 'paused', text: PAUSED, answer: fresh('paused'), idea };
