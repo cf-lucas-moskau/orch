@@ -2,11 +2,11 @@
 // Ideas live in ideas/<id>.json, settings in ideas/config.json, the kill switch is the file ideas/off.
 // The daemon and `orch idea` are separate processes: every read-modify-write of ideas/ runs under one lock (ideas/.lock),
 // never across an await, and every write replaces its file atomically.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dueQuestions, MAX_MEDIA, parseNotes, progress, STAGES, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dueQuestions, MAX_MEDIA, mediaOk, parseNotes, progress, STAGES, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Step, type Told,
 } from './ideas.ts';
 
@@ -42,6 +42,21 @@ const said = (by: string, text: string, ts: string, media?: string) => (i: Idea)
 // Where a building idea's worker leaves progress notes and their media.
 export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
 const readNotes = (root: string, id: string) => { try { return parseNotes(readFileSync(join(progressDir(root, id), 'notes.jsonl'), 'utf8')); } catch { return []; } };
+
+// A note's media file, or why it stays out: a regular file (no symlink) that resolves to exactly
+// ideas/progress/<id>/<name>, at most 8 MB, of an allowed type by extension and by its first bytes.
+export function mediaFile(root: string, id: string, name: string): { file: string } | { refused: string } {
+  const f = join(progressDir(root, id), name);
+  try {
+    const st = lstatSync(f);
+    if (st.isSymbolicLink() || !st.isFile()) return { refused: 'not a regular file' };
+    if (realpathSync(f) !== join(realpathSync(dir(root)), 'progress', id, name)) return { refused: 'outside its progress folder' };
+    if (st.size > MAX_MEDIA) return { refused: `${(st.size / 1048576).toFixed(1)} MB is over 8 MB` };
+    const head = Buffer.alloc(16), fd = openSync(f, 'r');
+    try { readSync(fd, head, 0, 16, 0); } finally { closeSync(fd); }
+    return mediaOk(name, head) ? { file: f } : { refused: 'not a png, jpg, gif, mp4 or webm file' };
+  } catch { return { refused: 'not found' }; }
+}
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
 
@@ -247,8 +262,9 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     update(d.root, id, i => {
       // A reply that came in while the question went out answers it.
       const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > sentAt);
-      return { ...answered(i, text, sentAt), questions: [...i.questions ?? [],
-        { askedAt: sentAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}), ...(early ? { answered: early.ts } : {}) }] };
+      const asked = { ...answered(i, text, sentAt), questions: [...i.questions ?? [],
+        { askedAt: sentAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}) }] };
+      return early ? answer(asked, early.ts) : asked;
     });
     d.log(`idea ${id} ask${wait ? ' (wait)' : ''}: ${question.slice(0, 120)}`);
     return `asked ${cur.author.name} in ${id}${recommend && !wait ? `; going with the recommendation in 10 minutes without an answer` : ''}`;
@@ -283,7 +299,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
       // Notes left from an earlier build stay handled; this build's start with the next line.
-      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now, notesSeen: readNotes(d.root, id).length };
+      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now, notesSeen: readNotes(d.root, id).map(n => n.key) };
       save(d.root, i);
       return i;
     });
@@ -333,46 +349,51 @@ export async function idea(args: string[], d: Deps): Promise<string> {
 
 const fail = (msg: string): never => { throw new Error(msg); };
 
-// The bridge calls this every minute: building ideas get a progress note or a stage pulse, and open questions time
-// out or nudge orch. Each post is recorded under the lock right after it goes out, so nothing posts twice.
+// The bridge calls this every minute, one call at a time: building ideas get a progress note or a stage pulse, and
+// open questions time out or nudge orch.
 export async function tick(d: Deps & { chat: Chat }) {
   const now = (d.now ?? (() => new Date().toISOString()))();
   for (const i of loadIdeas(d.root, d.log)) {
     for (const due of dueQuestions(i, now)) {
       const q = i.questions![due.index];
-      // Claimed under the lock against a fresh read: a reply that came in meanwhile wins, and a question times out once.
-      let claimed = false;
-      update(d.root, i.id, x => {
-        const y = x.questions?.[due.index];
-        if (!y || y.answered || y.timedOut || y.nudged) return x;
-        claimed = true;
-        return { ...x, questions: x.questions!.map((z, n) => n === due.index ? { ...z, ...(due.kind === 'nudge' ? { nudged: now } : { timedOut: now }) } : z) };
-      });
-      if (!claimed) continue;
+      const fresh = () => (loadIdeas(d.root, d.log).find(x => x.id === i.id)?.questions ?? [])[due.index];
       if (due.kind === 'nudge') {
-        feed(d.root, ideaLine(i.id, 'unanswered', i.author.name, q.text), now);
+        let claimed = false;
+        update(d.root, i.id, x => {
+          const y = x.questions?.[due.index];
+          if (!y || y.answered || y.timedOut || y.nudged) return x;
+          claimed = true;
+          return { ...x, needsOrch: 'unanswered', needsAt: now, questions: x.questions!.map((z, n) => n === due.index ? { ...z, nudged: now } : z) };
+        });
+        if (claimed) feed(d.root, ideaLine(i.id, 'unanswered', i.author.name, q.text), now);
         continue;
       }
+      // A reply that came in meanwhile wins. timedOut is set only once the post is out: a failed post is retried on
+      // the next tick, and ticks never overlap, so it goes out once.
+      const y = fresh();
+      if (!y || y.answered || y.timedOut) continue;
       const text = timeoutPost(q.recommend!);
       await d.chat.reply(i.thread, text);
-      update(d.root, i.id, x => ({ ...said('orch', text, now)(x), needsOrch: 'timeout', needsAt: now }));
+      update(d.root, i.id, x => ({
+        ...said('orch', text, now)(x), needsOrch: 'timeout', needsAt: now,
+        questions: x.questions!.map((z, n) => n === due.index ? { ...z, timedOut: now } : z),
+      }));
       feed(d.root, ideaLine(i.id, 'timeout', i.author.name, q.recommend!), now);
       d.log(`idea ${i.id}: no answer in 10 minutes, going with: ${q.recommend!.slice(0, 100)}`);
     }
     const p = progress(i, readNotes(d.root, i.id), now);
     if (!p) continue;
-    if (!p.post) { update(d.root, i.id, x => ({ ...x, notesSeen: p.seen })); continue; }
-    const file = p.post.media ? join(progressDir(d.root, i.id), p.post.media) : undefined;
+    const seen = p.seen ? { notesSeen: p.seen } : {};
+    if (!p.post) { update(d.root, i.id, x => ({ ...x, ...seen })); continue; }
     let files: string[] = [];
-    if (file) {
-      try {
-        const size = statSync(file).size;
-        if (size > MAX_MEDIA) d.log(`idea ${i.id}: note media ${p.post.media} left out, ${(size / 1048576).toFixed(1)} MB is over 8 MB`);
-        else files = [file];
-      } catch { d.log(`idea ${i.id}: note media ${p.post.media} not found, posting the text alone`); }
+    if (p.post.media) {
+      const m = mediaFile(d.root, i.id, p.post.media);
+      if ('file' in m) files = [m.file];
+      else d.log(`idea ${i.id}: note media ${p.post.media} left out, ${m.refused}; posting the text alone`);
     }
     // Recorded before the post: a crash in between loses a note rather than posting it twice.
-    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), notesSeen: p.seen }));
+    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
     await d.chat.reply(i.thread, p.post.text, { files });
   }
 }
+

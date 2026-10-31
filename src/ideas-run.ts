@@ -22,7 +22,9 @@ if (process.argv.includes('--once')) {
   await chat.start();
   console.log(`${new Date().toISOString()} idea bridge up, adapter ${config.adapter}, channel ${config.channel}`);
   // Progress notes, stage pulses and question timeouts; off while the kill switch is on.
-  setInterval(() => { if (!isOff(root)) tick(deps).catch(e => log(`idea bridge: tick failed: ${e instanceof Error ? e.message : e}`)); }, 60_000);
+  // One tick at a time: a slow one makes the next wait instead of running beside it.
+  const tickOnce = serial(() => tick(deps));
+  setInterval(() => { if (!isOff(root)) tickOnce().catch(e => log(`idea bridge: tick failed: ${e instanceof Error ? e.message : e}`)); }, 60_000);
   const down = async () => { await chat.stop(); process.exit(0); };
   process.on('SIGTERM', down);
   process.on('SIGINT', down);

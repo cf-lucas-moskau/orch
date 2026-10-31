@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChat, MockChat, type ReplyOptions } from '../src/discord.ts';
 import { buildBrief } from '../src/brief.ts';
-import { handle, idea, loadConfig, loadIdeas, locked, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
+import { handle, idea, loadConfig, loadIdeas, locked, mediaFile, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer,
+  bridgeShouldStart, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -755,7 +755,7 @@ test('note text loses links, mentions, paths and tokens on the way out', () => {
   assert.equal(scrub('The new boat sways on the waves.'), 'The new boat sways on the waves.');
 });
 
-test('progress notes parse line by line; bad lines and bad media names are skipped, not miscounted', () => {
+test('progress notes parse line by line, keyed by ts and text; bad lines and bad media names are skipped', () => {
   const notes = parseNotes([
     JSON.stringify({ ts: 'a', text: 'Boat sketched.', media: 'boat.png' }),
     'not json',
@@ -763,18 +763,38 @@ test('progress notes parse line by line; bad lines and bad media names are skipp
     JSON.stringify({ ts: 'c', text: 'https://only.a.link' }),
     JSON.stringify({ ts: 'd', text: 'Clip.', media: 'run.exe' }),
   ].join('\n') + '\n');
-  assert.deepEqual(notes, [{ ts: 'a', text: 'Boat sketched.', media: 'boat.png' }, null, { ts: 'b', text: 'Sails tested.' }, null, { ts: 'd', text: 'Clip.' }]);
+  assert.deepEqual(notes, [
+    { key: noteKey('a', 'Boat sketched.'), ts: 'a', text: 'Boat sketched.', media: 'boat.png' },
+    { key: noteKey('b', 'Sails tested.'), ts: 'b', text: 'Sails tested.' },
+    { key: noteKey('d', 'Clip.'), ts: 'd', text: 'Clip.' },
+  ]);
+  assert.match(noteKey('a', 'Boat sketched.'), /^[0-9a-f]{16}$/);
+  assert.notEqual(noteKey('a', 'Boat sketched.'), noteKey('b', 'Boat sketched.'));
+});
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+test('media passes by extension and magic bytes only', () => {
+  assert.equal(mediaOk('boat.png', PNG), true);
+  assert.equal(mediaOk('boat.jpeg', Buffer.from([0xff, 0xd8, 0xff, 0xe0])), true);
+  assert.equal(mediaOk('a.gif', Buffer.from('GIF89a....')), true);
+  assert.equal(mediaOk('a.mp4', Buffer.from('\0\0\0\x20ftypisom', 'latin1')), true);
+  assert.equal(mediaOk('a.webm', Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0])), true);
+  assert.equal(mediaOk('boat.png', Buffer.from('#!/bin/sh\nrm -rf')), false, 'a script named .png');
+  assert.equal(mediaOk('boat.gif', PNG), false, 'a png named .gif');
+  assert.equal(mediaOk('boat.svg', Buffer.from('<svg')), false);
 });
 
 test('a building idea posts the newest new note after 2 quiet minutes, else the pulse after 5', () => {
   const T = (m: number) => new Date(Date.parse(NOW) + m * 60_000).toISOString();
-  const b: Idea = { ...base, state: 'building', stage: 'building', startedAt: NOW, notesSeen: 0, messages: [{ ts: NOW, by: 'orch', text: 'Building it now.' }] };
-  const n = (text: string, media?: string) => ({ ts: NOW, text, ...(media ? { media } : {}) });
+  const b: Idea = { ...base, state: 'building', stage: 'building', startedAt: NOW, notesSeen: [], messages: [{ ts: NOW, by: 'orch', text: 'Building it now.' }] };
+  const n = (text: string, media?: string) => ({ key: noteKey(NOW, text), ts: NOW, text, ...(media ? { media } : {}) });
   assert.equal(progress(b, [n('one')], T(1)), null, 'orch posted a minute ago');
-  assert.deepEqual(progress(b, [n('one'), n('two', 'two.png')], T(2)), { post: { text: 'two', media: 'two.png' }, seen: 2 });
-  assert.equal(progress({ ...b, notesSeen: 2 }, [n('one'), n('two')], T(4)), null, 'no new note, pulse not due');
-  assert.deepEqual(progress({ ...b, notesSeen: 2 }, [n('one'), n('two')], T(5)), { post: { text: 'Still on it: building the change (5 min in).' }, seen: 2 });
-  assert.deepEqual(progress({ ...b, notesSeen: undefined }, [n('posted by hand')], T(9)), { seen: 1 }, 'an idea from before notes takes the old ones as posted');
+  assert.deepEqual(progress(b, [n('one'), n('two', 'two.png')], T(2)), { post: { text: 'two', media: 'two.png' }, seen: [n('one').key, n('two').key] });
+  const both = { ...b, notesSeen: [n('one').key, n('two').key] };
+  assert.equal(progress(both, [n('one'), n('two')], T(4)), null, 'no new note, pulse not due');
+  assert.deepEqual(progress(both, [n('two'), n('one')], T(5)), { post: { text: 'Still on it: building the change (5 min in).' } }, 'reordered notes are not new');
+  assert.deepEqual(progress(both, [n('three')], T(5)), { post: { text: 'three' }, seen: [n('one').key, n('two').key, n('three').key] }, 'a rewritten file still posts its new note');
+  assert.deepEqual(progress({ ...b, notesSeen: undefined }, [n('posted by hand')], T(9)), { seen: [n('posted by hand').key] }, 'an idea from before notes takes the old ones as posted');
   assert.equal(progress({ ...b, state: 'shipped' }, [n('x')], T(9)), null);
 });
 
@@ -793,8 +813,11 @@ test('questions: the ping, the recommendation, answers, timeouts and nudges', ()
   assert.deepEqual(dueQuestions(i, T(10)), [{ index: 0, kind: 'timeout' }]);
   assert.deepEqual(dueQuestions(i, T(600)), [{ index: 0, kind: 'timeout' }, { index: 1, kind: 'nudge' }, { index: 2, kind: 'nudge' }]);
   assert.deepEqual(dueQuestions(answer(i, T(1)), T(600)), [], 'a reply answers every open question');
+  assert.deepEqual(dueQuestions(answer(i, NOW), T(10)), [{ index: 0, kind: 'timeout' }], 'a reply from before the question does not answer it');
+  assert.deepEqual(dueQuestions(answer(i, '2026-10-30T09:59:00.000Z'), T(10)), [{ index: 0, kind: 'timeout' }]);
   assert.deepEqual(dueQuestions({ ...i, state: 'closed' }, T(600)), []);
   assert.deepEqual(pendingLines([{ ...i, needsOrch: 'timeout', questions: [{ askedAt: NOW, text: 'a', recommend: 'blue sails', timedOut: T(10) }] }]), ['IDEA I-1 timeout ann: blue sails']);
+  assert.deepEqual(pendingLines([{ ...i, needsOrch: 'unanswered', questions: [{ askedAt: NOW, text: 'Boats or horses?', wait: true, nudged: T(60) }] }]), ['IDEA I-1 unanswered ann: Boats or horses?']);
 });
 
 const building = async (w: ReturnType<typeof world>) => { await ready(w); await idea(['start', 'I-1'], w.d); };
@@ -805,7 +828,7 @@ test('end to end on mocks: progress notes post once, with their media, and over-
   const folder = progressDir(w.root, 'I-1');
   assert.ok(existsSync(folder), 'start makes the folder');
   const note = (o: object) => appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify(o) + '\n');
-  writeFileSync(join(folder, 'boat.png'), 'png');
+  writeFileSync(join(folder, 'boat.png'), PNG);
   note({ ts: LATER(1), text: 'First sketch.' });
   note({ ts: LATER(1), text: 'The boat sways on the waves, see /tmp/x.png', media: 'boat.png' });
   w.setNow(LATER(1)); await tick(w.d);
@@ -815,14 +838,24 @@ test('end to end on mocks: progress notes post once, with their media, and over-
   assert.deepEqual([out.text, out.files], ['The boat sways on the waves, see', ['boat.png']]);
   w.setNow(LATER(5)); await tick(w.d);
   assert.equal(w.chat.outbox().filter(o => o.kind === 'reply').length, 3, 'nothing posts twice and the pulse waits 5 minutes after the note');
-  writeFileSync(join(folder, 'big.mp4'), Buffer.alloc(8 * 1024 * 1024 + 1));
+  writeFileSync(join(folder, 'big.mp4'), Buffer.concat([Buffer.from('\0\0\0\x20ftypisom', 'latin1'), Buffer.alloc(8 * 1024 * 1024)]));
   note({ ts: LATER(6), text: 'A clip of the race.', media: 'big.mp4' });
   w.setNow(LATER(7)); await tick(w.d);
   const big = w.chat.outbox().at(-1) as any;
   assert.deepEqual([big.text, big.files], ['A clip of the race.', undefined]);
   assert.ok(w.logs.some(l => /big\.mp4 left out, 8\.0 MB is over 8 MB/.test(l)));
+  writeFileSync(join(folder, 'notes.jsonl'), [
+    JSON.stringify({ ts: LATER(6), text: 'A clip of the race.', media: 'big.mp4' }),
+    JSON.stringify({ ts: LATER(1), text: 'First sketch.' }),
+    JSON.stringify({ ts: LATER(8), text: 'Sails fixed.' }),
+  ].join('\n') + '\n');
+  w.setNow(LATER(9)); await tick(w.d);
+  w.setNow(LATER(11)); await tick(w.d);
+  assert.deepEqual(w.replies().filter(r => r === 'Sails fixed.'), ['Sails fixed.'], 'a rewritten notes.jsonl posts its new note once');
+  assert.ok(!w.replies().includes('First sketch.'), 'a note already handled never posts');
+  w.setNow(LATER(17)); await tick(w.d);
   w.setNow(LATER(12)); await tick(w.d);
-  assert.equal(w.replies().at(-1), 'Still on it: building the change (12 min in).');
+  assert.equal(w.replies().at(-1), 'Still on it: building the change (17 min in).');
   assert.equal(loadIdeas(w.root)[0].messages!.find(m => m.media)?.media, 'boat.png');
 });
 
@@ -835,7 +868,7 @@ test('notes that existed before the bridge ran this code count as posted', async
   const { notesSeen, ...legacy } = JSON.parse(readFileSync(f, 'utf8'));
   writeFileSync(f, JSON.stringify(legacy));
   w.setNow(LATER(3)); await tick(w.d);
-  assert.equal(loadIdeas(w.root)[0].notesSeen, 1);
+  assert.deepEqual(loadIdeas(w.root)[0].notesSeen, [noteKey(LATER(1), 'Posted by hand.')]);
   assert.ok(!w.replies().includes('Posted by hand.'));
   appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify({ ts: LATER(3), text: 'Sails up.' }) + '\n');
   w.setNow(LATER(4)); await tick(w.d);
@@ -850,7 +883,7 @@ test('a rebuild starts after the notes of the build before', async () => {
   await idea(['plan', 'I-1', 'more'], w.d);
   await w.post('--in', 'I-1', 'go', '--as', 'ann');
   await idea(['start', 'I-1'], w.d);
-  assert.equal(loadIdeas(w.root)[0].notesSeen, 1);
+  assert.deepEqual(loadIdeas(w.root)[0].notesSeen, [noteKey(NOW, 'old')]);
 });
 
 test('end to end on mocks: a question answered in time never times out', async () => {
@@ -921,4 +954,83 @@ test('a reply that lands while the question goes out answers it', async () => {
   assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(1));
   w.setNow(LATER(20)); await tick(w.d);
   assert.ok(!w.replies().some(r => r.startsWith('No answer')));
+});
+
+test('note media must be a real file of its type inside its own progress folder', async () => {
+  const w = world();
+  await building(w);
+  const folder = progressDir(w.root, 'I-1');
+  mkdirSync(join(w.root, 'secrets'));
+  writeFileSync(join(w.root, 'secrets', 'shot.png'), PNG);
+  symlinkSync(join(w.root, 'secrets', 'shot.png'), join(folder, 'link.png'));
+  writeFileSync(join(folder, 'fake.png'), 'not a png at all');
+  mkdirSync(join(folder, 'dir.png'));
+  writeFileSync(join(folder, 'ok.png'), PNG);
+  mkdirSync(join(w.root, 'elsewhere'));
+  writeFileSync(join(w.root, 'elsewhere', 'b.png'), PNG);
+  symlinkSync(join(w.root, 'elsewhere'), join(w.root, 'ideas', 'progress', 'I-9'));
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'ok.png'), { file: join(folder, 'ok.png') });
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'link.png'), { refused: 'not a regular file' });
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'fake.png'), { refused: 'not a png, jpg, gif, mp4 or webm file' });
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'dir.png'), { refused: 'not a regular file' });
+  assert.deepEqual(mediaFile(w.root, 'I-1', 'gone.png'), { refused: 'not found' });
+  assert.deepEqual(mediaFile(w.root, 'I-9', 'b.png'), { refused: 'outside its progress folder' });
+
+  appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify({ ts: LATER(1), text: 'Look at this.', media: 'link.png' }) + '\n');
+  w.setNow(LATER(3)); await tick(w.d);
+  const out = w.chat.outbox().at(-1) as any;
+  assert.deepEqual([out.text, out.files], ['Look at this.', undefined]);
+  assert.ok(w.logs.some(l => l === 'idea I-1: note media link.png left out, not a regular file; posting the text alone'));
+});
+
+test('a failed timeout post leaves the question open and posts once on the next tick', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['ask', 'I-1', 'Red or blue sails?', '--recommend', 'blue sails'], w.d);
+  w.chat.fail.add('reply');
+  w.setNow(LATER(10));
+  await assert.rejects(tick(w.d), /reply failed/);
+  assert.equal(loadIdeas(w.root)[0].questions![0].timedOut, undefined);
+  assert.ok(!w.feed().some(l => l.includes('timeout')));
+  w.chat.fail.delete('reply');
+  w.setNow(LATER(11)); await tick(w.d);
+  w.setNow(LATER(12)); await tick(w.d);
+  assert.equal(w.replies().filter(r => r.startsWith('No answer')).length, 1);
+  assert.equal(loadIdeas(w.root)[0].questions![0].timedOut, LATER(11));
+});
+
+test('an unanswered nudge flags the idea, so the watcher replays it', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['ask', 'I-1', 'Should boats replace horses?', '--wait'], w.d);
+  w.setNow(LATER(60)); await tick(w.d);
+  assert.equal(loadIdeas(w.root)[0].needsOrch, 'unanswered');
+  assert.deepEqual(pendingLines(loadIdeas(w.root)), ['IDEA I-1 unanswered ann: Should boats replace horses?']);
+  assert.match(await idea(['list'], w.d), /\(needs orch: unanswered\)$/);
+});
+
+test('a go-shaped reply to an open question answers it and reaches orch', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['ask', 'I-1', 'Shall I add sails too?', '--recommend', 'yes'], w.d);
+  w.setNow(LATER(2));
+  await w.post('--in', 'I-1', 'go!', '--as', 'ann');
+  assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(2));
+  assert.equal(w.feed().at(-1), 'IDEA I-1 msg ann: go!');
+  assert.equal(loadIdeas(w.root)[0].needsOrch, 'msg');
+  assert.ok(!w.replies().includes('There is no plan to say go to yet.'));
+  w.setNow(LATER(20)); await tick(w.d);
+  assert.ok(!w.replies().some(r => r.startsWith('No answer')));
+});
+
+test('a valid go on the plan on screen stays a go, and answers the open question too', async () => {
+  const w = world();
+  await w.post('Boats for the lake', '--as', 'ann');
+  await idea(['plan', 'I-1', 'Boats on the lake.'], w.d);
+  await idea(['ask', 'I-1', 'Happy with the plan?', '--recommend', 'go'], w.d);
+  w.setNow(LATER(1));
+  await w.post('--in', 'I-1', 'go', '--as', 'bob');
+  assert.equal(loadIdeas(w.root)[0].state, 'approved');
+  assert.equal(loadIdeas(w.root)[0].questions![0].answered, LATER(1));
+  assert.equal(w.feed().at(-1), 'IDEA I-1 go bob: go');
 });

@@ -1,5 +1,6 @@
 // The Discord idea bridge, pure parts: idea state machine, who may do what, and every text the bridge posts.
 // Discord text is untrusted: it is stripped of links and mentions on the way in and only ever quoted to workers.
+import { createHash } from 'node:crypto';
 
 // creating: the post is recorded and its thread is being opened.
 export type State = 'creating' | 'talk' | 'planned' | 'approved' | 'building' | 'shipped' | 'closed';
@@ -12,7 +13,7 @@ export type Message = { ts: string; by: string; text: string; plan?: number; med
 // needsOrch: the kind of the last team event orch has not answered yet, flagged at needsAt; an orch post sent after
 // that clears it. planVersion counts the plans posted, planAt is when the current one went up. builds: every worker
 // name this idea has used.
-export type Pending = 'new' | 'msg' | 'go' | 'timeout';
+export type Pending = 'new' | 'msg' | 'go' | 'timeout' | 'unanswered';
 // A question orch asked the idea's author with `idea ask`. Open until an allowed member replies (answered) or, with a
 // recommendation and no wait, until it times out and orch goes with the recommendation. nudged: the hour-later line
 // that tells orch a question without a timeout is still open.
@@ -22,9 +23,10 @@ export type Idea = {
   created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
   needsOrch?: Pending; needsAt?: string; planVersion?: number; planAt?: string; builds?: string[];
   stage?: Stage; startedAt?: string; questions?: Question[];
-  // Lines of ideas/progress/<id>/notes.jsonl already handled (posted or skipped). Missing on an idea that started
-  // building before progress notes existed: the first tick takes every note already there as handled.
-  notesSeen?: number;
+  // Keys (ts + text hash) of the progress notes already handled, posted or skipped, so a rewritten notes.jsonl
+  // posts only notes that are new. Missing on an idea that started building before progress notes existed: the
+  // first tick takes every note already there as handled.
+  notesSeen?: string[];
 };
 // Where a building idea is, in words a player understands. orch sets it with `idea stage`.
 export const STAGES = { building: 'building the change', checking: 'running the tests and a code review', deploying: 'putting it live', playtesting: 'trying it out on the live game' } as const;
@@ -104,8 +106,11 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   if (o.off) return { kind: 'decline', reason: 'paused', text: PAUSED, answer: fresh('paused'), idea };
   if (idea) {
     if (idea.state === 'closed') return { kind: 'answer', text: `This idea is closed. Post a new one in the channel to pick it up again.`, idea };
+    // A go-shaped reply to an open question is an answer for orch, unless it is a valid go on the plan on screen.
+    const asked = idea.questions?.some(q => isOpen(q) && q.askedAt < (m.ts ?? o.now));
     if (GO.test(text)) {
       if (idea.state === 'planned' && visiblePlan(idea, m.ts ?? o.now) === idea.planVersion) return { kind: 'go', idea };
+      if (asked) return { kind: 'message', idea, text };
       if (idea.state === 'planned') return { kind: 'answer', text: 'A new plan went up after your go. Read it and reply **go** again.', idea };
       return { kind: 'answer', text: idea.state === 'talk' ? 'There is no plan to say go to yet.' : `Already past go: this idea is ${idea.state}.`, idea };
     }
@@ -167,8 +172,9 @@ export const ideaLine = (id: string, kind: string, author: string, text: string)
 // What orch has not answered yet, as watcher lines: the last team message of each flagged idea.
 export function pendingLines(ideas: Idea[]): string[] {
   return ideas.filter(i => i.needsOrch).map(i => {
-    const q = i.needsOrch === 'timeout' ? (i.questions ?? []).filter(q => q.timedOut).at(-1) : undefined;
-    if (q) return ideaLine(i.id, 'timeout', i.author.name, q.recommend!);
+    const q = i.needsOrch === 'timeout' ? (i.questions ?? []).filter(q => q.timedOut).at(-1)
+      : i.needsOrch === 'unanswered' ? (i.questions ?? []).filter(q => q.nudged).at(-1) : undefined;
+    if (q) return ideaLine(i.id, i.needsOrch!, i.author.name, i.needsOrch === 'timeout' ? q.recommend! : q.text);
     const last = (i.messages ?? []).filter(m => m.by !== 'orch').at(-1) ?? { by: i.author.name, text: i.text };
     return ideaLine(i.id, i.needsOrch!, last.by, last.text);
   });
@@ -231,36 +237,51 @@ export function scrub(text: string): string {
     .slice(0, 500);
 }
 
-export type Note = { ts: string; text: string; media?: string };
+export type Note = { key: string; ts: string; text: string; media?: string };
 const MEDIA = /^[\w-][\w.-]*\.(png|jpe?g|gif|mp4|webm)$/i;
-// One entry per line of notes.jsonl, null for a line that is not a usable note, so counts stay line counts.
-// A media name that is not a plain file name of an allowed type is dropped; the text still goes.
-export function parseNotes(text: string): (Note | null)[] {
-  return text.split('\n').filter(l => l.trim()).map(l => {
+export const noteKey = (ts: string, text: string) => createHash('sha256').update(`${ts}\n${text}`).digest('hex').slice(0, 16);
+// The usable notes of a notes.jsonl, keyed by their ts and raw text. A media name that is not a plain file name of
+// an allowed type is dropped; the text still goes.
+export function parseNotes(text: string): Note[] {
+  return text.split('\n').filter(l => l.trim()).flatMap(l => {
     try {
       const n = JSON.parse(l);
-      const t = typeof n?.text === 'string' ? scrub(n.text) : '';
-      if (!t) return null;
-      return { ts: typeof n.ts === 'string' ? n.ts : '', text: t, ...(typeof n.media === 'string' && MEDIA.test(n.media) ? { media: n.media } : {}) };
-    } catch { return null; }
+      if (typeof n?.text !== 'string') return [];
+      const t = scrub(n.text), ts = typeof n.ts === 'string' ? n.ts : '';
+      if (!t) return [];
+      return [{ key: noteKey(ts, n.text), ts, text: t, ...(typeof n.media === 'string' && MEDIA.test(n.media) ? { media: n.media } : {}) }];
+    } catch { return []; }
   });
 }
 
+// Media a note may carry, by extension and by the file's first bytes.
+const MAGIC: Record<string, (b: Buffer) => boolean> = {
+  png: b => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  jpg: b => b.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])),
+  gif: b => ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('latin1')),
+  mp4: b => b.subarray(4, 8).toString('latin1') === 'ftyp',
+  webm: b => b.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])),
+};
+export function mediaOk(name: string, head: Buffer): boolean {
+  const ext = name.split('.').at(-1)!.toLowerCase().replace('jpeg', 'jpg');
+  return MEDIA.test(name) && !!MAGIC[ext]?.(head);
+}
+
 // What the bridge posts in a building idea's thread this minute: the newest new note once orch has been quiet for
-// NOTE_GAP_MIN, else the stage pulse after PULSE_MIN without notes. seen is the new notesSeen; it moves without a post
-// on an idea from before progress notes, so notes posted by hand never post again.
-export type Progress = { post?: { text: string; media?: string }; seen: number };
-export function progress(i: Idea, notes: (Note | null)[], now: string): Progress | null {
+// NOTE_GAP_MIN, else the stage pulse after PULSE_MIN without notes. seen is the new notesSeen when it changes; on an
+// idea from before progress notes it takes every note there without a post, so notes posted by hand never go again.
+export type Progress = { post?: { text: string; media?: string }; seen?: string[] };
+export function progress(i: Idea, notes: Note[], now: string): Progress | null {
   if (i.state !== 'building') return null;
-  if (i.notesSeen === undefined) return { seen: notes.length };
-  const fresh = notes.slice(i.notesSeen).filter((n): n is Note => !!n);
+  if (!Array.isArray(i.notesSeen)) return { seen: notes.map(n => n.key) };
+  const fresh = notes.filter(n => !i.notesSeen!.includes(n.key));
   if (fresh.length) {
     if (minsSince(lastOrch(i), now) < NOTE_GAP_MIN) return null;
     const n = fresh.at(-1)!;
-    return { post: { text: n.text, ...(n.media ? { media: n.media } : {}) }, seen: notes.length };
+    return { post: { text: n.text, ...(n.media ? { media: n.media } : {}) }, seen: [...i.notesSeen, ...fresh.map(f => f.key)] };
   }
   const text = pulse(i, now);
-  return text ? { post: { text }, seen: notes.length } : notes.length > i.notesSeen ? { seen: notes.length } : null;
+  return text ? { post: { text } } : null;
 }
 
 export const mention = (id: string) => `<@${id}>`;
@@ -272,9 +293,10 @@ export function askPost(author: string, question: string, recommend?: string, wa
 export const timeoutPost = (recommend: string) => `No answer in ${ASK_TIMEOUT_MIN} minutes, so I'm going with my recommendation: ${recommend.trim()}`;
 
 export const isOpen = (q: Question) => !q.answered && !q.timedOut;
-// Every open question counts as answered by an allowed reply in the thread.
+// An allowed reply in the thread answers every question that was open when it was posted.
+const answers = (q: Question, ts: string) => isOpen(q) && q.askedAt < ts;
 export const answer = (i: Idea, ts: string): Idea =>
-  i.questions?.some(isOpen) ? { ...i, questions: i.questions.map(q => isOpen(q) ? { ...q, answered: ts } : q) } : i;
+  i.questions?.some(q => answers(q, ts)) ? { ...i, questions: i.questions.map(q => answers(q, ts) ? { ...q, answered: ts } : q) } : i;
 
 // Open questions that are due this minute: those with a recommendation and no wait time out after ASK_TIMEOUT_MIN;
 // the others get one nudge line for orch after NUDGE_MIN.
