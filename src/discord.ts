@@ -1,8 +1,8 @@
 // Chat adapters for the idea bridge. mock: JSONL files under ideas/mock/ (inbox written by `orch idea fake`,
 // outbox read by tests and people). discord: the discord.js gateway for incoming messages, REST for posting.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { serial, split, type Config, type Incoming } from './ideas.ts';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { MAX_MEDIA, serial, split, type Config, type Incoming } from './ideas.ts';
 
 export interface Chat {
   onMessage(handler: (m: Incoming) => Promise<void>): void;
@@ -13,14 +13,16 @@ export interface Chat {
   createThread(message: string, name: string): Promise<string>;
   // The thread already opened on a top-level post, if any.
   findThread(message: string): Promise<string | null>;
-  // target is a thread or channel id; long text goes out as several messages.
-  reply(target: string, text: string): Promise<void>;
+  // target is a thread or channel id; long text goes out as several messages, files (absolute paths) with the last.
+  // ping: the one user id a mention in the text may notify; without it nobody is pinged.
+  reply(target: string, text: string, o?: ReplyOptions): Promise<void>;
   react(target: string, message: string, emoji: string): Promise<void>;
 }
 
+export type ReplyOptions = { files?: string[]; ping?: string };
 export type Outgoing =
   | { kind: 'thread'; message: string; thread: string; name: string }
-  | { kind: 'reply'; target: string; text: string }
+  | { kind: 'reply'; target: string; text: string; files?: string[]; ping?: string }
   | { kind: 'react'; target: string; message: string; emoji: string };
 
 export type OnError = (msg: string) => void;
@@ -80,7 +82,14 @@ export class MockChat implements Chat {
     const t = this.outbox().find(o => o.kind === 'thread' && o.message === message);
     return t?.kind === 'thread' ? t.thread : null;
   }
-  async reply(target: string, text: string) { for (const t of split(text)) this.out({ kind: 'reply', target, text: t }); }
+  async reply(target: string, text: string, o: ReplyOptions = {}) {
+    const parts = split(text);
+    parts.forEach((t, n) => this.out({
+      kind: 'reply', target, text: t,
+      ...(o.files?.length && n === parts.length - 1 ? { files: o.files.map(f => basename(f)) } : {}),
+      ...(o.ping ? { ping: o.ping } : {}),
+    }));
+  }
   async react(target: string, message: string, emoji: string) { this.out({ kind: 'react', target, message, emoji }); }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
   // `orch idea fake`: post as someone, at the top level or inside an idea's thread. Mock user ids are their names.
@@ -221,8 +230,24 @@ export class DiscordChat implements Chat {
     try { return (await (await this.api()).get(route.message(this.o.channel, message))).thread?.id ?? null; }
     catch (e: any) { if (e?.status === 404) return null; throw e; }
   }
-  async reply(target: string, text: string) {
-    for (const content of split(text)) await (await this.api()).post(route.messages(target), { body: { content, allowed_mentions: NO_PINGS } });
+  // A file over Discord's 8 MB limit, or one that cannot be read, is left out with a log line; the text still goes.
+  async reply(target: string, text: string, o: ReplyOptions = {}) {
+    const files = (o.files ?? []).flatMap(f => {
+      try {
+        const size = statSync(f).size;
+        if (size > MAX_MEDIA) { this.o.onError(`attachment ${basename(f)} left out: ${(size / 1048576).toFixed(1)} MB is over 8 MB`); return []; }
+        return [{ name: basename(f), data: readFileSync(f) }];
+      } catch (e) { this.o.onError(`attachment ${basename(f)} left out: ${why(e)}`); return []; }
+    });
+    const allowed_mentions = o.ping ? { parse: [], users: [o.ping] } : NO_PINGS;
+    const parts = split(text);
+    for (const [n, content] of parts.entries()) {
+      const last = n === parts.length - 1 && files.length > 0;
+      await (await this.api()).post(route.messages(target), {
+        body: { content, allowed_mentions, ...(last ? { attachments: files.map((f, id) => ({ id, filename: f.name })) } : {}) },
+        ...(last ? { files } : {}),
+      });
+    }
   }
   async react(target: string, message: string, emoji: string) {
     await (await this.api()).put(route.reaction(target, message, emoji));

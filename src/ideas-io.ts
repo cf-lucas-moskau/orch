@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realp
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, writeAtomic, type Chat } from './discord.ts';
 import {
-  advance, clears, DEFAULT_CONFIG, pulse, STAGES, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dueQuestions, MAX_MEDIA, parseNotes, progress, STAGES, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Step, type Told,
 } from './ideas.ts';
 
@@ -38,7 +38,10 @@ export function loadIdeas(root: string, log: (msg: string) => void = m => consol
 }
 const file = (root: string, id: string) => join(dir(root), `${id}.json`);
 const save = (root: string, i: Idea) => writeAtomic(file(root, i.id), JSON.stringify(i, null, 2) + '\n');
-const said = (by: string, text: string, ts: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text }] });
+const said = (by: string, text: string, ts: string, media?: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text, ...(media ? { media } : {}) }] });
+// Where a building idea's worker leaves progress notes and their media.
+export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
+const readNotes = (root: string, id: string) => { try { return parseNotes(readFileSync(join(progressDir(root, id), 'notes.jsonl'), 'utf8')); } catch { return []; } };
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
 
@@ -105,7 +108,8 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     }
     if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go') {
       const fresh: Idea = JSON.parse(readFileSync(file(d.root, r.idea!.id), 'utf8'));
-      const cur: Idea = { ...fresh, messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
+      // Any allowed reply in the thread answers orch's open questions.
+      const cur: Idea = { ...answer(fresh, m.ts ?? now), messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
       const next = r.kind === 'go' ? advance(cur, 'go', now) : cur;
       if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
       save(d.root, r.kind === 'answer' ? next : { ...next, needsOrch: r.kind === 'go' ? 'go' as const : 'msg' as const, needsAt: now, ...(r.kind === 'go' ? { goBy: m.author.id } : {}) });
@@ -164,7 +168,7 @@ const running = (root: string, name?: string) => !!name && workers(root).some(w 
 
 const USAGE = `usage: orch idea list | off | on
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
-       orch idea say <id> <text|file> | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
+       orch idea say <id> <text|file> | ask <id> <question file|text> [--recommend <text>] [--wait] | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
        files are read only from ideas/drafts/`;
 
 // A single argument naming a file under ideas/drafts/ (relative, no ..) is that file's text; anything else is the text
@@ -228,6 +232,27 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       return answered({ ...(next as Idea), ...patch }, text, sentAt);
     });
   };
+  if (sub === 'ask') {
+    // --recommend takes every word after it up to the next flag; the question is what comes before the flags.
+    const wait = rest.includes('--wait');
+    const at = rest.indexOf('--recommend');
+    const words = rest.filter((a, n) => a !== '--wait' && (at < 0 || n < at));
+    const recommend = at < 0 ? undefined : rest.slice(at + 1).filter(a => a !== '--wait').join(' ').trim();
+    const question = textOf(d.root, words);
+    if (!question || recommend === '') throw new Error(USAGE);
+    check('say');
+    const text = askPost(cur.author.id, question, recommend, wait);
+    const sentAt = clock();
+    await chat().reply(cur.thread, text, { ping: cur.author.id });
+    update(d.root, id, i => {
+      // A reply that came in while the question went out answers it.
+      const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > sentAt);
+      return { ...answered(i, text, sentAt), questions: [...i.questions ?? [],
+        { askedAt: sentAt, text: question, ...(recommend ? { recommend } : {}), ...(wait ? { wait } : {}), ...(early ? { answered: early.ts } : {}) }] };
+    });
+    d.log(`idea ${id} ask${wait ? ' (wait)' : ''}: ${question.slice(0, 120)}`);
+    return `asked ${cur.author.name} in ${id}${recommend && !wait ? `; going with the recommendation in 10 minutes without an answer` : ''}`;
+  }
   const force = rest.includes('--force');
   const text = textOf(d.root, rest.filter(a => a !== '--force'));
   if (sub === 'say') {
@@ -257,12 +282,14 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
-      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now };
+      // Notes left from an earlier build stay handled; this build's start with the next line.
+      const i: Idea = { ...check('start', me), worker: name, builds: [...me.builds ?? [], name], stage: 'building', startedAt: now, notesSeen: readNotes(d.root, id).length };
       save(d.root, i);
       return i;
     });
     const name = building.worker!;
-    try { d.run([config.repo, name, workerTask(building)]); }
+    mkdirSync(progressDir(d.root, id), { recursive: true });
+    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id))]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
@@ -306,13 +333,46 @@ export async function idea(args: string[], d: Deps): Promise<string> {
 
 const fail = (msg: string): never => { throw new Error(msg); };
 
-// The bridge calls this every minute: building ideas whose thread heard nothing from orch for a while get a note.
-export async function pulses(d: Deps & { chat: Chat }) {
+// The bridge calls this every minute: building ideas get a progress note or a stage pulse, and open questions time
+// out or nudge orch. Each post is recorded under the lock right after it goes out, so nothing posts twice.
+export async function tick(d: Deps & { chat: Chat }) {
   const now = (d.now ?? (() => new Date().toISOString()))();
   for (const i of loadIdeas(d.root, d.log)) {
-    const text = pulse(i, now);
-    if (!text) continue;
-    await d.chat.reply(i.thread, text);
-    update(d.root, i.id, x => said('orch', text, now)(x));
+    for (const due of dueQuestions(i, now)) {
+      const q = i.questions![due.index];
+      // Claimed under the lock against a fresh read: a reply that came in meanwhile wins, and a question times out once.
+      let claimed = false;
+      update(d.root, i.id, x => {
+        const y = x.questions?.[due.index];
+        if (!y || y.answered || y.timedOut || y.nudged) return x;
+        claimed = true;
+        return { ...x, questions: x.questions!.map((z, n) => n === due.index ? { ...z, ...(due.kind === 'nudge' ? { nudged: now } : { timedOut: now }) } : z) };
+      });
+      if (!claimed) continue;
+      if (due.kind === 'nudge') {
+        feed(d.root, ideaLine(i.id, 'unanswered', i.author.name, q.text), now);
+        continue;
+      }
+      const text = timeoutPost(q.recommend!);
+      await d.chat.reply(i.thread, text);
+      update(d.root, i.id, x => ({ ...said('orch', text, now)(x), needsOrch: 'timeout', needsAt: now }));
+      feed(d.root, ideaLine(i.id, 'timeout', i.author.name, q.recommend!), now);
+      d.log(`idea ${i.id}: no answer in 10 minutes, going with: ${q.recommend!.slice(0, 100)}`);
+    }
+    const p = progress(i, readNotes(d.root, i.id), now);
+    if (!p) continue;
+    if (!p.post) { update(d.root, i.id, x => ({ ...x, notesSeen: p.seen })); continue; }
+    const file = p.post.media ? join(progressDir(d.root, i.id), p.post.media) : undefined;
+    let files: string[] = [];
+    if (file) {
+      try {
+        const size = statSync(file).size;
+        if (size > MAX_MEDIA) d.log(`idea ${i.id}: note media ${p.post.media} left out, ${(size / 1048576).toFixed(1)} MB is over 8 MB`);
+        else files = [file];
+      } catch { d.log(`idea ${i.id}: note media ${p.post.media} not found, posting the text alone`); }
+    }
+    // Recorded before the post: a crash in between loses a note rather than posting it twice.
+    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), notesSeen: p.seen }));
+    await d.chat.reply(i.thread, p.post.text, { files });
   }
 }
