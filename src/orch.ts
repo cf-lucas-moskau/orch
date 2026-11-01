@@ -100,12 +100,17 @@ function submit(target: string, text: string) {
 
 // herdr reports ready a moment before Claude's input box takes pastes, also after the trust dialog.
 function waitReady(name: string) {
+  let last = '', before = '';
   for (let i = 0; i < 60; i++) {
     spawnSync('sleep', ['1']);
     const a = herdr('agent', 'get', name).result?.agent;
     const screen = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout;
     if (a?.agent_status === 'blocked') return { error: { code: 'agent_blocked', message: 'blocked after trust' } };
-    if (['idle', 'done'].includes(a?.agent_status) && a.interactive_ready && /❯|›/.test(screen) && !isTrustDialog(screen)) {
+    // Claude queries the terminal while it boots; a paste before those answers land comes out as raw codes. Ready means
+    // the mode line is drawn and the screen stayed the same for three reads in a row.
+    const settled = screen === last && screen === before;
+    [before, last] = [last, screen];
+    if (['idle', 'done'].includes(a?.agent_status) && a.interactive_ready && /❯|›/.test(screen) && /shift\+tab|auto mode|bypass permissions/.test(screen) && settled && !isTrustDialog(screen)) {
       spawnSync('sleep', ['3']);
       return { result: a };
     }
