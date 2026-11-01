@@ -96,8 +96,8 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /in-scope implementation and investigation calls yourself/);
   assert.match(b, /bound to 127\.0\.0\.1/);
   assert.match(b, /^Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal\.$/m);
-  const p = workerPrompt({ name: 'flag', kind: 'claude' }, '/x/briefs/flag.md');
-  assert.equal(p, 'You are worker flag, dispatched by orch. First load the pstack:poteto-mode skill with the Skill tool and work in that mode. Read your brief at /x/briefs/flag.md and follow it.');
+  const p = workerPrompt({ name: 'flag', kind: 'claude' }, '/x/briefs/flag.md', '/p/poteto-mode/SKILL.md');
+  assert.equal(p, 'You are worker flag, dispatched by orch. First read /p/poteto-mode/SKILL.md in full and work by it (poteto-mode). Read your brief at /x/briefs/flag.md and follow it.');
   assert.ok(!p.startsWith('/'), 'a leading slash command opens the command menu and the prompt never submits');
   assert.ok(!p.includes('\n'));
   assert.ok(workerPrompt({ name: 'x', kind: 'codex' }, '/b').startsWith('You are worker x'));

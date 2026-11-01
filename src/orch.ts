@@ -69,7 +69,11 @@ function dispatchable(workers: Worker[], name: string) {
     : blocker);
 }
 // poteto-mode needs pstack; without it workers get the plain prompt.
-const hasPstack = () => { try { return readFileSync(join(homedir(), '.claude/plugins/installed_plugins.json'), 'utf8').includes('"pstack@'); } catch { return false; } };
+// The newest installed pstack's poteto-mode SKILL.md, or false.
+const potetoSkill = (): string | false => {
+  const r = spawnSync('/bin/sh', ['-c', `ls -t ${join(homedir(), '.claude/plugins/cache')}/*/pstack/*/skills/poteto-mode/SKILL.md 2>/dev/null | head -1`], { encoding: 'utf8' });
+  return r.stdout.trim() || false;
+};
 const worker = (name: string) => loadWorkers().find(w => w.name === name && w.status === 'running') ?? die(`no running worker ${name}`);
 
 // Submit and confirm the session picked it up, without waiting for the whole turn.
@@ -185,7 +189,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   const brief = join(root, 'briefs', `${name}.md`);
   mkdirSync(join(root, 'briefs'), { recursive: true });
   writeFileSync(brief, workerBrief(task, p, rec));
-  const status = submit(name, workerPrompt(rec, brief, hasPstack()));
+  const status = submit(name, workerPrompt(rec, brief, potetoSkill()));
   log(`run ${name} (${kind}${extra.pair ? `, pair ${extra.pair}` : ''}) on ${p.repo} (${branch}, pane ${pane}): ${task.slice(0, 120)}`);
   console.log(`${name} (${kind}) ${status} in ${pane}, worktree ${path}`);
 }
