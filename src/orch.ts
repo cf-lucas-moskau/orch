@@ -78,10 +78,12 @@ const worker = (name: string) => loadWorkers().find(w => w.name === name && w.st
 function submit(target: string, text: string) {
   const send = () => herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
   let r = send();
+  // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter: the text sits in
+  // the box. Press Enter once more instead of pasting again; a second paste on top garbled idea-2/3/4/followups.
   if (r.error?.code === 'agent_prompt_stalled') {
-    spawnSync('sleep', ['3']);
-    herdr('agent', 'send-keys', target, 'ctrl+u');
-    r = send();
+    spawnSync('sleep', ['2']);
+    herdr('agent', 'send-keys', target, 'enter');
+    r = { result: { agent: { agent_status: 'unknown' } } } as typeof r;
   }
   if (r.error) die(`prompt to ${target} failed: ${r.error.code} ${r.error.message}`);
   // herdr can report working while the pasted prompt sits on screen as raw codes and the agent is idle (idea-2, idea-3,
