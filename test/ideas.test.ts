@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChat, MockChat, type ReplyOptions } from '../src/discord.ts';
 import { buildBrief } from '../src/brief.ts';
-import { handle, idea, loadConfig, loadIdeas, locked, mediaFile, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
+import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  bridgeShouldStart, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -44,7 +44,9 @@ test('routing: strangers, go, closed ideas, other channels', () => {
   assert.equal(route(m('bob', '**Go!**', 't-m1'), o).kind, 'go');
   assert.equal(route(m('ann', 'go further', 't-m1'), o).kind, 'message');
   assert.deepEqual(route(m('ann', 'go', 't-m1'), { ...o, ideas: [base] }), { kind: 'answer', text: 'There is no plan to say go to yet.', idea: base });
-  assert.equal(route(m('ann', 'more', 't-m1'), { ...o, ideas: [{ ...base, state: 'closed' }] }).kind, 'answer');
+  const closed = { ...base, state: 'closed' as const };
+  assert.deepEqual(route(m('ann', 'more', 't-m1'), { ...o, ideas: [closed] }), { kind: 'feedback', idea: closed, text: 'more' });
+  assert.equal(route(m('ann', 'go', 't-m1'), { ...o, ideas: [{ ...base, state: 'shipped' }] }).kind, 'feedback', 'a go after ship is feedback too');
   const paused = (answer: boolean, idea?: Idea) => ({ kind: 'decline', reason: 'paused', text: PAUSED, answer, idea });
   assert.deepEqual(route(m('ann', 'idea'), { ...o, off: true }), paused(true));
   assert.deepEqual(route(m('ann', 'idea'), { ...told('2026-10-30', 'paused:ann'), off: true }), paused(false));
@@ -1105,4 +1107,177 @@ test('ship carries the newest unposted note media and marks every note posted', 
   const out = w.chat.outbox().at(-1) as any;
   assert.deepEqual(out.files, ['live.png']);
   assert.deepEqual(loadIdeas(w.root)[0].notesSeen, [noteKey(LATER(1), 'Taken live.')]);
+});
+
+// The first round of ready(): built by idea-1, shipped, its PR recorded.
+const shipped = async (w: ReturnType<typeof world>) => {
+  await ready(w);
+  await idea(['start', 'I-1'], w.d);
+  await idea(['record', 'I-1', 'PR evrloot-next#12 merged; gates green; review clean; known limit: night bats unchanged.'], w.d);
+  await idea(['ship', 'I-1', 'Cave bats now drop twice the loot.'], w.d);
+};
+
+test('feedback after ship reopens the idea as round 2 and reaches orch, with no closed reply', async () => {
+  const w = world();
+  await shipped(w);
+  const before = w.replies().length;
+  w.setNow(LATER(60));
+  await w.post('--in', 'I-1', 'nice, but the night bats too?', '--as', 'bob');
+  const i = loadIdeas(w.root)[0];
+  assert.deepEqual([i.state, i.round, i.needsOrch], ['talk', 2, 'feedback']);
+  assert.equal(w.feed().at(-1), 'IDEA I-1 feedback bob: nice, but the night bats too?');
+  assert.equal(w.replies().length, before, 'nothing is posted back');
+  assert.equal(w.chat.outbox().at(-1)!.kind, 'react');
+  assert.match(await idea(['list'], w.d), /I-1 \[talk round 2, reopened idea-1\] ann: Bats drop more loot \(needs orch: feedback\)$/);
+  const brief = buildBrief({ date: '2026-10-30', feed: [], since: NOW, names: {}, decisions: [], plans: [], learned: [], workers: [], ideas: pendingLines(loadIdeas(w.root)) });
+  assert.match(brief, /## Feedback waiting \(1\)\nIDEA I-1 feedback bob: nice, but the night bats too\?\n\n## Ideas waiting on orch \(0\)\n/);
+});
+
+test('feedback after a close reopens it too; the round counts on', async () => {
+  const w = world();
+  await shipped(w);
+  await idea(['close', 'I-1', 'done'], w.d);
+  await w.post('--in', 'I-1', 'can we get this for the swamp?', '--as', 'ann');
+  const i = loadIdeas(w.root)[0];
+  assert.deepEqual([i.state, i.round, i.closed, i.needsOrch], ['talk', 2, undefined, 'feedback']);
+  assert.ok(!w.replies().some(r => r.includes('closed. Post a new one')));
+});
+
+test('strangers after ship are still declined and reopen nothing; off, members hear paused', async () => {
+  const w = world();
+  await shipped(w);
+  await w.post('--in', 'I-1', 'make it 10x', '--as', 'eve');
+  assert.equal(w.replies().at(-1), STRANGER);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].round], ['shipped', 1]);
+  await idea(['off'], w.d);
+  await w.post('--in', 'I-1', 'more', '--as', 'ann');
+  assert.equal(w.replies().at(-1), PAUSED);
+  assert.equal(loadIdeas(w.root)[0].state, 'shipped');
+});
+
+test('the dossier grows with every step, lives in ideas/<id>/ and survives the worker', async () => {
+  const w = world();
+  await shipped(w);
+  const dossier = () => readFileSync(dossierFile(w.root, 'I-1'), 'utf8');
+  assert.equal(dossier(), `# I-1: Bats drop more loot
+
+Posted by ann on 2026-10-30 10:00:
+
+> Bats drop more loot
+
+## Round 1
+
+### 2026-10-30 10:00 plan
+
+v1
+
+Cave bats drop 2x.
+
+### 2026-10-30 10:00 go from ann
+
+on plan v1
+
+### 2026-10-30 10:00 build started
+
+worker idea-1, branch orch/idea-1, on evrloot-next
+
+### 2026-10-30 10:00 record
+
+PR evrloot-next#12 merged; gates green; review clean; known limit: night bats unchanged.
+
+### 2026-10-30 10:00 shipped
+
+Cave bats now drop twice the loot.
+`);
+  rmSync(progressDir(w.root, 'I-1'), { recursive: true, force: true });
+  writeFileSync(join(w.root, 'workers.json'), '[]');
+  w.setNow(LATER(5));
+  await w.post('--in', 'I-1', 'night bats?', '--as', 'bob');
+  assert.ok(dossier().startsWith(`# I-1: Bats drop more loot`));
+  assert.ok(dossier().endsWith(`Cave bats now drop twice the loot.\n\n## Round 2\n\n### 2026-10-30 10:05 feedback from bob\n\n> night bats?\n`));
+});
+
+test("round 2's worker task carries round 1's plan, branch, record and changelog above the new plan", async () => {
+  const w = world();
+  await shipped(w);
+  w.setNow(LATER(5));
+  await w.post('--in', 'I-1', 'night bats too please', '--as', 'bob');
+  await idea(['plan', 'I-1', 'Night bats drop 2x as well.'], w.d);
+  w.setNow(LATER(6));
+  await w.post('--in', 'I-1', 'go', '--as', 'bob');
+  assert.equal(await idea(['start', 'I-1'], w.d), 'I-1 building as worker idea-1-2');
+  const task = w.runs[1][2];
+  assert.ok(task.startsWith('Idea I-1 was built and shipped before; this is round 2.'));
+  const at = (s: string) => { const n = task.indexOf(s); assert.ok(n >= 0, `missing: ${s}`); return n; };
+  const order = ['## Round 1', 'Cave bats drop 2x.', 'branch orch/idea-1', 'PR evrloot-next#12 merged', 'Cave bats now drop twice the loot.',
+    '## Round 2', '> night bats too please', '## Round 2: the plan to build', 'Night bats drop 2x as well.', 'This plan answers idea I-1'].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.equal(task.match(/Night bats drop 2x as well\./g)!.length, 1, "round 2's plan appears only as the task");
+  assert.equal(workerTask({ ...loadIdeas(w.root)[0], round: 1 }, 'p').startsWith('Night bats drop 2x as well.'), true, 'round 1 is unchanged');
+});
+
+test('a plan straight after ship starts the next round as well', async () => {
+  const w = world();
+  await shipped(w);
+  await idea(['plan', 'I-1', 'Swamp bats too.'], w.d);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].round], ['planned', 2]);
+});
+
+test('a shipped idea closes quietly after 14 days without a message; a later message reopens it', async () => {
+  const w = world();
+  await shipped(w);
+  const posts = w.chat.outbox().length;
+  w.setNow(LATER(13 * 24 * 60));
+  await tick(w.d);
+  assert.equal(loadIdeas(w.root)[0].state, 'shipped');
+  w.setNow(LATER(14 * 24 * 60));
+  await tick(w.d);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].closed], ['closed', 'no message in 14 days']);
+  assert.equal(w.chat.outbox().length, posts, 'nothing posted');
+  w.setNow(LATER(15 * 24 * 60));
+  await w.post('--in', 'I-1', 'back again', '--as', 'ann');
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].round], ['talk', 2]);
+  w.setNow(LATER(29 * 24 * 60));
+  await tick(w.d);
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].round], ['closed', 2], 'a reopened round that stays talk closes too');
+});
+
+test('record is dossier only and needs text', async () => {
+  const w = world();
+  await ready(w);
+  const posts = w.chat.outbox().length;
+  assert.equal(await idea(['record', 'I-1', 'live check passed on api.runforit.io'], w.d), "recorded in I-1's dossier (round 1)");
+  assert.equal(w.chat.outbox().length, posts);
+  await assert.rejects(idea(['record', 'I-1'], w.d), /usage/);
+});
+
+test('migration: a closed idea that shipped becomes shipped with a dossier from its thread', async () => {
+  const legacy: Idea = { ...base, state: 'closed', closed: 'done', builds: ['idea-1'], planVersion: 1, messages: [
+    { ts: '2026-10-30T10:00:00.000Z', by: 'ann', text: 'More loot' },
+    { ts: '2026-10-30T10:01:00.000Z', by: 'orch', text: '**Plan**\n\nBats drop 2x.\n\nReply **go** to build it.' },
+    { ts: '2026-10-30T10:02:00.000Z', by: 'bob', text: 'go' },
+    { ts: '2026-10-30T10:03:00.000Z', by: 'orch', text: 'Building it now. I will post here when it is live.' },
+    { ts: '2026-10-30T10:04:00.000Z', by: 'orch', text: 'Still on it: building the change (1 min in).' },
+    { ts: '2026-10-30T11:00:00.000Z', by: 'orch', text: '**Shipped**\n\nBats drop 2x now.\n\nLive on https://api.runforit.io, please try it.' },
+    { ts: '2026-10-30T11:01:00.000Z', by: 'orch', text: 'Closing this idea: done' },
+    { ts: '2026-10-30T12:00:00.000Z', by: 'ann', text: 'nice' },
+    { ts: '2026-10-30T12:00:01.000Z', by: 'orch', text: 'This idea is closed. Post a new one in the channel to pick it up again.' },
+  ] };
+  const m = migrate(legacy);
+  assert.deepEqual([m.state, m.closed, m.round], ['shipped', undefined, 1]);
+  assert.deepEqual(m.dossier!.map(e => [e.kind, e.text, e.by]), [
+    ['plan', 'Bats drop 2x.', undefined], ['go', '', 'bob'], ['start', 'worker idea-1, branch orch/idea-1', undefined],
+    ['ship', 'Bats drop 2x now.', undefined], ['close', 'done', undefined], ['feedback', 'nice', 'ann'],
+  ]);
+  assert.equal(migrate(m), m, 'idempotent');
+  assert.equal(migrate({ ...legacy, messages: legacy.messages!.slice(0, 3), state: 'closed' }).state, 'closed', 'a close without a ship stays closed');
+
+  const w = world();
+  writeFileSync(join(w.root, 'ideas', 'I-1.json'), JSON.stringify(legacy));
+  migrateAll(w.root);
+  const disk = JSON.parse(readFileSync(join(w.root, 'ideas', 'I-1.json'), 'utf8'));
+  assert.deepEqual([disk.state, disk.round, disk.dossier.length], ['shipped', 1, 6]);
+  assert.ok(readFileSync(dossierFile(w.root, 'I-1'), 'utf8').includes('### 2026-10-30 12:00 feedback from ann\n\n> nice'));
+  await w.post('--in', 'I-1', 'one more thing', '--as', 'ann');
+  assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].round], ['talk', 2]);
 });
