@@ -193,8 +193,10 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
 }
 
 // One line on purpose: a pasted newline turns the message into pasted text and the slash command never runs.
+// No leading slash command: it opens Claude's command menu, the terminal's answers to its queries land in the input
+// box and the prompt never submits (idea-2 to idea-8, 2026-10-31 and 11-01). The skill is loaded by name instead.
 export const workerPrompt = (w: Pick<Worker, 'name' | 'kind'>, briefPath: string, pstack = true) =>
-  `${w.kind === 'codex' || !pstack ? '' : `${SERIOUS} `}You are worker ${w.name}, dispatched by orch. Read your brief at ${briefPath} and follow it.`;
+  `You are worker ${w.name}, dispatched by orch.${w.kind === 'codex' || !pstack ? '' : ` First load the ${SERIOUS.replace(/^\//, '')} skill with the Skill tool and work in that mode.`} Read your brief at ${briefPath} and follow it.`;
 
 export function findLive(live: Live[], target: string): Live | undefined {
   return live.find(a => a.name === target || a.pane_id === target);
