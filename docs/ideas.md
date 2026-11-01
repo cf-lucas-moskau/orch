@@ -18,16 +18,23 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `start <id>` | After a go: dispatch worker `idea-<n>` on the configured repo with the plan as its task, the post quoted as untrusted data, and the progress note rules. |
 | `stage <id> <building\|checking\|deploying\|playtesting>` | Where a building idea is, named in its stage pulses. |
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
-| `close <id> [reason] [--force]` | Done, dropped, or merged into another idea. A building idea needs its worker cleaned up first, or `--force`. |
+| `record <id> <file\|text>` | Add a line to the idea's dossier without posting anything: the merged PR, gate and review results, the live check, a short summary of the worker's final report, known limits. |
+| `close <id> [reason] [--force]` | Dropped, merged into another idea, or done on request. A building idea needs its worker cleaned up first, or `--force`. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
+
+## Threads never die
+
+A thread stays open after ship and after close. An allowed member's message in the thread of a `shipped` or `closed` idea is feedback: the idea goes back to `talk` as the next round (round 2, 3, ...), is flagged as needing orch, gets a 👀 reaction, and reaches orch as `IDEA <id> feedback <author>: <text>`. Nothing is posted back. A plan posted straight after ship starts the next round too. Strangers and the kill switch apply as anywhere else. A shipped idea, or a reopened round still in `talk`, closes quietly (no post) after 14 days without a message; a later message reopens it all the same. `list` shows the round and marks a round that has not shipped yet as `reopened`; the morning brief lists feedback waiting on its own.
+
+Every idea keeps a dossier that outlives its workers: the steps live in its JSON (`dossier`) and are rendered to `ideas/<id>/dossier.md` on every write. It holds each plan version, each go, every build's worker and branch, what orch records with `record` (PR, gates, review, live check, the worker's report, known limits), the changelog, closes and feedback, grouped by round. From round 2 on the worker's task starts with the dossier of the earlier rounds and the feedback since, then the new plan, so a new worker knows what exists and where. Ideas from before rounds are migrated on every bridge start and `orch idea` command: the dossier is rebuilt from the thread the JSON kept, and a closed idea that shipped becomes `shipped` again, with messages after its ship as feedback.
 
 ## While an idea builds
 
 The worker writes progress notes to `ideas/progress/<id>/notes.jsonl` under orch's directory, one JSON line each: `{"ts": "<ISO>", "text": "<one or two sentences for players>", "media": "<optional file name>"}`, with the media file (png, jpg, gif, mp4, webm, up to 8 MB) in the same folder. Every minute the bridge posts the newest note it has not posted yet, text plus attachment, once orch has said nothing in the thread for 2 minutes; older unposted notes are skipped. With no new note, a stage pulse ("Still on it: running the tests and a code review (12 min in).") goes out after 5 quiet minutes. Note text loses links, mentions, paths (starting with / or ~, or naming a file like game/boat.ts; left/right stays) and token-like strings on the way out. Media is read once through one file descriptor and goes only when the folder resolves to the idea's own progress folder, the file opens without following a symlink and is regular, is at most 8 MB, and is a png, jpg, gif, mp4 or webm by both extension and first bytes; anything else is left out with a log line and the text still posts. `notesSeen` in the idea's JSON holds a key (hash of ts and text) for every note handled, so nothing posts twice, even when the worker rewrites notes.jsonl; a note is recorded only once its post is out, so a failed post is tried again the next minute; an idea that started building before progress notes existed takes the notes already in its file as posted on the first tick, and a rebuild starts after the notes of the build before.
 
-Every new idea, thread message, go, question timeout and unanswered nudge marks the idea as needing orch until orch answers with `say`, `ask`, `plan`, `start`, `ship` or `close`. `list` and the morning brief show those ideas, and the watcher prints their IDEA lines again when it starts, so nothing posted while orch was down is missed.
+Every new idea, thread message, go, feedback, question timeout and unanswered nudge marks the idea as needing orch until orch answers with `say`, `ask`, `plan`, `start`, `ship` or `close`. `list` and the morning brief show those ideas, and the watcher prints their IDEA lines again when it starts, so nothing posted while orch was down is missed.
 
 ## Settings
 
