@@ -13,7 +13,7 @@ const config = loadConfig(root);
 const chat = chatFor(root, config, msg => log(`idea bridge: ${msg}`));
 const deps = { root, log, run: () => { throw new Error('the bridge never dispatches'); }, chat };
 chat.onMessage(serial(m => handle(deps, m)));
-migrateAll(root);
+migrateAll(root, log);
 await reconcile(deps);
 
 if (process.argv.includes('--once')) {
