@@ -344,14 +344,21 @@ export function dueQuestions(i: Idea, now: string): { index: number; kind: 'time
 
 const stamp = (ts: string) => ts.slice(0, 16).replace('T', ' ');
 const HEAD: Record<Entry['kind'], string> = { plan: 'plan', go: 'go', start: 'build started', ship: 'shipped', record: 'record', feedback: 'feedback', close: 'closed' };
-// The dossier as markdown, round by round. Team text (the post, feedback) is quoted.
+// A Discord display name, cleaned like post text and kept to one line.
+const who = (name: string) => sanitize(name).replace(/\s+/g, ' ');
+// The dossier as markdown, round by round. Everything from the team (the post, display names, feedback) is sanitized
+// and quoted, never in a heading.
 export function dossierText(i: Idea, keep: (e: Entry) => boolean = () => true): string {
-  const out = [`# ${i.id}: ${threadName(i.text)}`, '', `Posted by ${i.author.name} on ${stamp(i.created)}:`, '', quote(i.text)];
+  const out = [`# ${i.id} dossier`, '', `Posted on ${stamp(i.created)}, quoted:`, '', quote(`${who(i.author.name)}: ${sanitize(i.text)}`)];
   let round = 0;
   for (const e of (i.dossier ?? []).filter(keep)) {
     if (e.round !== round) { round = e.round; out.push('', `## Round ${round}`); }
-    out.push('', `### ${stamp(e.ts)} ${HEAD[e.kind]}${e.by ? ` from ${e.by}` : ''}`);
-    if (e.text) out.push('', e.kind === 'feedback' ? quote(e.text) : e.text);
+    out.push('', `### ${stamp(e.ts)} ${HEAD[e.kind]}`);
+    if (e.kind === 'feedback') out.push('', quote(`${who(e.by ?? '')}: ${sanitize(e.text)}`));
+    else {
+      if (e.by) out.push('', quote(who(e.by)));
+      if (e.text) out.push('', e.text);
+    }
   }
   return out.join('\n') + '\n';
 }

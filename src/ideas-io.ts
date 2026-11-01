@@ -48,14 +48,23 @@ function save(root: string, i: Idea) {
 }
 // Ideas from before rounds get their round and dossier written; idempotent, so every start of the bridge and every
 // `orch idea` runs it.
-export const migrateAll = (root: string) => locked(root, () => {
-  for (const f of ideaFiles(root)) {
-    try {
-      const raw = JSON.parse(readFileSync(join(dir(root), f), 'utf8'));
-      if (raw.round === undefined || !existsSync(dossierFile(root, raw.id))) save(root, migrate(raw));
-    } catch {}
-  }
-});
+// The scan runs without the lock; only a store with something to migrate takes it, and checks again under it.
+export function migrateAll(root: string, log: (msg: string) => void) {
+  const due = (f: string) => {
+    const raw = JSON.parse(readFileSync(join(dir(root), f), 'utf8'));
+    return raw.round === undefined || !existsSync(dossierFile(root, raw.id)) ? raw as Idea : undefined;
+  };
+  const failed = (f: string, e: unknown) => log(`idea bridge: ideas/${f} not migrated: ${e instanceof Error ? e.message : e}`);
+  const todo = ideaFiles(root).filter(f => { try { return !!due(f); } catch (e) { failed(f, e); return false; } });
+  if (!todo.length) return;
+  locked(root, () => {
+    for (const f of todo) {
+      try { const raw = due(f); if (raw) save(root, migrate(raw)); }
+      catch (e) { failed(f, e); }
+    }
+  });
+}
+const reopenedTalk = (i: Idea) => roundOf(i) > 1 && !(i.dossier ?? []).some(e => e.round === roundOf(i) && e.kind === 'plan');
 const said = (by: string, text: string, ts: string, media?: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text, ...(media ? { media } : {}) }] });
 // Where a building idea's worker leaves progress notes and their media.
 export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
@@ -154,7 +163,8 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
       const next = step ? advance(cur, step, now) : cur;
       if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
       if (r.kind === 'answer') save(d.root, next);
-      else if (r.kind === 'message') save(d.root, { ...next, needsOrch: 'msg', needsAt: now });
+      // Talk in a reopened round before its plan is feedback too, every message of it.
+      else if (r.kind === 'message') save(d.root, { ...(reopenedTalk(next) ? entry(next, 'feedback', text, m.ts ?? now, m.author.name) : next), needsOrch: 'msg', needsAt: now });
       else if (r.kind === 'go') save(d.root, { ...entry(next, 'go', `on plan v${next.planVersion}`, now, m.author.name), needsOrch: 'go', needsAt: now, goBy: m.author.id });
       else save(d.root, { ...entry(next, 'feedback', text, m.ts ?? now, m.author.name), needsOrch: 'feedback', needsAt: now });
       if (r.kind === 'feedback') return { ...r, round: roundOf(next) };
@@ -242,7 +252,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const now = (d.now ?? (() => new Date().toISOString()))();
   const config = loadConfig(d.root);
   const chat = () => d.chat ?? chatFor(d.root, config, d.log);
-  migrateAll(d.root);
+  migrateAll(d.root, d.log);
   if (sub === 'list' || !sub) {
     const all = loadIdeas(d.root, d.log);
     // reopened: a round after the first that has not shipped yet.
@@ -276,14 +286,15 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const answered = (i: Idea, text: string, sentAt: string): Idea =>
     ({ ...said('orch', text, now)(i), ...(clears(i, sentAt) ? { needsOrch: undefined, needsAt: undefined } : {}) });
   // Checked before posting, and again under the lock after: the daemon may have moved the idea meanwhile.
-  const post = async (s: Step, text: string, patch: Partial<Idea> = {}, files: Attachment[] = []) => {
+  // then: what else the step writes, in the same locked update as the state.
+  const post = async (s: Step, text: string, then: (i: Idea) => Idea = i => i, files: Attachment[] = []) => {
     check(s);
     const sentAt = clock();
     await chat().reply(cur.thread, text, files.length ? { files } : {});
     return update(d.root, id, i => {
       const next = advance(i, s, now);
       if (typeof next === 'string') fail(`posted, but not recorded: ${next}`);
-      return answered({ ...(next as Idea), ...patch }, text, sentAt);
+      return answered(then(next as Idea), text, sentAt);
     });
   };
   if (sub === 'ask') {
@@ -388,8 +399,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const last = fresh.filter(n => n.media).at(-1);
     const m = last?.media ? mediaFile(d.root, id, last.media) : undefined;
     if (m && 'refused' in m) d.log(`idea ${id}: ship media ${last!.media} left out, ${m.refused}`);
-    await post('ship', shipPost(text, config.liveUrl), { notesSeen: notes.map(n => n.key) }, m && 'file' in m ? [m.file] : []);
-    update(d.root, id, i => entry(i, 'ship', text, now));
+    await post('ship', shipPost(text, config.liveUrl), i => entry({ ...i, notesSeen: notes.map(n => n.key) }, 'ship', text, now), m && 'file' in m ? [m.file] : []);
     d.log(`idea ${id} shipped: ${text.split('\n')[0].slice(0, 100)}`);
     return `changelog posted in ${id}`;
   }
@@ -398,8 +408,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     if (cur.state === 'building' && running(d.root, cur.worker) && !force)
       fail(`not closed: ${id} is building with worker ${cur.worker}; clean it up first (orch cleanup ${cur.worker}) or close with --force`);
     const reason = text || 'done';
-    await post('close', `Closing this idea: ${reason}`, { closed: reason });
-    update(d.root, id, i => entry(i, 'close', reason, now));
+    await post('close', `Closing this idea: ${reason}`, i => entry({ ...i, closed: reason }, 'close', reason, now));
     d.log(`idea ${id} closed: ${reason}`);
     return `${id} closed`;
   }
@@ -418,7 +427,8 @@ export async function tick(d: Deps & { chat: Chat }) {
       update(d.root, i.id, x => {
         if (!stale(x, now)) return x;
         const next = advance(x, 'close', now);
-        return typeof next === 'string' ? x : entry({ ...next, closed: reason }, 'close', `${reason}; nothing posted, a new message reopens it`, now);
+        // Nobody answers a closed idea, so nothing stays flagged; a new message flags it again.
+        return typeof next === 'string' ? x : entry({ ...next, closed: reason, needsOrch: undefined, needsAt: undefined }, 'close', `${reason}; nothing posted, a new message reopens it`, now);
       });
       d.log(`idea ${i.id} closed quietly: ${reason}`);
       continue;
