@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { isGarbledPrompt,
+import { potetoLine, isGarbledPrompt,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -188,8 +188,11 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   }
   const brief = join(root, 'briefs', `${name}.md`);
   mkdirSync(join(root, 'briefs'), { recursive: true });
-  writeFileSync(brief, workerBrief(task, p, rec));
-  const status = submit(name, workerPrompt(rec, brief, potetoSkill()));
+  writeFileSync(brief, potetoLine(rec, potetoSkill()) + workerBrief(task, p, rec));
+  // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives.
+  herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
+  herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+  const status = submit(name, workerPrompt(brief));
   log(`run ${name} (${kind}${extra.pair ? `, pair ${extra.pair}` : ''}) on ${p.repo} (${branch}, pane ${pane}): ${task.slice(0, 120)}`);
   console.log(`${name} (${kind}) ${status} in ${pane}, worktree ${path}`);
 }

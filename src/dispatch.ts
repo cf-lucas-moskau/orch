@@ -193,11 +193,12 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
 }
 
 // One line on purpose: a pasted newline turns the message into pasted text and the slash command never runs.
-// No leading slash command: it opens Claude's command menu, the terminal's answers to its queries land in the input
-// box and the prompt never submits (idea-2 to idea-8, 2026-10-31 and 11-01). poteto-mode can't be loaded through the
-// Skill tool either (disable-model-invocation), so the worker reads its SKILL.md. skill: that file's path, or false.
-export const workerPrompt = (w: Pick<Worker, 'name' | 'kind'>, briefPath: string, skill: string | false = false) =>
-  `You are worker ${w.name}, dispatched by orch.${w.kind === 'codex' || !skill ? '' : ` First read ${skill} in full and work by it (poteto-mode).`} Read your brief at ${briefPath} and follow it.`;
+// The prompt is one short line: a long paste races Claude's terminal queries at startup and their answers land inside
+// it (idea-2 to idea-10, 2026-10-31 to 11-02). Everything else, poteto-mode included, is in the brief.
+export const workerPrompt = (briefPath: string) => `Read ${briefPath} and follow it.`;
+// poteto-mode can't be loaded through the Skill tool (disable-model-invocation), so the brief points at its SKILL.md.
+export const potetoLine = (w: Pick<Worker, 'kind'>, skill: string | false) =>
+  w.kind === 'codex' || !skill ? '' : `First read ${skill} in full and work by it (poteto-mode).\n\n`;
 
 export function findLive(live: Live[], target: string): Live | undefined {
   return live.find(a => a.name === target || a.pane_id === target);
