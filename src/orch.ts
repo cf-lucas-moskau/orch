@@ -84,11 +84,16 @@ function submit(target: string, text: string) {
     r = send();
   }
   if (r.error) die(`prompt to ${target} failed: ${r.error.code} ${r.error.message}`);
-  // herdr can report working while the pasted prompt sits on screen as raw codes; check what the pane shows.
-  spawnSync('sleep', ['4']);
-  const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible'], { encoding: 'utf8' }).stdout;
-  if (isGarbledPrompt(screen)) die(`prompt to ${target} arrived garbled (raw paste codes on screen); the agent did not get it. Clean up the worker and run it again.`);
-  return r.result.agent.agent_status as string;
+  // herdr can report working while the pasted prompt sits on screen as raw codes and the agent is idle (idea-2, idea-3,
+  // idea-4 on 2026-10-31 and 11-01). Watch for 20 s: garbled or never working means the agent did not get it.
+  for (let i = 0; i < 10; i++) {
+    spawnSync('sleep', ['2']);
+    const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible'], { encoding: 'utf8' }).stdout;
+    if (isGarbledPrompt(screen)) die(`prompt to ${target} arrived garbled (raw paste codes on screen); the agent did not get it. Clean up the worker and run it again.`);
+    const status = herdr('agent', 'get', target).result?.agent?.agent_status;
+    if (['working', 'blocked', 'done'].includes(status)) return status as string;
+  }
+  die(`prompt to ${target} was not picked up: the agent stayed idle for 20 s. Read the pane; clean up and run again if it never started.`);
 }
 
 // herdr reports ready a moment before Claude's input box takes pastes, also after the trust dialog.
