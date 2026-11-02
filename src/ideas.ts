@@ -195,7 +195,21 @@ export function workerName(id: string, taken: string[]): string {
 export const planPost = (plan: string) => `**Plan**\n\n${plan.trim()}\n\nReply **go** to build it.`;
 export const startPost = () => 'Building it now. I will post here when it is live.';
 export const shipPost = (changelog: string, url: string) => `**Shipped**\n\n${changelog.trim()}\n\nLive on ${url}, please try it.`;
-export const threadName = (text: string) => (text.split('\n')[0].slice(0, 90).trim() || 'idea');
+// Discord caps thread names at 100 characters; the id leads, so threads are easy to tell apart.
+const NAME_MAX = 100;
+const label = (id: string) => `${id} · `;
+export const labelled = (id: string, name: string) => name.startsWith(label(id));
+export const labelName = (id: string, name: string) => labelled(id, name) ? name : (label(id) + name.trim()).slice(0, NAME_MAX).trim();
+export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
+
+// Idea ids in orch's posts become links to their threads: I-17 reads I-17 (<#thread>). The idea's own id, ids without
+// a thread, ids inside code and ids already linked stay as they are.
+const CODE = /(```[\s\S]*?```|`[^`\n]*`)/;
+export function linkIdeas(text: string, ideas: Pick<Idea, 'id' | 'thread'>[], self?: string): string {
+  const thread = new Map(ideas.filter(i => i.thread && i.id !== self).map(i => [i.id, i.thread]));
+  return text.split(CODE).map((part, n) => n % 2 ? part
+    : part.replace(/\bI-\d+\b(?!-\d)(?! \(<#[^>\s]+>\))/g, id => thread.has(id) ? `${id} (<#${thread.get(id)}>)` : id)).join('');
+}
 
 // One line for orch's watcher. The text is untrusted; orch reads it as data.
 export const ideaLine = (id: string, kind: string, author: string, text: string) =>

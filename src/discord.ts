@@ -13,6 +13,10 @@ export interface Chat {
   createThread(message: string, name: string): Promise<string>;
   // The thread already opened on a top-level post, if any.
   findThread(message: string): Promise<string | null>;
+  // A thread's current name, null when it is gone.
+  getThread(thread: string): Promise<{ name: string } | null>;
+  // Renames a thread; an archived one is unarchived for the rename and archived again, even when the rename fails.
+  renameThread(thread: string, name: string): Promise<void>;
   // target is a thread or channel id; long text goes out as several messages, files with the last.
   // ping: the one user id a mention in the text may notify; without it nobody is pinged.
   // Resolves to the time the first message was posted, as the chat says.
@@ -26,6 +30,7 @@ export type ReplyOptions = { files?: Attachment[]; ping?: string };
 export type Posted = { ts?: string };
 export type Outgoing =
   | { kind: 'thread'; message: string; thread: string; name: string }
+  | { kind: 'rename'; thread: string; name: string }
   | { kind: 'reply'; target: string; text: string; files?: string[]; ping?: string }
   | { kind: 'react'; target: string; message: string; emoji: string };
 
@@ -88,6 +93,11 @@ export class MockChat implements Chat {
     const t = this.outbox().find(o => o.kind === 'thread' && o.message === message);
     return t?.kind === 'thread' ? t.thread : null;
   }
+  async getThread(thread: string) {
+    const name = this.outbox().flatMap(o => (o.kind === 'thread' || o.kind === 'rename') && o.thread === thread ? [o.name] : []).at(-1);
+    return name === undefined ? null : { name };
+  }
+  async renameThread(thread: string, name: string) { this.out({ kind: 'rename', thread, name }); }
   async reply(target: string, text: string, o: ReplyOptions = {}): Promise<Posted> {
     const parts = split(text);
     const ts = parts.map((t, n) => this.out({
@@ -236,6 +246,19 @@ export class DiscordChat implements Chat {
   async findThread(message: string) {
     try { return (await (await this.api()).get(route.message(this.o.channel, message))).thread?.id ?? null; }
     catch (e: any) { if (e?.status === 404) return null; throw e; }
+  }
+  async getThread(thread: string) {
+    try { return { name: (await (await this.api()).get(route.channel(thread))).name as string }; }
+    catch (e: any) { if (e?.status === 404) return null; throw e; }
+  }
+  // Discord renames an archived thread only after unarchiving it. It is archived again whether the rename worked or not.
+  async renameThread(thread: string, name: string) {
+    const rest = await this.api();
+    const archived = !!(await rest.get(route.channel(thread))).thread_metadata?.archived;
+    if (!archived) return void await rest.patch(route.channel(thread), { body: { name } });
+    await rest.patch(route.channel(thread), { body: { archived: false } });
+    try { await rest.patch(route.channel(thread), { body: { name } }); }
+    finally { await rest.patch(route.channel(thread), { body: { archived: true } }); }
   }
   // An attachment over Discord's 8 MB limit, or not an allowed media type by its bytes, is left out with a log line;
   // the text still goes. The buffer checked is the buffer sent.

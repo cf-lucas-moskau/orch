@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  bridgeShouldStart, labelName, linkIdeas, threadName, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -128,7 +128,7 @@ test('end to end on mocks: post, talk, plan, go, start, ship', async () => {
   const w = world();
   await w.post('More loot in the north cave <@42> https://x.example', '--as', 'ann');
   const [thread, eyes] = w.chat.outbox();
-  assert.deepEqual({ ...thread, ts: 0 }, { ts: 0, kind: 'thread', message: 'm1', thread: 't-m1', name: 'More loot in the north cave [link removed]' });
+  assert.deepEqual({ ...thread, ts: 0 }, { ts: 0, kind: 'thread', message: 'm1', thread: 't-m1', name: 'I-1 · More loot in the north cave [link removed]' });
   assert.deepEqual({ ...eyes, ts: 0 }, { ts: 0, kind: 'react', target: 'ideas', message: 'm1', emoji: '👀' });
   assert.deepEqual(w.feed(), ['IDEA I-1 new ann: More loot in the north cave [link removed]']);
 
@@ -348,6 +348,7 @@ function discordStub(routes: Record<string, unknown>) {
       return { id: 'thread-1', timestamp: '2026-10-30T10:00:05.123000+00:00' };
     }
     async put(path: string) { calls.push(['PUT', path]); }
+    async patch(path: string, o: { body: unknown }) { calls.push(['PATCH', path, o.body]); }
   }
   class Client extends EventEmitter { async login() {} async destroy() {} }
   return { calls, files, lib: { REST, Client, GatewayIntentBits: { Guilds: 1, GuildMessages: 2, MessageContent: 3 }, Events: { ClientReady: 'clientReady' } } };
@@ -1354,4 +1355,132 @@ test('ship and close write their state and dossier entry together', async () => 
   assert.deepEqual([loadIdeas(w.root)[0].state, kinds().at(-1)], ['shipped', 'ship']);
   await idea(['close', 'I-1', 'done'], w.d);
   assert.deepEqual([loadIdeas(w.root)[0].state, loadIdeas(w.root)[0].closed, kinds().at(-1)], ['closed', 'done', 'close']);
+});
+
+test('thread names lead with the idea id and stay within 100 characters', () => {
+  assert.equal(threadName('I-17', 'Bats drop more loot\nand more'), 'I-17 · Bats drop more loot');
+  assert.equal(threadName('I-3', '  \nrest'), 'I-3 · idea');
+  assert.equal(threadName('I-123', 'x'.repeat(200)), `I-123 · ${'x'.repeat(90)}`);
+  assert.equal(labelName('I-1234', 'y'.repeat(120)).length, 100);
+  assert.equal(labelName('I-17', 'I-17 · Bats'), 'I-17 · Bats', 'already labelled stays');
+  assert.equal(labelName('I-1', 'I-17 · Bats'), 'I-1 · I-17 · Bats', 'another id is not this one');
+});
+
+test('idea mentions link to their threads, except in code, when already linked, unknown or the idea itself', () => {
+  const ideas = [{ id: 'I-1', thread: '111' }, { id: 'I-17', thread: '1717' }, { id: 'I-5', thread: '' }];
+  assert.equal(linkIdeas('Like I-17, and I-1.', ideas), 'Like I-17 (<#1717>), and I-1 (<#111>).');
+  assert.equal(linkIdeas('I-17 (<#1717>) again: I-17', ideas), 'I-17 (<#1717>) again: I-17 (<#1717>)');
+  assert.equal(linkIdeas('I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2', ideas), 'I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2');
+  assert.equal(linkIdeas('see `I-17` and\n```\nI-1\n```\nthen I-1', ideas), 'see `I-17` and\n```\nI-1\n```\nthen I-1 (<#111>)');
+  assert.equal(linkIdeas('this is I-17, close to I-1', ideas, 'I-17'), 'this is I-17, close to I-1 (<#111>)');
+});
+
+test('end to end on mocks: every post in a thread links the other ideas it names', async () => {
+  const w = world();
+  await w.post('Bats drop more loot', '--as', 'ann');
+  await w.post('Boats are faster', '--as', 'bob');
+  await idea(['say', 'I-2', 'Same', 'area', 'as', 'I-1,', 'see', '`I-1`.', 'I-2', 'is', 'this', 'one,', 'I-9', 'is', 'unknown.'], w.d);
+  assert.equal(w.replies().at(-1), 'Same area as I-1 (<#t-m1>), see `I-1`. I-2 is this one, I-9 is unknown.');
+  await idea(['plan', 'I-2', 'Build on I-1.'], w.d);
+  assert.equal(w.replies().at(-1), '**Plan**\n\nBuild on I-1 (<#t-m1>).\n\nReply **go** to build it.');
+  assert.equal(loadIdeas(w.root)[1].plan, 'Build on I-1.', 'the stored plan stays plain');
+  await idea(['ask', 'I-2', 'Like', 'I-1?', '--recommend', 'Yes,', 'like', 'I-1'], w.d);
+  assert.equal(w.replies().at(-1), '<@bob> Like I-1 (<#t-m1>)?\n\nMy recommendation: Yes, like I-1 (<#t-m1>)\n\nIf I hear nothing in 10 minutes, I\'ll go with that.');
+  w.setNow(LATER(11));
+  await tick(w.d);
+  assert.equal(w.replies().at(-1), 'No answer in 10 minutes, so I\'m going with my recommendation: Yes, like I-1 (<#t-m1>)');
+  await idea(['close', 'I-2', 'merged', 'into', 'I-1'], w.d);
+  assert.equal(w.replies().at(-1), 'Closing this idea: merged into I-1 (<#t-m1>)');
+});
+
+test('end to end on mocks: progress notes link the ideas they name', async () => {
+  const w = world();
+  await w.post('Bats drop more loot', '--as', 'ann');
+  await w.post('Boats are faster', '--as', 'bob');
+  await idea(['plan', 'I-2', 'Faster boats.'], w.d);
+  await w.post('--in', 'I-2', 'go', '--as', 'bob');
+  await idea(['start', 'I-2'], w.d);
+  writeFileSync(join(progressDir(w.root, 'I-2'), 'notes.jsonl'), JSON.stringify({ ts: NOW, text: 'Boats now use the wind from I-1.' }) + '\n');
+  w.setNow(LATER(3));
+  await tick(w.d);
+  assert.equal(w.replies().at(-1), 'Boats now use the wind from I-1 (<#t-m1>).');
+  await idea(['ship', 'I-2', 'Faster', 'boats,', 'see', 'I-1.'], w.d);
+  assert.equal(w.replies().at(-1), shipPost('Faster boats, see I-1 (<#t-m1>).', 'https://api.runforit.io'));
+});
+
+test('orch idea relabel puts the id in front of every old thread name, once, one at a time', async () => {
+  const w = world();
+  const old = (id: string, message: string, text: string): Idea => ({ ...base, id, message, thread: `t-${message}`, text });
+  for (const [id, m, text] of [['I-1', 'm1', 'Bats drop more loot'], ['I-2', 'm2', 'Boats'], ['I-3', 'm3', 'Gone'], ['I-4', 'm4', 'Long']]) {
+    writeFileSync(join(w.root, 'ideas', `${id}.json`), JSON.stringify(old(id, m, text)));
+  }
+  await w.chat.createThread('m1', 'Bats drop more loot');
+  await w.chat.createThread('m2', 'I-2 · Boats');
+  await w.chat.createThread('m4', 'z'.repeat(98));
+  writeFileSync(join(w.root, 'ideas', 'I-5.json'), JSON.stringify({ ...old('I-5', 'm5', 'Opening'), thread: '', state: 'creating' }));
+  const slept: number[] = [];
+  w.d.sleep = async ms => { slept.push(ms); };
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 2 renamed, 1 already labelled, 1 failed');
+  const renames = w.chat.outbox().filter(o => o.kind === 'rename').map(o => [(o as any).thread, (o as any).name]);
+  assert.deepEqual(renames, [['t-m1', 'I-1 · Bats drop more loot'], ['t-m4', `I-4 · ${'z'.repeat(94)}`]]);
+  assert.deepEqual(slept, [2000], 'a pause between renames, none before the first');
+  assert.ok(w.logs.includes('idea I-1 relabel: "Bats drop more loot" -> "I-1 · Bats drop more loot"'));
+  assert.ok(w.logs.includes('idea I-3 relabel: thread t-m3 is gone'));
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 0 renamed, 3 already labelled, 1 failed', 'a second run changes nothing');
+});
+
+test('relabel keeps going past a failed rename', async () => {
+  const w = world();
+  await w.post('Bats drop more loot', '--as', 'ann');
+  await w.post('Boats', '--as', 'bob');
+  for (const t of ['t-m1', 't-m2']) await w.chat.renameThread(t, 'old name');
+  const rename = w.chat.renameThread.bind(w.chat);
+  w.chat.renameThread = async (t, n) => { if (t === 't-m1') throw new Error('Missing Permissions'); return rename(t, n); };
+  w.d.sleep = async () => {};
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 1 renamed, 0 already labelled, 1 failed');
+  assert.ok(w.logs.includes('idea I-1 relabel failed: Missing Permissions'));
+  assert.deepEqual(await w.chat.getThread('t-m2'), { name: 'I-2 · old name' });
+});
+
+test('DiscordChat reads thread names and renames archived threads without leaving them open', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const notFound = Object.assign(new Error('Unknown Channel'), { status: 404 });
+  const { calls, lib } = discordStub({
+    '/channels/200': { id: '200', name: 'Bats', thread_metadata: { archived: false } },
+    '/channels/300': { id: '300', name: 'Boats', thread_metadata: { archived: true } },
+    '/channels/400': notFound,
+  });
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib });
+  assert.deepEqual(await chat.getThread('200'), { name: 'Bats' });
+  assert.equal(await chat.getThread('400'), null);
+  await chat.renameThread('200', 'I-1 · Bats');
+  await chat.renameThread('300', 'I-2 · Boats');
+  assert.deepEqual(calls, [
+    ['GET', '/channels/200', undefined],
+    ['GET', '/channels/400', undefined],
+    ['GET', '/channels/200', undefined],
+    ['PATCH', '/channels/200', { name: 'I-1 · Bats' }],
+    ['GET', '/channels/300', undefined],
+    ['PATCH', '/channels/300', { archived: false }],
+    ['PATCH', '/channels/300', { name: 'I-2 · Boats' }],
+    ['PATCH', '/channels/300', { archived: true }],
+  ]);
+});
+
+test('DiscordChat archives a thread again when its rename fails', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const { calls, lib } = discordStub({ '/channels/300': { id: '300', name: 'Boats', thread_metadata: { archived: true } } });
+  const patch = lib.REST.prototype.patch;
+  lib.REST.prototype.patch = async function (path: string, o: { body: any }) {
+    await patch.call(this, path, o);
+    if (o.body.name) throw Object.assign(new Error('Invalid Form Body'), { status: 400 });
+  };
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib });
+  await assert.rejects(chat.renameThread('300', 'I-2 · Boats'), /Invalid Form Body/);
+  assert.deepEqual(calls, [
+    ['GET', '/channels/300', undefined],
+    ['PATCH', '/channels/300', { archived: false }],
+    ['PATCH', '/channels/300', { name: 'I-2 · Boats' }],
+    ['PATCH', '/channels/300', { archived: true }],
+  ]);
 });

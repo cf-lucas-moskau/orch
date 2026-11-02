@@ -23,7 +23,7 @@ The channel is for the Evrloot game only: gameplay, UI, art, lore and text, bala
 6. **Ship**: put the live screenshots (taken on api.runforit.io) in the progress folder as a note with media first; `idea ship` attaches the newest unposted note media to the changelog. Write a player-facing changelog (what they can try, where) to `ideas/drafts/changelog-<id>.md` and `idea ship <id> ideas/drafts/changelog-<id>.md`. Do not close it: the thread stays open for feedback, and the bridge closes a shipped idea quietly after 14 days without a message. Close only when the user or the thread asks.
 7. **Feedback** after ship or close is a new round: judge and talk as in steps 1 and 2 (read `ideas/<id>/dossier.md` first; it has what shipped and its known limits), then plan, go and start as usual. The round's worker gets the dossier of the earlier rounds with its task, so you need not repeat them in the plan. Small thanks ("nice") need one short `idea say` and nothing else; a round that stays in talk closes quietly after 14 days.
 
-Close with a reason (`dropped: <why>`, `merged into I-<n>`) when an idea ends any other way; say why in the thread first. A building idea closes only after its worker is cleaned up (orch-dispatch); `--force` is for a worker already gone. Each round's build gets a fresh worker, `idea-<n>-2` and on.
+Close with a reason (`dropped: <why>`, `merged into I-<n>`) when an idea ends any other way; say why in the thread first. Name other ideas by their id (`I-<n>`) in anything you post: the bridge links each one to its thread. A building idea closes only after its worker is cleaned up (orch-dispatch); `--force` is for a worker already gone. Each round's build gets a fresh worker, `idea-<n>-2` and on.
 
 ## Out of bounds
 

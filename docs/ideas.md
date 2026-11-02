@@ -1,6 +1,6 @@
 # Idea bridge
 
-The old Evrloot team posts ideas in a Discord channel. The bridge (`src/ideas-run.ts`) opens a thread on each post and turns every message into a watcher line, `IDEA <id> <kind> <author>: <text>`. orch does the thinking and answers with `orch idea` commands. The `orch-ideas` skill has the rules orch follows in a thread.
+The old Evrloot team posts ideas in a Discord channel. The bridge (`src/ideas-run.ts`) opens a thread on each post, named `I-<n> · <first line of the post>` (at most 100 characters) and turns every message into a watcher line, `IDEA <id> <kind> <author>: <text>`. orch does the thinking and answers with `orch idea` commands. The `orch-ideas` skill has the rules orch follows in a thread.
 
 It runs on mocks until the bot exists: `ideas/mock/inbox.jsonl` stands in for the channel, `ideas/mock/outbox.jsonl` holds everything posted back.
 
@@ -20,7 +20,10 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
 | `record <id> <file\|text>` | Add a line to the idea's dossier without posting anything: the merged PR, gate and review results, the live check, a short summary of the worker's final report, known limits. |
 | `close <id> [reason] [--force]` | Dropped, merged into another idea, or done on request. A building idea needs its worker cleaned up first, or `--force`. |
+| `relabel` | One-off: put the id in front of every idea thread still named the old way (`Bats drop loot` becomes `I-3 · Bats drop loot`). Threads already labelled are skipped, every rename is logged, renames go one at a time 2 seconds apart, an archived thread is unarchived for the rename and archived again even when the rename fails, and a rename that fails is logged and skipped. Safe to run again. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
+
+Everything orch posts in a thread (`say`, `ask`, `plan`, `ship`, `close`, question timeouts, progress notes) links the other ideas it names: `I-17` goes out as `I-17 (<#thread>)`, which Discord shows as a link to I-17's thread. The idea's own id, ids with no thread, ids inside `code` and ids already linked stay as written; the stored text stays plain.
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
 

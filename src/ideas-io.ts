@@ -4,13 +4,15 @@
 // never across an await, and every write replaces its file atomically.
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { chatFor, MockChat, writeAtomic, type Attachment, type Chat } from './discord.ts';
+import { chatFor, MockChat, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, linkIdeas, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
-export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string };
+// sleep: the pause between thread renames in `idea relabel`; tests pass a fast one.
+export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string; sleep?: (ms: number) => Promise<void> };
+const RENAME_GAP_MS = 2000;
 
 const dir = (root: string) => join(root, 'ideas');
 // A config that exists but does not parse stops everything: guessing could mean the wrong adapter or allowlist.
@@ -181,7 +183,7 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
   }
   if (r.kind === 'new') {
     let thread: string;
-    try { thread = await d.chat.createThread(m.id, threadName(r.text)); }
+    try { thread = await d.chat.createThread(m.id, threadName(r.id, r.text)); }
     catch (e) { locked(d.root, () => rmSync(file(d.root, r.id), { force: true })); throw e; }
     opened(d, r.id, thread, now);
     await react('👀', r.id);
@@ -223,10 +225,35 @@ export async function reconcile(d: Deps & { chat: Chat }) {
   }
 }
 
+// Everything orch posts in an idea's thread goes out with the other ideas it names linked to their threads.
+const postIn = (root: string, chat: Chat, i: Idea, text: string, o?: ReplyOptions) => chat.reply(i.thread, linkIdeas(text, loadIdeas(root), i.id), o);
+
+// `idea relabel`: every idea thread named the old way gets its id in front, one rename at a time.
+async function relabel(d: Deps, chat: Chat): Promise<string> {
+  const sleep = d.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
+  const counts = { renamed: 0, labelled: 0, failed: 0 };
+  for (const i of loadIdeas(d.root, d.log).filter(i => i.thread)) {
+    try {
+      const t = await chat.getThread(i.thread);
+      if (!t) { d.log(`idea ${i.id} relabel: thread ${i.thread} is gone`); counts.failed++; continue; }
+      if (labelled(i.id, t.name)) { counts.labelled++; continue; }
+      if (counts.renamed) await sleep(RENAME_GAP_MS);
+      const name = labelName(i.id, t.name);
+      await chat.renameThread(i.thread, name);
+      d.log(`idea ${i.id} relabel: "${t.name}" -> "${name}"`);
+      counts.renamed++;
+    } catch (e) {
+      d.log(`idea ${i.id} relabel failed: ${e instanceof Error ? e.message : e}`);
+      counts.failed++;
+    }
+  }
+  return `relabel: ${counts.renamed} renamed, ${counts.labelled} already labelled, ${counts.failed} failed`;
+}
+
 const workers = (root: string): { name: string; status: string; branch?: string }[] => { try { return JSON.parse(readFileSync(join(root, 'workers.json'), 'utf8')); } catch { return []; } };
 const running = (root: string, name?: string) => !!name && workers(root).some(w => w.name === name && w.status === 'running');
 
-const USAGE = `usage: orch idea list | off | on
+const USAGE = `usage: orch idea list | off | on | relabel
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
        orch idea say <id> <text|file> | ask <id> <question file|text> [--recommend <text>] [--wait] | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
        orch idea record <id> <file|text>   (dossier only, nothing is posted)
@@ -278,6 +305,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const m = c.post(as, text, thread, now);
     return `posted ${m.id} as ${as}${into ? ` in ${into}` : ''}`;
   }
+  if (sub === 'relabel') return relabel(d, chat());
   if (!id) throw new Error(USAGE);
   const cur = loadIdeas(d.root, d.log).find(i => i.id === id) ?? fail(`no idea ${id}`);
   const check = (s: Step, i = cur) => { const next = advance(i, s, now); return typeof next === 'string' ? fail(next) : next; };
@@ -290,7 +318,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const post = async (s: Step, text: string, then: (i: Idea) => Idea = i => i, files: Attachment[] = []) => {
     check(s);
     const sentAt = clock();
-    await chat().reply(cur.thread, text, files.length ? { files } : {});
+    await postIn(d.root, chat(), cur, text, files.length ? { files } : {});
     return update(d.root, id, i => {
       const next = advance(i, s, now);
       if (typeof next === 'string') fail(`posted, but not recorded: ${next}`);
@@ -309,7 +337,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const text = askPost(cur.author.id, question, recommend, wait);
     const sentAt = clock();
     // Replies carry Discord's timestamps, so the question's time is its post's, as Discord says.
-    const askedAt = (await chat().reply(cur.thread, text, { ping: cur.author.id })).ts ?? sentAt;
+    const askedAt = (await postIn(d.root, chat(), cur, text, { ping: cur.author.id })).ts ?? sentAt;
     update(d.root, id, i => {
       // A reply that came in while the question went out answers it.
       const early = (i.messages ?? []).find(m => m.by !== 'orch' && m.ts > askedAt);
@@ -341,7 +369,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     // From shipped, check starts the next round.
     update(d.root, id, i => ({ ...check('plan', i), state: 'talk', plan: undefined, goBy: undefined }));
     const sentAt = clock();
-    await chat().reply(cur.thread, planPost(text));
+    await postIn(d.root, chat(), cur, planPost(text));
     // A go counts only for the version that was on screen; planAt is taken once the post is up.
     update(d.root, id, i => answered(entry({ ...check('plan', i), plan: text, planVersion: (i.planVersion ?? 0) + 1, planAt: clock() }, 'plan', `v${(i.planVersion ?? 0) + 1}\n\n${text}`, now), planPost(text), sentAt));
     d.log(`idea ${id} plan posted: ${text.split('\n')[0].slice(0, 100)}`);
@@ -378,7 +406,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     }
     const branch = workers(d.root).find(w => w.name === name)?.branch ?? `orch/${name}`;
     update(d.root, id, i => entry(i, 'start', `worker ${name}, branch ${branch}, on ${config.repo}`, now));
-    await chat().reply(cur.thread, startPost());
+    await postIn(d.root, chat(), cur, startPost());
     update(d.root, id, i => answered(i, startPost(), sentAt));
     d.log(`idea ${id} start: worker ${name} on ${config.repo}`);
     return `${id} building as worker ${name}`;
@@ -452,7 +480,7 @@ export async function tick(d: Deps & { chat: Chat }) {
       const open = (y?: Question) => !!y && !y.answered && !y.timedOut;
       if (!open(locked(d.root, fresh))) continue;
       const text = timeoutPost(q.recommend!);
-      await d.chat.reply(i.thread, text);
+      await postIn(d.root, d.chat, i, text);
       let won = false;
       update(d.root, i.id, x => {
         const posted = said('orch', text, now)(x);
@@ -475,7 +503,7 @@ export async function tick(d: Deps & { chat: Chat }) {
       else d.log(`idea ${i.id}: note media ${p.post.media} left out, ${m.refused}; posting the text alone`);
     }
     // Recorded once the post is out: a failed post leaves the note new, and the next tick tries again.
-    await d.chat.reply(i.thread, p.post.text, { files });
+    await postIn(d.root, d.chat, i, p.post.text, { files });
     update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
   }
 }
