@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, labelName, linkIdeas, threadName, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -1366,23 +1366,21 @@ test('thread names lead with the idea id and stay within 100 characters', () => 
   assert.equal(labelName('I-1', 'I-17 · Bats'), 'I-1 · I-17 · Bats', 'another id is not this one');
 });
 
-test('idea mentions link word by word: only a bare id with a thread, outside fences', () => {
-  const ideas = [{ id: 'I-1', thread: '111' }, { id: 'I-17', thread: '1717' }, { id: 'I-5', thread: '' }];
-  const link = (text: string, self?: string) => linkIdeas(text, ideas, self);
-  assert.equal(link('Like I-17 and I-1 here'), 'Like I-17 (<#1717>) and I-1 (<#111>) here', 'plain mention');
-  assert.equal(link('Same as I-1. Or I-17, or (see I-1) I-17?!'), 'Same as I-1 (<#111>). Or I-17 (<#1717>), or (see I-1 (<#111>)) I-17 (<#1717>)?!', 'end of sentence');
-  assert.equal(link('see https://x/ideas/I-17/details and www.x.io/I-1 or x:/I-1'), 'see https://x/ideas/I-17/details and www.x.io/I-1 or x:/I-1', 'URL');
-  assert.equal(link('[I-17](https://x/I-17) and [I-1]'), '[I-17](https://x/I-17) and [I-1]', 'Markdown link');
-  assert.equal(link('see `I-17` and ``I-1`` and `I-1'), 'see `I-17` and ``I-1`` and `I-1', 'backticks');
-  assert.equal(link('before I-1\n```ts\nI-1 and I-17\n  ```\nafter I-17'), 'before I-1 (<#111>)\n```ts\nI-1 and I-17\n  ```\nafter I-17 (<#1717>)', 'fence');
-  assert.equal(link('I-17 (<#1717>) again: I-17'), 'I-17 (<#1717>) again: I-17 (<#1717>)', 'already linked');
-  assert.equal(link('I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2 and <#I-1'), 'I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2 and <#I-1', 'unknown or not an id');
-  assert.equal(link('this is I-17, close to I-1', 'I-17'), 'this is I-17, close to I-1 (<#111>)', 'the idea itself');
-  assert.equal(link('one\n\n  I-1  two'), 'one\n\n  I-1 (<#111>)  two', 'whitespace kept');
-  const run = 'x ' + '`'.repeat(10_000) + ' I-1 ' + '`'.repeat(10_000);
+test('a post ends with one Related line for the other ideas it names', () => {
+  const ideas = [{ id: 'I-1', thread: '111' }, { id: 'I-14', thread: '1414' }, { id: 'I-17', thread: '1717' }, { id: 'I-5', thread: '' }];
+  const rel = (text: string, self?: string) => withRelated(text, ideas, self);
+  assert.equal(rel('No ideas named here, not even idea-17 or WI-17.'), 'No ideas named here, not even idea-17 or WI-17.', 'none');
+  assert.equal(rel('Same as I-17.'), 'Same as I-17.\n\nRelated: I-17 <#1717>', 'one');
+  assert.equal(rel('See `I-17`, [I-14](https://x/I-14) and\n```\nI-17\n```\nI-1, I-14 again.'),
+    'See `I-17`, [I-14](https://x/I-14) and\n```\nI-17\n```\nI-1, I-14 again.\n\nRelated: I-17 <#1717> · I-14 <#1414> · I-1 <#111>', 'several, deduped, the body as written');
+  assert.equal(rel('This is I-17, like I-1.', 'I-17'), 'This is I-17, like I-1.\n\nRelated: I-1 <#111>', 'own id excluded');
+  assert.equal(rel('I-99, I-5 and I-170 are not threads here; I-1x and I-x are no ids'), 'I-99, I-5 and I-170 are not threads here; I-1x and I-x are no ids', 'unknown excluded');
+  assert.deepEqual(mentionedIds('I-1 (I-2) I-3. x/I-4/y I-5-2 I-06 AI-7 I-8a I-'), ['I-1', 'I-2', 'I-3', 'I-4', 'I-5', 'I-06']);
+  const huge = 'I-'.repeat(10_000) + '`'.repeat(10_000) + ' I-1 ' + 'I'.repeat(9_995);
+  assert.equal(huge.length, 40_000);
   const t0 = performance.now();
-  assert.equal(link(run), 'x ' + '`'.repeat(10_000) + ' I-1 (<#111>) ' + '`'.repeat(10_000));
-  assert.ok(performance.now() - t0 < 50, 'a 10k backtick run is fast');
+  assert.equal(rel(huge), `${huge}\n\nRelated: I-1 <#111>`);
+  assert.ok(performance.now() - t0 < 50, 'a 40k-character post is fast');
 });
 
 test('end to end on mocks: every post in a thread links the other ideas it names', async () => {
@@ -1390,17 +1388,17 @@ test('end to end on mocks: every post in a thread links the other ideas it names
   await w.post('Bats drop more loot', '--as', 'ann');
   await w.post('Boats are faster', '--as', 'bob');
   await idea(['say', 'I-2', 'Same', 'area', 'as', 'I-1,', 'see', '`I-1`.', 'I-2', 'is', 'this', 'one,', 'I-9', 'is', 'unknown.'], w.d);
-  assert.equal(w.replies().at(-1), 'Same area as I-1 (<#t-m1>), see `I-1`. I-2 is this one, I-9 is unknown.');
+  assert.equal(w.replies().at(-1), 'Same area as I-1, see `I-1`. I-2 is this one, I-9 is unknown.\n\nRelated: I-1 <#t-m1>');
   await idea(['plan', 'I-2', 'Build on I-1.'], w.d);
-  assert.equal(w.replies().at(-1), '**Plan**\n\nBuild on I-1 (<#t-m1>).\n\nReply **go** to build it.');
+  assert.equal(w.replies().at(-1), '**Plan**\n\nBuild on I-1.\n\nReply **go** to build it.\n\nRelated: I-1 <#t-m1>');
   assert.equal(loadIdeas(w.root)[1].plan, 'Build on I-1.', 'the stored plan stays plain');
   await idea(['ask', 'I-2', 'Like', 'I-1?', '--recommend', 'Yes,', 'like', 'I-1'], w.d);
-  assert.equal(w.replies().at(-1), '<@bob> Like I-1 (<#t-m1>)?\n\nMy recommendation: Yes, like I-1 (<#t-m1>)\n\nIf I hear nothing in 10 minutes, I\'ll go with that.');
+  assert.equal(w.replies().at(-1), '<@bob> Like I-1?\n\nMy recommendation: Yes, like I-1\n\nIf I hear nothing in 10 minutes, I\'ll go with that.\n\nRelated: I-1 <#t-m1>');
   w.setNow(LATER(11));
   await tick(w.d);
-  assert.equal(w.replies().at(-1), 'No answer in 10 minutes, so I\'m going with my recommendation: Yes, like I-1 (<#t-m1>)');
+  assert.equal(w.replies().at(-1), 'No answer in 10 minutes, so I\'m going with my recommendation: Yes, like I-1\n\nRelated: I-1 <#t-m1>');
   await idea(['close', 'I-2', 'merged', 'into', 'I-1'], w.d);
-  assert.equal(w.replies().at(-1), 'Closing this idea: merged into I-1 (<#t-m1>)');
+  assert.equal(w.replies().at(-1), 'Closing this idea: merged into I-1\n\nRelated: I-1 <#t-m1>');
 });
 
 test('end to end on mocks: progress notes link the ideas they name', async () => {
@@ -1413,9 +1411,9 @@ test('end to end on mocks: progress notes link the ideas they name', async () =>
   writeFileSync(join(progressDir(w.root, 'I-2'), 'notes.jsonl'), JSON.stringify({ ts: NOW, text: 'Boats now use the wind from I-1.' }) + '\n');
   w.setNow(LATER(3));
   await tick(w.d);
-  assert.equal(w.replies().at(-1), 'Boats now use the wind from I-1 (<#t-m1>).');
+  assert.equal(w.replies().at(-1), 'Boats now use the wind from I-1.\n\nRelated: I-1 <#t-m1>');
   await idea(['ship', 'I-2', 'Faster', 'boats,', 'see', 'I-1.'], w.d);
-  assert.equal(w.replies().at(-1), shipPost('Faster boats, see I-1 (<#t-m1>).', 'https://api.runforit.io'));
+  assert.equal(w.replies().at(-1), shipPost('Faster boats, see I-1.', 'https://api.runforit.io') + '\n\nRelated: I-1 <#t-m1>');
 });
 
 test('orch idea relabel puts the id in front of every old thread name, once, one at a time', async () => {

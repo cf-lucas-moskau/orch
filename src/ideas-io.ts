@@ -6,7 +6,7 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, linkIdeas, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
@@ -225,8 +225,8 @@ export async function reconcile(d: Deps & { chat: Chat }) {
   }
 }
 
-// Everything orch posts in an idea's thread goes out with the other ideas it names linked to their threads.
-const postIn = (root: string, chat: Chat, i: Idea, text: string, o?: ReplyOptions) => chat.reply(i.thread, linkIdeas(text, loadIdeas(root), i.id), o);
+// Everything orch posts in an idea's thread ends with links to the other ideas it names.
+const postIn = (root: string, chat: Chat, i: Idea, text: string, o?: ReplyOptions) => chat.reply(i.thread, withRelated(text, loadIdeas(root), i.id), o);
 
 // `idea relabel`: every idea thread named the old way gets its id in front, one rename at a time.
 async function relabel(d: Deps, chat: Chat): Promise<string> {
