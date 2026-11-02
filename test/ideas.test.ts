@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DiscordChat, MockChat, type ReplyOptions } from '../src/discord.ts';
+import { DiscordChat, MockChat, RearchiveFailed, type ReplyOptions } from '../src/discord.ts';
 import { buildBrief } from '../src/brief.ts';
 import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
@@ -1373,6 +1373,10 @@ test('idea mentions link to their threads, except in code, when already linked, 
   assert.equal(linkIdeas('I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2', ideas), 'I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2');
   assert.equal(linkIdeas('see `I-17` and\n```\nI-1\n```\nthen I-1', ideas), 'see `I-17` and\n```\nI-1\n```\nthen I-1 (<#111>)');
   assert.equal(linkIdeas('this is I-17, close to I-1', ideas, 'I-17'), 'this is I-17, close to I-1 (<#111>)');
+  assert.equal(linkIdeas('see https://x/ideas/I-17/details and www.x.io/I-1, then I-1', ideas), 'see https://x/ideas/I-17/details and www.x.io/I-1, then I-1 (<#111>)');
+  assert.equal(linkIdeas('[the I-17 page](https://x/I-17) and [notes](ideas/I-1.md)', ideas), '[the I-17 page](https://x/I-17) and [notes](ideas/I-1.md)');
+  assert.equal(linkIdeas('``I-17 has a ` in it`` and ```I-1``` and `` I-1 ``, I-17', ideas), '``I-17 has a ` in it`` and ```I-1``` and `` I-1 ``, I-17 (<#1717>)');
+  assert.equal(linkIdeas('an open ` tick, I-1', ideas), 'an open ` tick, I-1 (<#111>)');
 });
 
 test('end to end on mocks: every post in a thread links the other ideas it names', async () => {
@@ -1420,13 +1424,13 @@ test('orch idea relabel puts the id in front of every old thread name, once, one
   writeFileSync(join(w.root, 'ideas', 'I-5.json'), JSON.stringify({ ...old('I-5', 'm5', 'Opening'), thread: '', state: 'creating' }));
   const slept: number[] = [];
   w.d.sleep = async ms => { slept.push(ms); };
-  assert.equal(await idea(['relabel'], w.d), 'relabel: 2 renamed, 1 already labelled, 1 failed');
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 2 renamed, 0 renamed but left unarchived, 1 already labelled, 1 failed');
   const renames = w.chat.outbox().filter(o => o.kind === 'rename').map(o => [(o as any).thread, (o as any).name]);
   assert.deepEqual(renames, [['t-m1', 'I-1 · Bats drop more loot'], ['t-m4', `I-4 · ${'z'.repeat(94)}`]]);
   assert.deepEqual(slept, [2000], 'a pause between renames, none before the first');
   assert.ok(w.logs.includes('idea I-1 relabel: "Bats drop more loot" -> "I-1 · Bats drop more loot"'));
   assert.ok(w.logs.includes('idea I-3 relabel: thread t-m3 is gone'));
-  assert.equal(await idea(['relabel'], w.d), 'relabel: 0 renamed, 3 already labelled, 1 failed', 'a second run changes nothing');
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 0 renamed, 0 renamed but left unarchived, 3 already labelled, 1 failed', 'a second run changes nothing');
 });
 
 test('relabel keeps going past a failed rename', async () => {
@@ -1436,8 +1440,10 @@ test('relabel keeps going past a failed rename', async () => {
   for (const t of ['t-m1', 't-m2']) await w.chat.renameThread(t, 'old name');
   const rename = w.chat.renameThread.bind(w.chat);
   w.chat.renameThread = async (t, n) => { if (t === 't-m1') throw new Error('Missing Permissions'); return rename(t, n); };
-  w.d.sleep = async () => {};
-  assert.equal(await idea(['relabel'], w.d), 'relabel: 1 renamed, 0 already labelled, 1 failed');
+  const slept: number[] = [];
+  w.d.sleep = async ms => { slept.push(ms); };
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 1 renamed, 0 renamed but left unarchived, 0 already labelled, 1 failed');
+  assert.deepEqual(slept, [2000], 'the failed rename counts as an attempt, so the next one waits');
   assert.ok(w.logs.includes('idea I-1 relabel failed: Missing Permissions'));
   assert.deepEqual(await w.chat.getThread('t-m2'), { name: 'I-2 · old name' });
 });
@@ -1483,4 +1489,34 @@ test('DiscordChat archives a thread again when its rename fails', async () => {
     ['PATCH', '/channels/300', { name: 'I-2 · Boats' }],
     ['PATCH', '/channels/300', { archived: true }],
   ]);
+});
+
+test('relabel counts a rename whose re-archive failed on its own', async () => {
+  const w = world();
+  await w.post('Bats drop more loot', '--as', 'ann');
+  await w.post('Boats', '--as', 'bob');
+  for (const t of ['t-m1', 't-m2']) await w.chat.renameThread(t, 'old name');
+  const rename = w.chat.renameThread.bind(w.chat);
+  w.chat.renameThread = async (t, n) => { await rename(t, n); if (t === 't-m1') throw new RearchiveFailed('Missing Access'); };
+  w.d.sleep = async () => {};
+  assert.equal(await idea(['relabel'], w.d), 'relabel: 1 renamed, 1 renamed but left unarchived, 0 already labelled, 0 failed');
+  assert.ok(w.logs.includes('idea I-1 relabel: "old name" -> "I-1 · old name", renamed, re-archive failed: Missing Access'));
+});
+
+test('DiscordChat tells a failed re-archive after a good rename apart from a failed rename', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const stub = (fail: (body: any) => boolean) => {
+    const { calls, lib } = discordStub({ '/channels/300': { id: '300', name: 'Boats', thread_metadata: { archived: true } } });
+    const patch = lib.REST.prototype.patch;
+    lib.REST.prototype.patch = async function (path: string, o: { body: any }) {
+      await patch.call(this, path, o);
+      if (fail(o.body)) throw new Error(o.body.name ? 'Invalid Form Body' : 'Missing Access');
+    };
+    return { calls, chat: new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib }) };
+  };
+  const archive = stub(b => b.archived === true);
+  await assert.rejects(archive.chat.renameThread('300', 'I-2 · Boats'), e => e instanceof RearchiveFailed && e.message === 'Missing Access');
+  assert.equal(archive.calls.length, 4);
+  const both = stub(b => b.archived === true || !!b.name);
+  await assert.rejects(both.chat.renameThread('300', 'I-2 · Boats'), e => !(e instanceof RearchiveFailed) && (e as Error).message === 'Invalid Form Body; re-archive failed too: Missing Access');
 });

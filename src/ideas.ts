@@ -203,12 +203,12 @@ export const labelName = (id: string, name: string) => labelled(id, name) ? name
 export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
 
 // Idea ids in orch's posts become links to their threads: I-17 reads I-17 (<#thread>). The idea's own id, ids without
-// a thread, ids inside code and ids already linked stay as they are.
-const CODE = /(```[\s\S]*?```|`[^`\n]*`)/;
+// a thread, ids inside code (any number of backticks), URLs, Markdown links, and ids already linked stay
+// as they are. The kept spans match first, so an id inside one is never seen on its own.
+const LINKABLE = /(`+)[\s\S]*?(?<!`)\1(?!`)|\b(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)\S+|\[[^\]\n]*\]\([^)\s]*\)|\b(I-\d+)\b(?!-\d)(?! \(<#[^>\s]+>\))/g;
 export function linkIdeas(text: string, ideas: Pick<Idea, 'id' | 'thread'>[], self?: string): string {
   const thread = new Map(ideas.filter(i => i.thread && i.id !== self).map(i => [i.id, i.thread]));
-  return text.split(CODE).map((part, n) => n % 2 ? part
-    : part.replace(/\bI-\d+\b(?!-\d)(?! \(<#[^>\s]+>\))/g, id => thread.has(id) ? `${id} (<#${thread.get(id)}>)` : id)).join('');
+  return text.replace(LINKABLE, (all, _ticks, id?: string) => id && thread.has(id) ? `${id} (<#${thread.get(id)}>)` : all);
 }
 
 // One line for orch's watcher. The text is untrusted; orch reads it as data.

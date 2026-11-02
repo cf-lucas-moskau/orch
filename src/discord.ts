@@ -38,6 +38,9 @@ export type OnError = (msg: string) => void;
 const toConsole: OnError = msg => console.error(new Date().toISOString(), msg);
 const why = (e: unknown) => e instanceof Error ? e.message : String(e);
 
+// The thread got its new name but stayed unarchived.
+export class RearchiveFailed extends Error {}
+
 // Readers never see a half-written file.
 export function writeAtomic(file: string, text: string) {
   mkdirSync(dirname(file), { recursive: true });
@@ -251,14 +254,21 @@ export class DiscordChat implements Chat {
     try { return { name: (await (await this.api()).get(route.channel(thread))).name as string }; }
     catch (e: any) { if (e?.status === 404) return null; throw e; }
   }
-  // Discord renames an archived thread only after unarchiving it. It is archived again whether the rename worked or not.
+  // Discord renames an archived thread only after unarchiving it. It is archived again whether the rename worked or not;
+  // a rename that worked with a re-archive that failed throws RearchiveFailed.
   async renameThread(thread: string, name: string) {
     const rest = await this.api();
     const archived = !!(await rest.get(route.channel(thread))).thread_metadata?.archived;
     if (!archived) return void await rest.patch(route.channel(thread), { body: { name } });
     await rest.patch(route.channel(thread), { body: { archived: false } });
-    try { await rest.patch(route.channel(thread), { body: { name } }); }
-    finally { await rest.patch(route.channel(thread), { body: { archived: true } }); }
+    let renameError: unknown;
+    try { await rest.patch(route.channel(thread), { body: { name } }); } catch (e) { renameError = e; }
+    try { await rest.patch(route.channel(thread), { body: { archived: true } }); }
+    catch (e) {
+      if (!renameError) throw new RearchiveFailed(why(e));
+      throw new Error(`${why(renameError)}; re-archive failed too: ${why(e)}`);
+    }
+    if (renameError) throw renameError;
   }
   // An attachment over Discord's 8 MB limit, or not an allowed media type by its bytes, is left out with a log line;
   // the text still goes. The buffer checked is the buffer sent.

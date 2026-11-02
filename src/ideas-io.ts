@@ -4,7 +4,7 @@
 // never across an await, and every write replaces its file atomically.
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { chatFor, MockChat, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
+import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
   advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, linkIdeas, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
@@ -231,15 +231,23 @@ const postIn = (root: string, chat: Chat, i: Idea, text: string, o?: ReplyOption
 // `idea relabel`: every idea thread named the old way gets its id in front, one rename at a time.
 async function relabel(d: Deps, chat: Chat): Promise<string> {
   const sleep = d.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
-  const counts = { renamed: 0, labelled: 0, failed: 0 };
+  const counts = { renamed: 0, labelled: 0, unarchived: 0, failed: 0 };
+  let tried = false;
   for (const i of loadIdeas(d.root, d.log).filter(i => i.thread)) {
     try {
       const t = await chat.getThread(i.thread);
       if (!t) { d.log(`idea ${i.id} relabel: thread ${i.thread} is gone`); counts.failed++; continue; }
       if (labelled(i.id, t.name)) { counts.labelled++; continue; }
-      if (counts.renamed) await sleep(RENAME_GAP_MS);
+      if (tried) await sleep(RENAME_GAP_MS);
+      tried = true;
       const name = labelName(i.id, t.name);
-      await chat.renameThread(i.thread, name);
+      try { await chat.renameThread(i.thread, name); }
+      catch (e) {
+        if (!(e instanceof RearchiveFailed)) throw e;
+        d.log(`idea ${i.id} relabel: "${t.name}" -> "${name}", renamed, re-archive failed: ${e.message}`);
+        counts.unarchived++;
+        continue;
+      }
       d.log(`idea ${i.id} relabel: "${t.name}" -> "${name}"`);
       counts.renamed++;
     } catch (e) {
@@ -247,7 +255,7 @@ async function relabel(d: Deps, chat: Chat): Promise<string> {
       counts.failed++;
     }
   }
-  return `relabel: ${counts.renamed} renamed, ${counts.labelled} already labelled, ${counts.failed} failed`;
+  return `relabel: ${counts.renamed} renamed, ${counts.unarchived} renamed but left unarchived, ${counts.labelled} already labelled, ${counts.failed} failed`;
 }
 
 const workers = (root: string): { name: string; status: string; branch?: string }[] => { try { return JSON.parse(readFileSync(join(root, 'workers.json'), 'utf8')); } catch { return []; } };
