@@ -5,8 +5,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-// orch push, merge and overlap against a bare origin on disk. `git` is a shim that records every call and runs the real git;
-// `gh` is fake: the PR's head comes from the bare origin, its checks from a file the test writes.
+// orch run, push, merge and overlap against a bare origin on disk. `git` is a shim that records every call and runs the real git.
+// `gh` is fake: PR #7's head is orch/w in the bare origin, its base `main` or gh.base, merged heads are listed in gh.merged.
+// `herdr` is fake: it creates real worktrees, and no agent ever starts, so `run` stops after saving the worker.
 const orchTs = join(import.meta.dirname, '..', 'src', 'orch.ts');
 const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
 const ORCH_COMMIT = 'Written by claude worker w, committed by orch after the gates passed.';
@@ -23,11 +24,21 @@ function world(autonomy = '- push: on\n- merge: on\n') {
   writeFileSync(join(bin, 'gh'), `#!/bin/sh
 echo "$*" >> "$GH_DIR/gh.calls"
 head=$("${realGit}" --git-dir="$ORIGIN" rev-parse refs/heads/orch/w)
-checks="[]"
+base=$(cat "$GH_DIR/gh.base" 2>/dev/null || echo main)
 case "$*" in
-  *isDraft*) echo "{\\"isDraft\\":false,\\"mergeable\\":\\"MERGEABLE\\",\\"reviewDecision\\":\\"\\",\\"statusCheckRollup\\":$checks,\\"headRefName\\":\\"orch/w\\",\\"baseRefName\\":\\"main\\",\\"headRefOid\\":\\"$head\\"}" ;;
+  *isDraft*) echo "{\\"isDraft\\":false,\\"mergeable\\":\\"MERGEABLE\\",\\"reviewDecision\\":\\"\\",\\"statusCheckRollup\\":[],\\"headRefName\\":\\"orch/w\\",\\"baseRefName\\":\\"$base\\",\\"headRefOid\\":\\"$head\\"}" ;;
+  "pr list --head "*) grep -qx "$4" "$GH_DIR/gh.merged" 2>/dev/null && echo 1 || echo 0 ;;
   "pr merge"*) ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+  writeFileSync(join(bin, 'herdr'), `#!/bin/sh
+case "$1 $2" in
+  "worktree create") shift 2; while [ $# -gt 0 ]; do case "$1" in --cwd) cwd=$2;; --branch) br=$2;; --base) from=$2;; esac; shift; done
+    path="$GH_DIR/wt-\${br#orch/}"; "${realGit}" -C "$cwd" worktree add -q -b "$br" "$path" \${from:-HEAD} >&2
+    echo "{\\"result\\":{\\"root_pane\\":{\\"pane_id\\":\\"p1\\"},\\"workspace\\":{\\"workspace_id\\":\\"ws\\"},\\"worktree\\":{\\"path\\":\\"$path\\"}}}" ;;
+  "agent start") echo '{"error":{"code":"fake","message":"no agent in tests"}}' ;;
+  *) echo '{}' ;;
 esac
 `, { mode: 0o755 });
   const sh = (cwd: string, cmd: string) => {
@@ -71,7 +82,7 @@ test('push never rebases or forces: a behind branch goes up as it is', () => {
   } finally { w.done(); }
 });
 
-test('merge refuses a PR behind its base and tells orch to have the worker rebase; once rebased it merges that head', () => {
+test('merge refuses a PR behind its base; once the worker merges the base in, a normal push updates it and it merges', () => {
   const w = world();
   try {
     w.commitOnWorker('one.txt');
@@ -81,15 +92,49 @@ test('merge refuses a PR behind its base and tells orch to have the worker rebas
     const before = w.sh(w.wt, 'git rev-parse HEAD');
     let r = w.orch('merge', 'demo', '7');
     assert.equal(r.status, 1);
-    assert.equal(r.out.trim(), 'not merged: #7 is 2 commits behind main. Steer w to rebase onto origin/main and rerun its gates; pushing the rewritten branch needs a force push, a decision for the user.');
+    assert.equal(r.out.trim(), 'not merged: #7 is 2 commits behind main. Have w merge origin/main into its branch and rerun its gates, then push and merge again.');
     assert.doesNotMatch(w.calls('gh.calls'), /pr merge/);
     assert.equal(w.sh(w.wt, 'git rev-parse HEAD'), before, 'merge never touches the worktree');
     assert.match(readFileSync(join(w.base, 'orch', 'log.md'), 'utf8'), /merge demo #7 refused: #7 is 2 commits behind main/);
 
-    w.sh(w.wt, 'git fetch -q && git rebase -q origin/main && git push -q --force-with-lease origin HEAD:orch/w');
+    // What the brief tells the worker, with an uncommitted change in the tree.
+    w.sh(w.wt, 'echo wip > wip.txt && git fetch -q origin && git merge -q --autostash --no-edit origin/main');
+    assert.equal(w.sh(w.wt, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit');
+    assert.equal(w.sh(w.wt, 'git status --porcelain'), '?? wip.txt');
+    w.sh(w.wt, 'rm wip.txt');
+    r = w.orch('push', 'w');
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(w.calls('git.calls'), /force/);
+    assert.equal(w.remoteHead(), w.sh(w.wt, 'git rev-parse HEAD'));
+    w.sh(w.wt, `git merge-base --is-ancestor ${before} HEAD`);
     r = w.orch('merge', 'demo', '7');
     assert.equal(r.status, 0, r.out);
     assert.match(w.calls('gh.calls'), new RegExp(`pr merge 7 --squash --match-head-commit ${w.remoteHead()}`));
+  } finally { w.done(); }
+});
+
+test('a stacked child merges after its parent was squash-merged, without updating; a real new base commit still refuses', () => {
+  const w = world();
+  try {
+    w.sh(w.repo, 'git checkout -q -b orch/parent main && echo p > shared.txt && git commit -qam parent && echo p2 > p2.txt && git add p2.txt && git commit -qm parent2 && git push -q origin orch/parent');
+    w.sh(w.wt, 'git reset -q --hard orch/parent');
+    w.commitOnWorker('one.txt');
+    w.sh(w.wt, 'git push -q origin HEAD:orch/w');
+    writeFileSync(join(w.base, 'gh.base'), 'orch/parent');
+    writeFileSync(join(w.base, 'gh.merged'), 'orch/parent\n');
+    w.sh(w.repo, 'git checkout -q main && git merge -q --squash orch/parent && git commit -qm "parent (#6)" && git push -q origin main');
+    let r = w.orch('merge', 'demo', '7');
+    assert.equal(r.status, 1);
+    assert.equal(r.out.trim(), 'not merged: #7 targets orch/parent, which is already merged. Retarget it first: gh pr edit 7 --base <default branch>');
+    writeFileSync(join(w.base, 'gh.base'), 'main');
+    const head = w.remoteHead();
+    r = w.orch('merge', 'demo', '7');
+    assert.equal(r.status, 0, r.out);
+    assert.match(w.calls('gh.calls'), new RegExp(`pr merge 7 --squash --match-head-commit ${head}`));
+    assert.equal(w.remoteHead(), head, 'no push, no rewrite');
+    w.mainMoves('other.txt', 'y');
+    r = w.orch('merge', 'demo', '7');
+    assert.equal(r.out.trim(), 'not merged: #7 is 1 commit behind main. Have w merge origin/main into its branch and rerun its gates, then push and merge again.');
   } finally { w.done(); }
 });
 
@@ -149,31 +194,97 @@ test('overlap finds committed, staged, unstaged and untracked changes, and nothi
   } finally { w.done(); }
 });
 
-test('overlap skips a stacked child by merge-base and a Claude/Codex pair, and --new keeps state per pair', () => {
+test('overlap skips a child started on its parent\'s head and a Claude/Codex pair, not branches that merely share history', () => {
   const w = overlapWorld();
   try {
     const parent = w.wt('parent');
     w.sh(parent, 'echo p > shared.txt && git commit -qam parent');
     const child = w.wt('child', 'orch/parent');
     w.sh(child, 'echo c > shared.txt && git commit -qam child');
+    // Started on an older commit of the parent, so not its child: their shared, unmerged history does not hide the overlap.
+    w.sh(parent, 'echo p2 > p2.txt && git add p2.txt && git commit -qm p2');
+    const cousin = w.wt('cousin', 'orch/parent~1');
+    w.sh(cousin, 'echo k > p2.txt');
     const cl = w.wt('fix-cl'), cx = w.wt('fix-cx');
-    for (const p of [cl, cx]) w.sh(p, 'echo f > shared.txt');
-    w.save([w.rec('parent', parent, '1'), w.rec('child', child, '2'), w.rec('fix-cl', cl, '3', { pair: 'fix' }), w.rec('fix-cx', cx, '3', { pair: 'fix' })]);
+    for (const p of [cl, cx]) w.sh(p, 'echo f > other.txt');
+    w.save([w.rec('parent', parent, '1'), w.rec('child', child, '2', { parent: 'parent' }), w.rec('cousin', cousin, '3'),
+      w.rec('fix-cl', cl, '4', { pair: 'fix' }), w.rec('fix-cx', cx, '4', { pair: 'fix' })]);
     assert.deepEqual(w.orch('overlap', 'demo').out.trim().split('\n'), [
-      'OVERLAP demo: fix-cl (later) and parent both change 1 file: shared.txt',
-      'OVERLAP demo: fix-cx (later) and parent both change 1 file: shared.txt',
-      'OVERLAP demo: fix-cl (later) and child both change 1 file: shared.txt',
-      'OVERLAP demo: fix-cx (later) and child both change 1 file: shared.txt',
+      'OVERLAP demo: cousin (later) and parent both change 2 files: p2.txt, shared.txt',
+      'OVERLAP demo: cousin (later) and child both change 1 file: shared.txt',
     ]);
-    // Once the parent lands, main and the parent branch are the same commit: the parent changes nothing, and the
-    // commits the two share are on main, so the pair is no stack any more. A new parent change is a plain overlap.
-    w.sh(w.repo, 'git push -q origin orch/parent:main');
-    w.save([w.rec('parent', parent, '1'), w.rec('child', child, '2')]);
-    assert.equal(w.orch('overlap', '--new').out.trim(), '');
-    w.sh(parent, 'echo p2 > shared.txt');
-    assert.equal(w.orch('overlap', '--new').out.trim(), 'OVERLAP demo: child (later) and parent both change 1 file: shared.txt');
-    assert.equal(w.orch('overlap', '--new').out.trim(), '', 'reported once');
-    assert.deepEqual(JSON.parse(readFileSync(join(w.base, 'orch', 'overlap.json'), 'utf8')), { 'demo parent child': ['shared.txt'] });
+  } finally { w.done(); }
+});
+
+test('a merged worker stops overlapping, even squashed; what it landed no longer counts for its child', () => {
+  const w = overlapWorld();
+  try {
+    const parent = w.wt('parent');
+    w.sh(parent, 'echo p > shared.txt && git commit -qam parent');
+    const child = w.wt('child', 'orch/parent');
+    w.sh(child, 'echo c > child.txt && git add child.txt && git commit -qm child');
+    const other = w.wt('other');
+    w.sh(other, 'echo o > shared.txt');
+    w.save([w.rec('parent', parent, '1'), w.rec('child', child, '2', { parent: 'parent' }), w.rec('other', other, '3')]);
+    assert.deepEqual(w.orch('overlap', '--new').out.trim().split('\n'), [
+      'OVERLAP demo: other (later) and parent both change 1 file: shared.txt',
+      'OVERLAP demo: other (later) and child both change 1 file: shared.txt',
+    ]);
+    w.sh(w.repo, 'git checkout -q main && git merge -q --squash orch/parent && git commit -qm "parent (#6)" && git push -q origin main');
+    // The squash landed shared.txt: the child no longer changes it, and neither does the parent's branch.
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'no overlap');
+    // A merged worker left running with a stray edit is still done: its PR is merged, so it is out.
+    w.sh(parent, 'echo stray > shared.txt');
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'OVERLAP demo: other (later) and parent both change 1 file: shared.txt');
+    writeFileSync(join(w.base, 'gh.merged'), 'orch/parent\n');
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'no overlap');
+  } finally { w.done(); }
+});
+
+test('a repo whose fetch fails is skipped with an error line, and the other repos are still checked', () => {
+  const w = overlapWorld();
+  try {
+    const repo2 = join(w.base, 'repo2');
+    w.sh(w.base, `git clone -q ${join(w.base, 'origin.git')} ${repo2} 2>/dev/null && cd ${repo2} && git remote set-head origin -a >/dev/null`);
+    writeFileSync(join(w.base, 'orch', 'projects.md'), `| Repo | Path | Gates | Notes |\n|---|---|---|---|\n| demo | ${w.repo} | \`./gate.sh\` | |\n| demo2 | ${repo2} | | |\n`);
+    const a = w.wt('a'), b = w.wt('b');
+    const wt2 = (name: string) => { const p = join(w.base, `wt2-${name}`); w.sh(repo2, `git worktree add -q -b orch/${name} ${p} origin/main && echo x > ${p}/shared.txt`); return p; };
+    const c = wt2('c'), d = wt2('d');
+    for (const p of [a, b]) w.sh(p, 'echo z > shared.txt');
+    const two = (name: string, path: string, started: string) => ({ ...w.rec(name, path, started), repo: 'demo2', repoPath: repo2 });
+    w.save([w.rec('a', a, '1'), w.rec('b', b, '2'), two('c', c, '3'), two('d', d, '4')]);
+    writeFileSync(join(w.base, 'orch', 'overlap.json'), JSON.stringify({ 'demo2 c d': ['shared.txt'] }));
+    w.sh(repo2, 'git remote set-url origin /nonexistent/origin.git');
+    const r = w.orch('overlap', '--new');
+    assert.equal(r.status, 0, r.out);
+    assert.deepEqual(r.out.trim().split('\n'), [
+      `OVERLAP error: demo2: git fetch origin failed in ${repo2}; skipped`,
+      'OVERLAP demo: b (later) and a both change 1 file: shared.txt',
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(join(w.base, 'orch', 'overlap.json'), 'utf8')),
+      { 'demo2 c d': ['shared.txt'], 'demo a b': ['shared.txt'] }, 'the skipped repo keeps what was already reported');
+  } finally { w.done(); }
+});
+
+test('run: --from main is the default branch however spelled, a child gets its parent, and a failed fetch falls back with a warning', () => {
+  const w = world();
+  try {
+    const main = w.sh(w.repo, 'git rev-parse main');
+    let r = w.orch('run', 'demo', 'same', 'task', '--from', 'main');
+    assert.match(r.out, /worker same is not ready/);
+    assert.doesNotMatch(w.calls('git.calls'), /fetch/, 'with --from nothing is fetched');
+    const rec = (name: string) => JSON.parse(readFileSync(join(w.base, 'orch', 'workers.json'), 'utf8')).find((x: any) => x.name === name);
+    assert.equal(rec('same').base, main);
+    assert.equal(rec('same').parent, undefined, 'orch/w is at main too, but main is no parent');
+
+    w.commitOnWorker('one.txt');
+    r = w.orch('run', 'demo', 'kid', 'task', '--from', 'orch/w');
+    assert.equal(rec('kid').parent, 'w');
+
+    w.sh(w.repo, 'git checkout -q main && echo l > local.txt && git add local.txt && git commit -qm local && git remote set-url origin /nonexistent/origin.git');
+    r = w.orch('run', 'demo', 'off', 'task');
+    assert.match(r.out, /warning: git fetch origin failed in .*repo; using the local main, which may be stale/);
+    assert.equal(rec('off').base, w.sh(w.repo, 'git rev-parse main'));
   } finally { w.done(); }
 });
 

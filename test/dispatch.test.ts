@@ -96,8 +96,8 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /in-scope implementation and investigation calls yourself/);
   assert.match(b, /bound to 127\.0\.0\.1/);
   assert.match(b, /removed when you are done, with their volumes \(`docker run --rm`, or `docker rm -f -v <name>`/);
-  assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'pr7', branch: 'orch/pr7' }, false).includes('Other workers:'), 'no rebase line for PR or stacked workers');
-  assert.match(b, /^Other workers: before the final test run, rebase onto the latest default branch .* and rerun the tests\. .*mention any such overlap in your report\.$/m);
+  assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'pr7', branch: 'orch/pr7' }, false).includes('Other workers:'), 'no merge line for PR or stacked workers');
+  assert.match(b, /^Other workers: before the final test run, merge origin\/<default> into your branch \(`git fetch origin` then `git merge --autostash --no-edit origin\/<default>`; your changes stay uncommitted; never rebase\) and rerun the tests\. .*mention any such overlap in your report\.$/m);
   assert.match(b, /^Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal\.$/m);
   assert.equal(workerPrompt('/x/briefs/flag.md'), 'Read /x/briefs/flag.md and follow it.');
   assert.equal(potetoLine({ kind: 'claude' }, '/p/SKILL.md'), 'First read /p/SKILL.md in full and work by it (poteto-mode).\n\n');
@@ -209,16 +209,16 @@ test('watcher reports a pair once, again only when files join, and forgets pairs
   assert.deepEqual(gone.seen, {});
   assert.equal(newOverlaps([o(['x'])], gone.seen).lines.length, 1, 'a pair that comes back is reported again');
   const other = { 'tariffs a b': ['y'] };
-  assert.deepEqual(newOverlaps([], { ...grown.seen, ...other }, 'orch').seen, other, 'scanning one repo keeps the others');
+  assert.deepEqual(newOverlaps([], { ...grown.seen, ...other }, r => r === 'orch').seen, other, 'a repo not scanned keeps its pairs');
   assert.deepEqual(newOverlaps([], { ...grown.seen, ...other }).seen, {}, 'scanning all repos forgets what is gone');
 });
 
-test('overlap leaves out a Claude/Codex pair and a parent with its stacked child', async () => {
+test('overlap leaves out a Claude/Codex pair and a stack of parent, child and grandchild', async () => {
   const { overlaps } = await import('../src/dispatch.ts');
-  const t = (name: string, started: string, pair?: string) => ({ name, started, files: ['x'], pair });
-  assert.deepEqual(overlaps('r', [t('fix-cl', '1', 'fix'), t('fix-cx', '1', 'fix')]), []);
-  const stacked = (a: string, b: string) => [a, b].sort().join() === 'child,parent';
-  assert.deepEqual(overlaps('r', [t('parent', '1'), t('child', '2'), t('other', '3')], stacked).map(o => `${o.earlier}+${o.later}`),
-    ['parent+other', 'child+other']);
+  const t = (name: string, started: string, extra: { pair?: string; parent?: string } = {}) => ({ name, started, files: ['x'], ...extra });
+  assert.deepEqual(overlaps('r', [t('fix-cl', '1', { pair: 'fix' }), t('fix-cx', '1', { pair: 'fix' })]), []);
+  assert.deepEqual(overlaps('r', [t('parent', '1'), t('child', '2', { parent: 'parent' }), t('grand', '3', { parent: 'child' }), t('other', '4')])
+    .map(o => `${o.earlier}+${o.later}`), ['parent+other', 'child+other', 'grand+other']);
+  assert.deepEqual(overlaps('r', [t('a', '1', { parent: 'b' }), t('b', '2', { parent: 'a' })]), [], 'a parent cycle ends');
 });
 

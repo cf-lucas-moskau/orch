@@ -4,7 +4,7 @@ import type { Merged } from './review.ts';
 export type Project = { repo: string; path: string; gates: string[]; notes: string };
 export type Kind = 'claude' | 'codex';
 export type Worker = {
-  name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
+  name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; parent?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
   workspace: string; pane: string; sid: string; started: string; status: 'running' | 'closed';
 };
 export type Live = {
@@ -170,8 +170,8 @@ export function cleanupBlocker(porcelain: string, unpushed: string): string | nu
 // only typed, which is what orch's prompt is. Codex has no pstack.
 export const SERIOUS = '/pstack:poteto-mode';
 
-// rebase: off for a colleague's PR branch and a stacked worker, whose base is not the default branch.
-export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch'>, rebase = true): string {
+// sync: off for a colleague's PR branch and a stacked worker, whose base is not the default branch.
+export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch'>, sync = true): string {
   const gates = p.gates.length ? p.gates.map(g => `\`${g}\``).join(', ') : 'none registered; run the repo\'s own tests';
   return [
     `# Brief for worker ${w.name}`, '',
@@ -189,8 +189,9 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Screenshots: before you report or show one, open it and review it critically as a player would. List every flaw you see (misplaced UI, clipping, a character standing where it can't, seams, wrong labels) and fix it or name it. Never present a screenshot as proof without that review.`,
     // Auto mode stops on rm with globs or variables (b3, ew2 on 2026-10-26); nobody is there to approve it.
     `Deleting files: never rm with a glob or an unquoted variable; it stops on a permission prompt nobody answers. Write literal paths, or use find <dir> -mindepth 1 -delete, or write to a fresh folder instead.`,
-    // Parallel workers on one repo collide at merge time; rebasing before the last test run catches it while it is cheap.
-    ...rebase ? [`Other workers: before the final test run, rebase onto the latest default branch (\`git fetch origin\` then \`git rebase --autostash origin/<default>\`; your changes stay uncommitted) and rerun the tests. If orch tells you another worker changes the same files, rebase early and keep your change out of their way; mention any such overlap in your report.`] : [],
+    // Parallel workers on one repo collide at merge time; merging the default branch in before the last test run catches it
+    // while it is cheap. A merge, never a rebase: history is not rewritten, so a normal push updates the PR (no force push).
+    ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --autostash --no-edit origin/<default>\`; your changes stay uncommitted; never rebase) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
@@ -246,11 +247,18 @@ export function parseAutonomy(...texts: string[]): Set<Autonomous> {
 // (idea-2 and idea-3 on 2026-10-31): the worker never got its task even when herdr reports it working.
 export const isGarbledPrompt = (screen: string) => /\^\[\[20[01]~|\x1b\[20[01]~/.test(screen);
 
-// Two workers on one repo changing the same files collide at merge time; found early, the later one rebases or coordinates.
-// A Claude/Codex pair works the same task on purpose, and a stacked child carries its parent's changes; neither is a collision.
-export type Touch = { name: string; started: string; files: string[]; pair?: string };
+// Two workers on one repo changing the same files collide at merge time; found early, the later one merges the default branch in or coordinates.
+// A Claude/Codex pair works the same task on purpose, and a stacked child (started on its parent's branch head) carries its
+// parent's changes, as does a grandchild; neither is a collision.
+export type Touch = { name: string; started: string; files: string[]; pair?: string; parent?: string };
 export type Overlap = { repo: string; earlier: string; later: string; files: string[] };
-export function overlaps(repo: string, ts: Touch[], stacked: (a: string, b: string) => boolean = () => false): Overlap[] {
+export function overlaps(repo: string, ts: Touch[]): Overlap[] {
+  const parentOf = new Map(ts.map(t => [t.name, t.parent]));
+  const above = (n: string, seen = new Set<string>()): Set<string> => {
+    const p = parentOf.get(n);
+    return p && !seen.has(p) ? above(p, seen.add(p)) : seen;
+  };
+  const stacked = (a: string, b: string) => above(a).has(b) || above(b).has(a);
   const sorted = [...ts].sort((a, b) => a.started.localeCompare(b.started) || a.name.localeCompare(b.name));
   const out: Overlap[] = [];
   for (let i = 0; i < sorted.length; i++) for (let j = i + 1; j < sorted.length; j++) {
@@ -266,11 +274,11 @@ const listFiles = (fs: string[], n = 8) => fs.slice(0, n).join(', ') + (fs.lengt
 export const overlapLine = (o: Overlap) =>
   `OVERLAP ${o.repo}: ${o.later} (later) and ${o.earlier} both change ${o.files.length} file${o.files.length === 1 ? '' : 's'}: ${listFiles(o.files)}`;
 
-// What the watcher reports: a pair once, and again only when files join it. Pairs that stop overlapping are forgotten;
-// with `only`, just that repo was scanned, so other repos' pairs are kept as they were.
+// What the watcher reports: a pair once, and again only when files join it. Pairs that stop overlapping are forgotten,
+// but only in repos that were scanned: a repo skipped (not asked for, or its fetch failed) keeps its pairs as they were.
 export type OverlapSeen = Record<string, string[]>;
-export function newOverlaps(os: Overlap[], seen: OverlapSeen, only?: string): { lines: string[]; seen: OverlapSeen } {
-  const next: OverlapSeen = only ? Object.fromEntries(Object.entries(seen).filter(([k]) => k.split(' ')[0] !== only)) : {};
+export function newOverlaps(os: Overlap[], seen: OverlapSeen, scanned: (repo: string) => boolean = () => true): { lines: string[]; seen: OverlapSeen } {
+  const next: OverlapSeen = Object.fromEntries(Object.entries(seen).filter(([k]) => !scanned(k.split(' ')[0])));
   const lines: string[] = [];
   for (const o of os) {
     const key = `${o.repo} ${o.earlier} ${o.later}`;

@@ -57,7 +57,7 @@ const refresh = () => spawn(process.execPath, ['--experimental-strip-types', '--
 refresh();
 setInterval(refresh, 10 * 60_000);
 
-// Workers on one repo that change the same files, reported once per pair (again when files join), so the later one rebases early.
+// Workers on one repo that change the same files, reported once per pair (again when files join), so the later one merges the default branch in early.
 // One run at a time: a slow fetch must not stack runs that race on overlap.json. A hung one is killed after 5 minutes.
 let overlapRunning = false;
 function checkOverlap() {
