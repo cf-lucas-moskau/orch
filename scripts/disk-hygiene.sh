@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Weekly disk hygiene for the Mac orch runs on. Dry run by default; --apply deletes.
-# Never touches ~/Movies, ~/Downloads, Go's cache, or Docker volumes outside orch-*, pulse-* and pulsedev* compose projects.
+# Never touches ~/Movies, ~/Downloads, Go's cache, or named Docker volumes outside orch-*, pulse-* and pulsedev* compose projects.
 set -uo pipefail
 
 APPLY=0
@@ -16,6 +16,7 @@ CODE_DIR="${DISK_HYGIENE_CODE:-$HOME/code}"
 BUILD_CACHE_KEEP_GB=5
 NOW=$(date +%s)
 WEEK=$((7 * 86400))
+THREE_DAYS=$((3 * 86400))
 
 free_kb() { df -k "$ROOT" | awk 'NR==2 { print $4 }'; }
 gb() { awk -v kb="$1" 'BEGIN { printf "%.1f GB", kb / 1048576 }'; }
@@ -52,6 +53,8 @@ in_use() {
 }
 
 DOCKER=0
+# "<volume> <size>" for every local volume. Only section headers switch sections; volume names can contain "usage".
+volume_sizes() { docker system df -v | awk '/^[A-Z][A-Za-z ]* usage:/ { on = /^Local Volumes/; next } on && NF && $1 != "VOLUME" { print $1, $NF }'; }
 if command -v docker >/dev/null && with_timeout 15 docker info >/dev/null 2>&1; then DOCKER=1; fi
 
 # 1. Build cache above 5 GB.
@@ -103,7 +106,7 @@ if [ "$DOCKER" = 1 ]; then
     [ -z "$recent" ] && stale+=("$p")
   done
   vol_kb=0
-  [ "${#stale[@]}" -gt 0 ] && volumes=$(docker system df -v | awk '/usage/ { on = /^Local Volumes/; next } on && NF && $1 != "VOLUME" { print $1, $NF }')
+  [ "${#stale[@]}" -gt 0 ] && volumes=$(volume_sizes)
   for p in "${stale[@]+"${stale[@]}"}"; do
     for v in $(docker volume ls -q --filter "label=com.docker.compose.project=$p"); do
       vol_kb=$((vol_kb + $(to_kb "$(awk -v v="$v" '$1 == v { print $2 }' <<<"$volumes")")))
@@ -115,7 +118,24 @@ else
   step "worker compose stacks" "skipped, Docker is not running"
 fi
 
-# 4. node_modules in ~/code projects untouched for 90+ days and not in use.
+# 4. Anonymous volumes no container uses, created 3+ days ago: what `docker run` without --rm leaves behind
+# (workers' throwaway Postgres filled 20 GB in a week). Named volumes are never touched.
+if [ "$DOCKER" = 1 ]; then
+  anon=(); anon_kb=0
+  volumes=$(volume_sizes)
+  while read -r v created; do
+    [[ "$v" =~ ^[0-9a-f]{64}$ ]] || continue
+    t=$(date -j -u -f '%Y-%m-%dT%H:%M:%S' "${created%%[.Z+]*}" +%s 2>/dev/null || echo "$NOW")
+    [ $((NOW - t)) -lt "$THREE_DAYS" ] && continue
+    anon+=("$v"); anon_kb=$((anon_kb + $(to_kb "$(awk -v v="$v" '$1 == v { print $2 }' <<<"$volumes")")))
+    run with_timeout 60 docker volume rm "$v" >/dev/null 2>&1
+  done < <(docker volume ls -q --filter dangling=true --filter label=com.docker.volume.anonymous | xargs docker volume inspect --format '{{.Name}} {{.CreatedAt}}' 2>/dev/null)
+  step "anonymous volumes" "$VERB $(gb "$anon_kb") (${#anon[@]} unused, 3+ days old)"
+else
+  step "anonymous volumes" "skipped, Docker is not running"
+fi
+
+# 5. node_modules in ~/code projects untouched for 90+ days and not in use.
 nm_kb=0; nm=()
 for d in "$CODE_DIR"/*/; do
   d="${d%/}"
@@ -128,7 +148,7 @@ for d in "$CODE_DIR"/*/; do
 done
 step "stale node_modules" "$VERB $(gb "$nm_kb") (${#nm[@]} projects untouched 90+ days${nm[*]+: ${nm[*]}})"
 
-# 5. Claude scratch folders idle 3+ days, except orch's own and running workers'.
+# 6. Claude scratch folders idle 3+ days, except orch's own and running workers'.
 keep=("$(sed 's/[^a-zA-Z0-9]/-/g' <<<"$ROOT")")
 if [ -f "$ROOT/workers.json" ]; then
   while read -r wt; do keep+=("$(sed 's/[^a-zA-Z0-9]/-/g' <<<"$wt")"); done \
@@ -147,7 +167,7 @@ if [ -d "$CLAUDE_TMP" ]; then
 fi
 step "claude scratch" "$VERB $(gb "$tmp_kb") ($tmp_n folders idle 3+ days)"
 
-# 6. Electron updater leftovers; apps download them again when they update.
+# 7. Electron updater leftovers; apps download them again when they update.
 ship=("$HOME"/Library/Caches/*ShipIt)
 ship_kb=0; ship_n=0
 for d in "${ship[@]}"; do

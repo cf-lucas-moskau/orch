@@ -57,6 +57,30 @@ const refresh = () => spawn(process.execPath, ['--experimental-strip-types', '--
 refresh();
 setInterval(refresh, 10 * 60_000);
 
+// Workers on one repo that change the same files, reported once per pair (again when files join), so the later one merges the default branch in early.
+// One run at a time: a slow fetch must not stack runs that race on overlap.json. A hung one is killed after 5 minutes.
+let overlapRunning = false;
+function checkOverlap() {
+  if (overlapRunning) return;
+  overlapRunning = true;
+  let out = '', err = '';
+  const c = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, 'orch.ts'), 'overlap', '--new'],
+    { cwd: root, timeout: 5 * 60_000, killSignal: 'SIGKILL' });
+  c.stdout.on('data', d => { out += d; });
+  c.stderr.on('data', d => { err += d; });
+  c.on('close', (code, signal) => {
+    overlapRunning = false;
+    for (const l of out.split('\n')) if (l.startsWith('OVERLAP ')) console.log(l);
+    // A crash prints a stack; its Error: line says what went wrong. orch's own refusals are one line.
+    const lines = err.trim().split('\n');
+    const why = (lines.find(l => /\w*Error: /.test(l)) ?? lines.at(-1) ?? '').trim().slice(0, 200);
+    if (code !== 0) console.log(`OVERLAP error: check ${signal ? `killed (${signal}, over 5 minutes)` : `exited ${code}`}: ${why}`);
+  });
+  c.on('error', e => { overlapRunning = false; console.log(`OVERLAP error: check did not start: ${e.message}`); });
+}
+checkOverlap();
+setInterval(checkOverlap, 10 * 60_000);
+
 // The idea bridge must always run while it is live: start it when it is down, check every minute.
 // Detached, so re-arming the watcher never takes it down; launchd's copy counts as running too.
 function ensureBridge() {

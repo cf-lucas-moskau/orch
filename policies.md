@@ -38,6 +38,8 @@ Screenshots are evidence only after review. Every brief tells the worker to look
 
 When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, then push and merge as Autonomy allows; whatever it doesn't allow becomes a decision. Fail: steer the worker once with the failing output; a second failure is needs the user.
 
+Workers on one repo must not collide at merge time. The watcher reports pairs that change the same files (`OVERLAP`, FYI); orch steers the later worker to merge the default branch in early and stay out of the other's way, and files a decision when both rewrite the same code. Every brief tells workers to merge origin/<default> into their branch before their final test run. History is never rewritten: `orch merge` refuses a PR behind its base, and orch has the worker merge the base into its branch (a merge commit) and rerun its gates, then pushes normally and merges again. A stacked child whose parent was squash-merged is not behind for that. A colleague's PR behind its base is the author's to update.
+
 Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree with uncommitted changes or commits on no other branch; abandoning those needs a decision, then `--abandon`.
 
 ## Claude, Codex and pairs

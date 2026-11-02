@@ -10,6 +10,7 @@ sessions.json
 local.md
 projects.md
 workers.json
+overlap.json
 log.md
 decisions/*
 !decisions/README.md
