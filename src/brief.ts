@@ -37,7 +37,13 @@ export function buildBrief(o: {
   out.push(`## Decisions waiting (${open.length})`, ...open.map(d => `${d.id} ${d.question} (${d.session})`), '');
   out.push(`## Moved overnight (${moved.size})`,
     ...[...moved.values()].map(e => `${o.names[e.sid]?.name ?? `${e.cwd.split('/').at(-1)} ${e.sid.slice(0, 4)}`}: ${oneLine(e.msg)}`), '');
-  if (o.ideas) out.push(`## Ideas waiting on orch (${o.ideas.length})`, ...o.ideas, '');
+  if (o.ideas) {
+    // Feedback on a shipped idea gets its own list: it is easy to lose among new ideas.
+    const feedback = o.ideas.filter(l => /^IDEA \S+ feedback /.test(l));
+    if (feedback.length) out.push(`## Feedback waiting (${feedback.length})`, ...feedback, '');
+    const rest = o.ideas.filter(l => !feedback.includes(l));
+    out.push(`## Ideas waiting on orch (${rest.length})`, ...rest, '');
+  }
   out.push(`## Workers (${running.length})`, ...running.map(w => `${w.name} on ${w.repo}: ${oneLine(w.task, 80)}`), '');
   out.push('## Plans', ...o.plans.map(p => {
     const c = (s: string) => p.tasks.filter(t => t.state === s).length;
