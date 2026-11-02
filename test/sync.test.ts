@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // orch run, push, merge and overlap against a bare origin on disk. `git` is a shim that records every call and runs the real git.
-// `gh` is fake: PR #7's head is orch/w in the bare origin, its base `main` or gh.base, merged heads are listed in gh.merged.
+// `gh` is fake: PR #7's head is orch/w in the bare origin, its base `main` or gh.base, merged PRs are `<branch> <head sha>` lines in gh.merged,
+// and gh.fail makes `pr list` fail.
 // `herdr` is fake: it creates real worktrees, and no agent ever starts, so `run` stops after saving the worker.
 const orchTs = join(import.meta.dirname, '..', 'src', 'orch.ts');
 const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
@@ -23,11 +24,11 @@ function world(autonomy = '- push: on\n- merge: on\n') {
   writeFileSync(join(bin, 'git'), `#!/bin/sh\necho "$*" >> "${base}/git.calls"\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
   writeFileSync(join(bin, 'gh'), `#!/bin/sh
 echo "$*" >> "$GH_DIR/gh.calls"
-head=$("${realGit}" --git-dir="$ORIGIN" rev-parse refs/heads/orch/w)
+head=$("${realGit}" --git-dir="$ORIGIN" rev-parse refs/heads/orch/w 2>/dev/null)
 base=$(cat "$GH_DIR/gh.base" 2>/dev/null || echo main)
 case "$*" in
   *isDraft*) echo "{\\"isDraft\\":false,\\"mergeable\\":\\"MERGEABLE\\",\\"reviewDecision\\":\\"\\",\\"statusCheckRollup\\":[],\\"headRefName\\":\\"orch/w\\",\\"baseRefName\\":\\"$base\\",\\"headRefOid\\":\\"$head\\"}" ;;
-  "pr list --head "*) grep -qx "$4" "$GH_DIR/gh.merged" 2>/dev/null && echo 1 || echo 0 ;;
+  "pr list --head "*) [ -e "$GH_DIR/gh.fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }; grep "^$4 " "$GH_DIR/gh.merged" 2>/dev/null | cut -d' ' -f2 ;;
   "pr merge"*) ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
 esac
@@ -121,7 +122,7 @@ test('a stacked child merges after its parent was squash-merged, without updatin
     w.commitOnWorker('one.txt');
     w.sh(w.wt, 'git push -q origin HEAD:orch/w');
     writeFileSync(join(w.base, 'gh.base'), 'orch/parent');
-    writeFileSync(join(w.base, 'gh.merged'), 'orch/parent\n');
+    writeFileSync(join(w.base, 'gh.merged'), `orch/parent ${w.sh(w.repo, 'git rev-parse orch/parent')}\n`);
     w.sh(w.repo, 'git checkout -q main && git merge -q --squash orch/parent && git commit -qm "parent (#6)" && git push -q origin main');
     let r = w.orch('merge', 'demo', '7');
     assert.equal(r.status, 1);
@@ -134,7 +135,28 @@ test('a stacked child merges after its parent was squash-merged, without updatin
     assert.equal(w.remoteHead(), head, 'no push, no rewrite');
     w.mainMoves('other.txt', 'y');
     r = w.orch('merge', 'demo', '7');
-    assert.equal(r.out.trim(), 'not merged: #7 is 1 commit behind main. Have w merge origin/main into its branch and rerun its gates, then push and merge again.');
+    assert.equal(r.out.trim(), 'not merged: #7 is 2 commits behind main. Have w merge origin/main into its branch and rerun its gates, then push and merge again.',
+      'the squash is counted once something else is missing too');
+    // The parent branch reused with new commits is not merged any more: merging into it is the plan, no retarget needed.
+    w.sh(w.repo, 'git checkout -q orch/parent && echo n > n.txt && git add n.txt && git commit -qm next && git push -q origin orch/parent');
+    writeFileSync(join(w.base, 'gh.base'), 'orch/parent');
+    r = w.orch('merge', 'demo', '7');
+    assert.match(r.out, /not merged: #7 is 1 commit behind orch\/parent/);
+    writeFileSync(join(w.base, 'gh.fail'), '');
+    r = w.orch('merge', 'demo', '7');
+    assert.equal(r.out.trim(), 'merge stopped: gh pr list --head orch/parent failed, so whether #7\'s base is merged is unknown: HTTP 502: Bad Gateway');
+  } finally { w.done(); }
+});
+
+test('the merged-base guard applies only to orch branches, never to main', () => {
+  const w = world();
+  try {
+    w.commitOnWorker('one.txt');
+    w.orch('push', 'w');
+    writeFileSync(join(w.base, 'gh.merged'), `main ${w.sh(w.repo, 'git rev-parse origin/main')}\n`);
+    const r = w.orch('merge', 'demo', '7');
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(w.calls('gh.calls'), /pr list/);
   } finally { w.done(); }
 });
 
@@ -236,8 +258,52 @@ test('a merged worker stops overlapping, even squashed; what it landed no longer
     // A merged worker left running with a stray edit is still done: its PR is merged, so it is out.
     w.sh(parent, 'echo stray > shared.txt');
     assert.equal(w.orch('overlap', 'demo').out.trim(), 'OVERLAP demo: other (later) and parent both change 1 file: shared.txt');
-    writeFileSync(join(w.base, 'gh.merged'), 'orch/parent\n');
+    writeFileSync(join(w.base, 'gh.merged'), `orch/parent ${w.sh(parent, 'git rev-parse HEAD')}\n`);
     assert.equal(w.orch('overlap', 'demo').out.trim(), 'no overlap');
+    writeFileSync(join(w.base, 'gh.fail'), '');
+    assert.deepEqual(w.orch('overlap', 'demo').out.trim().split('\n'), [
+      'OVERLAP error: demo: gh pr list for parent failed: HTTP 502: Bad Gateway',
+      'OVERLAP error: demo: gh pr list for child failed: HTTP 502: Bad Gateway',
+      'OVERLAP error: demo: gh pr list for other failed: HTTP 502: Bad Gateway',
+      'OVERLAP demo: other (later) and parent both change 1 file: shared.txt',
+    ], 'a gh failure is said, and the workers are still checked');
+    rmSync(join(w.base, 'gh.fail'));
+    // The branch reused after its merge: new commits make it count again.
+    w.sh(parent, 'git commit -qam reuse');
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'OVERLAP demo: other (later) and parent both change 1 file: shared.txt');
+  } finally { w.done(); }
+});
+
+test('conflicted paths count as touched: two workers that both conflict with main on a file overlap on it', () => {
+  const w = overlapWorld();
+  try {
+    const a = w.wt('a'), b = w.wt('b');
+    w.sh(a, 'echo changed > shared.txt && git commit -qam a');
+    w.sh(b, 'git rm -q shared.txt && git commit -qm b');
+    w.mainMoves('shared.txt', 'main');
+    w.save([w.rec('a', a, '1'), w.rec('b', b, '2')]);
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'OVERLAP demo: b (later) and a both change 1 file: shared.txt');
+  } finally { w.done(); }
+});
+
+test('an unknown origin/HEAD is learned once with set-head, else origin/main with a warning line, never skipped silently', () => {
+  const w = overlapWorld();
+  try {
+    const a = w.wt('a'), b = w.wt('b');
+    for (const p of [a, b]) w.sh(p, 'echo z > shared.txt');
+    w.save([w.rec('a', a, '1'), w.rec('b', b, '2')]);
+    w.sh(w.repo, 'git symbolic-ref -d refs/remotes/origin/HEAD');
+    assert.equal(w.orch('overlap', 'demo').out.trim(), 'OVERLAP demo: b (later) and a both change 1 file: shared.txt');
+    assert.match(w.calls('git.calls'), /remote set-head origin -a/);
+    assert.equal(w.sh(w.repo, 'git symbolic-ref --short refs/remotes/origin/HEAD'), 'origin/main');
+
+    w.sh(w.repo, 'git symbolic-ref -d refs/remotes/origin/HEAD');
+    w.sh(w.base, `git --git-dir=${join(w.base, 'origin.git')} symbolic-ref HEAD refs/heads/nope`);
+    assert.deepEqual(w.orch('overlap', 'demo').out.trim().split('\n'), [
+      `OVERLAP warning: demo: origin/HEAD is unknown in ${w.repo} (git remote set-head origin -a failed); using origin/main`,
+      'OVERLAP demo: b (later) and a both change 1 file: shared.txt',
+    ]);
+    assert.equal((w.calls('git.calls').match(/remote set-head/g) ?? []).length, 1, 'set-head is tried once');
   } finally { w.done(); }
 });
 
@@ -269,6 +335,7 @@ test('a repo whose fetch fails is skipped with an error line, and the other repo
 test('run: --from main is the default branch however spelled, a child gets its parent, and a failed fetch falls back with a warning', () => {
   const w = world();
   try {
+    writeFileSync(join(w.base, 'orch', 'local.md'), 'Concurrency cap: 9\n');
     const main = w.sh(w.repo, 'git rev-parse main');
     let r = w.orch('run', 'demo', 'same', 'task', '--from', 'main');
     assert.match(r.out, /worker same is not ready/);
@@ -277,13 +344,20 @@ test('run: --from main is the default branch however spelled, a child gets its p
     assert.equal(rec('same').base, main);
     assert.equal(rec('same').parent, undefined, 'orch/w is at main too, but main is no parent');
 
+    // orch/w is now behind main with no commits of its own: an older base, not a parent.
+    w.mainMoves('other.txt', 'y');
+    r = w.orch('run', 'demo', 'old', 'task', '--from', 'orch/w');
+    assert.match(r.out, /worker old is not ready/);
+    assert.notEqual(rec('old').base, w.sh(w.repo, 'git rev-parse origin/main'));
+    assert.equal(rec('old').parent, undefined);
+
     w.commitOnWorker('one.txt');
     r = w.orch('run', 'demo', 'kid', 'task', '--from', 'orch/w');
     assert.equal(rec('kid').parent, 'w');
 
     w.sh(w.repo, 'git checkout -q main && echo l > local.txt && git add local.txt && git commit -qm local && git remote set-url origin /nonexistent/origin.git');
     r = w.orch('run', 'demo', 'off', 'task');
-    assert.match(r.out, /warning: git fetch origin failed in .*repo; using the local main, which may be stale/);
+    assert.match(r.out, /warning: git fetch origin failed in .*repo; using the local default branch, which may be stale/);
     assert.equal(rec('off').base, w.sh(w.repo, 'git rev-parse main'));
   } finally { w.done(); }
 });

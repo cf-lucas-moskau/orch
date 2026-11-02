@@ -148,8 +148,10 @@ function run([repoArg, name, ...args]: string[]) {
   const base = sha(from ?? 'HEAD');
   // Stacked: started somewhere other than the default branch's commit, however the ref was spelled (main, origin/main, a sha).
   const stacked = !!dflt && base !== sha(dflt);
-  // Its parent is the running worker whose branch head it starts on; overlap never reports the two against each other.
-  const parent = stacked ? workers.find(w => w.status === 'running' && w.repo === p.repo && ok(p.path, 'rev-parse', '-q', '--verify', w.branch) && sha(w.branch) === base)?.name : undefined;
+  // Its parent is the running worker whose branch head it starts on, with commits of its own beyond the default branch
+  // (a worker with none is just an older base); overlap never reports the two against each other.
+  const parent = stacked ? workers.find(w => w.status === 'running' && w.repo === p.repo && ok(p.path, 'rev-parse', '-q', '--verify', w.branch)
+    && sha(w.branch) === base && git(p.path, 'rev-list', '--count', `${dflt}..${w.branch}`).trim() !== '0')?.name : undefined;
   const extra = { base, ...(parent ? { parent } : {}) };
   if (kind === 'both') {
     startWorker(p, names[0], 'claude', task, { pair: name, ...extra }, from, stacked);
@@ -160,21 +162,23 @@ function run([repoArg, name, ...args]: string[]) {
 
 
 // The default branch: origin/<default>, or the local one when it is strictly ahead (unpushed commits, as in kurswert on 2026-10-28).
-// fetch: from a fresh fetch; when that fails, the local default branch, with a warning.
-function defaultRef(path: string, fetch = true): string | undefined {
+// fetch: from a fresh fetch; when that fails, the local default branch, with a warning. Every fallback warns; none is silent.
+function defaultRef(path: string, fetch = true, warn = (m: string) => console.error(`warning: ${m}`)): string | undefined {
   const fetched = fetch && ok(path, 'fetch', '-q', 'origin');
-  // A clone made without origin/HEAD (orch and evrloot-next on 2026-10-30) learns it from the remote first.
+  if (fetch && !fetched) warn(`git fetch origin failed in ${path}; using the local default branch, which may be stale`);
+  // A clone made without origin/HEAD (orch and evrloot-next on 2026-10-30) learns it from the remote, once.
   const head = () => spawnSync('git', ['-C', path, 'symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD'], { encoding: 'utf8' }).stdout.trim();
-  if (!head() && fetched) spawnSync('git', ['-C', path, 'remote', 'set-head', 'origin', '-a']);
-  const remote = head();
-  if (!remote) return undefined;
+  if (!head() && (fetched || !fetch)) spawnSync('git', ['-C', path, 'remote', 'set-head', 'origin', '-a']);
+  const has = (ref: string) => ok(path, 'rev-parse', '-q', '--verify', `${ref}^{commit}`);
+  let remote = head();
+  if (!remote) {
+    remote = 'origin/main';
+    if (!has(remote)) { warn(`origin/HEAD is unknown in ${path} and there is no origin/main${has('main') ? '; using main' : ''}`); return has('main') ? 'main' : undefined; }
+    warn(`origin/HEAD is unknown in ${path} (git remote set-head origin -a failed); using origin/main`);
+  }
   const local = remote.replace(/^origin\//, '');
   const hasLocal = ok(path, 'rev-parse', '-q', '--verify', `refs/heads/${local}`);
-  if (fetch && !fetched) {
-    const ref = hasLocal ? local : remote;
-    console.error(`warning: git fetch origin failed in ${path}; using the local ${ref}, which may be stale`);
-    return ref;
-  }
+  if (fetch && !fetched) return hasLocal ? local : remote;
   const ahead = hasLocal && ok(path, 'merge-base', '--is-ancestor', remote, local) && git(path, 'rev-list', '--count', `${remote}..${local}`).trim() !== '0';
   return ahead ? local : remote;
 }
@@ -289,9 +293,11 @@ function cleanup([name, flag]: string[]) {
 // Measured against the merge result, not the merge-base: what already landed (a squash-merged parent) does not count.
 function touched(w: Worker, base: string): string[] {
   const out = (...a: string[]) => { const r = spawnSync('git', ['-C', w.worktree, ...a], { encoding: 'utf8' }); return r.status === 0 || r.status === 1 ? r.stdout.trim() : ''; };
-  const merged = out('merge-tree', '--write-tree', base, 'HEAD').split('\n')[0];
+  // Line one is the merged tree; on a conflict the conflicted paths follow, up to a blank line. They count as touched too.
+  const [merged, ...rest] = out('merge-tree', '--write-tree', '--name-only', base, 'HEAD').split('\n');
   if (!merged) return [];
-  return [...new Set([out('diff', '--name-only', base, merged), out('diff', '--name-only', 'HEAD'), out('ls-files', '--others', '--exclude-standard')]
+  const conflicted = rest.slice(0, rest.indexOf('') < 0 ? rest.length : rest.indexOf('')).join('\n');
+  return [...new Set([out('diff', '--name-only', base, merged), conflicted, out('diff', '--name-only', 'HEAD'), out('ls-files', '--others', '--exclude-standard')]
     .join('\n').split('\n').filter(Boolean))];
 }
 
@@ -312,9 +318,15 @@ function overlap(args: string[]) {
   const found = [...byRepo].filter(([, ws]) => ws.length > 1).flatMap(([repo, ws]) => {
     const path = projectOf(ws[0]).path;
     if (!ok(path, 'fetch', '-q', 'origin')) { failed.add(repo); console.log(`OVERLAP error: ${repo}: git fetch origin failed in ${path}; skipped`); return []; }
-    const base = defaultRef(path, false) ?? 'HEAD';
-    // A squash merge leaves no trace in git history, so a merged worker is found by its PR.
-    const open = ws.filter(w => !prMergedHead(path, w.prHead ?? w.branch));
+    const base = defaultRef(path, false, m => console.log(`OVERLAP warning: ${repo}: ${m}`));
+    if (!base) { failed.add(repo); console.log(`OVERLAP error: ${repo}: no default branch to compare against; skipped`); return []; }
+    // A squash merge leaves no trace in git history, so a merged worker is found by its PR. A gh failure is said, and the
+    // worker is still checked.
+    const open = ws.filter(w => {
+      const m = mergedHeads(path, w.prHead ?? w.branch);
+      if ('error' in m) { console.log(`OVERLAP error: ${repo}: gh pr list for ${w.name} failed: ${m.error}`); return true; }
+      return !isMerged(w.worktree, 'HEAD', m.heads);
+    });
     return overlaps(repo, open.map((w): Touch => ({ name: w.name, started: w.started, files: touched(w, base), pair: w.pair, parent: w.parent })));
   });
   if (fresh) {
@@ -579,10 +591,14 @@ function merge([repoArg, n, ...args]: string[]) {
   const pr = n.replace('#', '');
   const state: PrState & { headRefName: string; baseRefName: string; headRefOid: string } =
     JSON.parse(gh(p.path, 'pr', 'view', pr, '--json', 'isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName,baseRefName,headRefOid'));
-  // A stacked child's base is its parent's branch until it is retargeted; merged into that, it never reaches main.
-  if (prMergedHead(p.path, state.baseRefName))
-    die(`not merged: #${pr} targets ${state.baseRefName}, which is already merged. Retarget it first: gh pr edit ${pr} --base <default branch>`);
   const behind = commitsBehind(p.path, pr, state.baseRefName, state.headRefOid);
+  // A stacked child's base is its parent's orch branch until it is retargeted; merged into that, it never reaches main.
+  if (state.baseRefName.startsWith('orch/')) {
+    const m = mergedHeads(p.path, state.baseRefName);
+    if ('error' in m) die(`merge stopped: gh pr list --head ${state.baseRefName} failed, so whether #${pr}'s base is merged is unknown: ${m.error}`);
+    if (isMerged(p.path, `origin/${state.baseRefName}`, m.heads))
+      die(`not merged: #${pr} targets ${state.baseRefName}, which is already merged. Retarget it first: gh pr edit ${pr} --base <default branch>`);
+  }
   if (behind) {
     const w = loadWorkers().find(x => x.status === 'running' && x.repo === p.repo && (x.prHead ?? x.branch) === state.headRefName);
     const what = `#${pr} is ${behind} commit${behind === 1 ? '' : 's'} behind ${state.baseRefName}`;
@@ -604,19 +620,22 @@ function commitsBehind(path: string, pr: string, base: string, head: string): nu
   const fail = (why: string) => die(`not merged: ${why}, so #${pr} could not be checked against ${base}`);
   if (!ok(path, 'fetch', '-q', 'origin')) fail(`git fetch origin failed in ${path}`);
   if (!ok(path, 'cat-file', '-e', `${head}^{commit}`) && !ok(path, 'fetch', '-q', 'origin', `refs/pull/${pr}/head`)) fail(`its head ${head.slice(0, 8)} could not be fetched`);
-  const tree = git(path, 'rev-parse', `${head}^{tree}`).trim();
-  // A base commit whose change the head already holds is not missing: the squash of a stacked child's parent, which the
-  // child carries as the parent's original commits. Applied to the head it changes nothing, so no rebase or force push.
-  const holds = (c: string) => {
-    const r = spawnSync('git', ['-C', path, 'merge-tree', '--write-tree', '--merge-base', `${c}^`, head, c], { encoding: 'utf8' });
-    return r.status === 0 && r.stdout.split('\n')[0] === tree;
-  };
-  return git(path, 'rev-list', `${head}..origin/${base}`).trim().split('\n').filter(c => c && !holds(c)).length;
+  if (ok(path, 'merge-base', '--is-ancestor', `origin/${base}`, head)) return 0;
+  // Not containing the base can still mean holding all of it: a stacked child carries its parent's original commits, which
+  // the base got as one squash. Merging the base in would change nothing, so it needs no update.
+  const r = spawnSync('git', ['-C', path, 'merge-tree', '--write-tree', head, `origin/${base}`], { encoding: 'utf8' });
+  if (r.status === 0 && r.stdout.split('\n')[0] === git(path, 'rev-parse', `${head}^{tree}`).trim()) return 0;
+  return Number(git(path, 'rev-list', '--count', `${head}..origin/${base}`).trim());
 }
 
-// Whether the branch is the head of a merged PR.
-const prMergedHead = (path: string, branch: string) =>
-  Number(spawnSync('gh', ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '-q', 'length'], { cwd: path, encoding: 'utf8' }).stdout.trim()) > 0;
+// Head commits of the branch's merged PRs, or what gh said when it failed.
+function mergedHeads(path: string, branch: string): { heads: string[] } | { error: string } {
+  const r = spawnSync('gh', ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'headRefOid', '-q', '.[].headRefOid'], { cwd: path, encoding: 'utf8' });
+  if (r.status !== 0) return { error: (r.stderr || r.error?.message || `exit ${r.status}`).trim().split('\n')[0] };
+  return { heads: r.stdout.trim().split('\n').filter(Boolean) };
+}
+// Merged when the branch's head is one a merged PR had, or older; a reused branch with new commits counts again.
+const isMerged = (cwd: string, ref: string, heads: string[]) => heads.some(h => ok(cwd, 'merge-base', '--is-ancestor', ref, h));
 
 // Routines: routines/<name>.md, due ones started by `tick`, which launchd runs every minute (npm run setup installs it).
 const ROUTINE_DIR = join(root, 'routines');
