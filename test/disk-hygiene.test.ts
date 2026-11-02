@@ -11,6 +11,7 @@ const file = (p: string, days: number, bytes = 1024) => { mkdirSync(join(p, '..'
 
 // A fake orch root, home and Claude tmp with Docker down; ages set by mtime.
 // Docker up: 7.5 GB build cache, an old unused image, a used one, and three compose stacks:
+// a volume whose name contains "usage" before the rest, two anonymous volumes (aaa… 5 days old, bbb… 1 day) and a named one, keepme, carrying the anonymous label;
 // orch-old, pulse-old and pulsedevwk stopped for 30 days, orch-new stopped yesterday, tiki-old (not a worker's) stopped for 30 days.
 const DOCKER_UP = `#!/bin/bash
 echo "$*" >> "$(dirname "$0")/calls"
@@ -18,7 +19,7 @@ d() { date -u -v-"$1"d +%Y-%m-%dT%H:%M:%S.000000000Z; }
 case "$*" in
   info) ;;
   "system df --format"*) printf 'Images 3GB\\nBuild Cache 7.5GB\\n' ;;
-  "system df -v") printf 'Images space usage:\\n\\nREPOSITORY TAG\\n\\nLocal Volumes space usage:\\n\\nVOLUME NAME LINKS SIZE\\norch-old_pg 0 2GB\\npulse-old_pg 0 1GB\\ntiki-old_pg 0 9GB\\n\\nBuild cache usage: 7.5GB\\n' ;;
+  "system df -v") printf 'Images space usage:\\n\\nREPOSITORY TAG\\n\\nLocal Volumes space usage:\\n\\nVOLUME NAME LINKS SIZE\\norch-x-usage_pg 1 0B\\norch-old_pg 0 2GB\\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0 4GB\\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0 1GB\\nkeepme 0 3GB\\npulse-old_pg 0 1GB\\ntiki-old_pg 0 9GB\\n\\nBuild cache usage: 7.5GB\\n' ;;
   "ps -aq") printf 'c1\\nc2\\nc3\\n' ;;
   "ps -aq --filter label=com.docker.compose.project=orch-old") echo c1 ;;
   "ps -aq --filter label=com.docker.compose.project=orch-new") echo c2 ;;
@@ -33,6 +34,9 @@ case "$*" in
   "volume ls -q --filter label=com.docker.compose.project=orch-old") echo orch-old_pg ;;
   "volume ls -q --filter label=com.docker.compose.project=pulse-old") echo pulse-old_pg ;;
   "volume ls -q --filter label=com.docker.compose.project=pulsedevwk") ;;
+  "volume ls -q --filter dangling=true --filter label=com.docker.volume.anonymous") printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\nkeepme\\n' ;;
+  "volume inspect --format {{.Name}} {{.CreatedAt}} aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb keepme") echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(d 5 | sed 's/\\..*/Z/')"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb $(d 1 | sed 's/\\..*/Z/')"; echo "keepme $(d 30 | sed 's/\\..*/Z/')" ;;
+  "volume rm aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") ;;
   "builder prune"*) printf 'Build Cache 5GB\\n' > /dev/null ;;
   "image prune"*) echo "Total reclaimed space: 2GB" ;;
   "compose -p orch-old down -v"|"compose -p pulse-old down -v"|"compose -p pulsedevwk down -v") ;;
@@ -90,6 +94,7 @@ test('dry run deletes nothing and reports what it would free', { skip: process.p
     for (const p of Object.values(w.paths)) assert.ok(existsSync(p), `dry run kept ${p}`);
     assert.match(r.stdout, /^disk-hygiene \(dry-run\): free .* GB before, .* GB after$/m);
     assert.match(r.stdout, /docker build cache\s+skipped, Docker is not running/);
+    assert.match(r.stdout, /anonymous volumes\s+skipped, Docker is not running/);
     assert.match(r.stdout, /stale node_modules\s+would free 0\.0 GB \(2 projects untouched 90\+ days: busy stale\)/);
     assert.match(r.stdout, /claude scratch\s+would free 0\.0 GB \(1 folders idle 3\+ days\)/);
     assert.match(r.stdout, /ShipIt caches\s+would free 0\.0 GB \(1 folders\)/);
@@ -122,8 +127,9 @@ test('with Docker up, dry run only reads and names what each Docker step would f
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /docker build cache\s+would free 2\.5 GB \(cache 7\.5 GB, keeps 5 GB\)/);
     assert.match(r.stdout, /docker images\s+would free 2\.0 GB \(1 unused, 7\+ days old/);
+    assert.match(r.stdout, /anonymous volumes\s+would free 4\.0 GB \(1 unused, 3\+ days old\)/);
     assert.match(r.stdout, /worker compose stacks\s+would free 3\.0 GB of volumes \(3 stopped 7\+ days: orch-old pulse-old pulsedevwk\)/);
-    assert.doesNotMatch(w.calls(), /prune|down/);
+    assert.doesNotMatch(w.calls(), /prune|down|volume rm/);
   } finally { rmSync(w.base, { recursive: true, force: true }); }
 });
 
@@ -133,8 +139,8 @@ test('with Docker up, apply prunes and downs only stale worker stacks', { skip: 
     w.dockerUp();
     const r = w.run('--apply');
     assert.equal(r.status, 0, r.stderr);
-    const mutations = w.calls().split('\n').filter(l => /prune|down/.test(l));
-    assert.deepEqual(mutations, ['builder prune -f --max-used-space 5GB', 'image prune -a -f --filter until=168h', 'compose -p orch-old down -v', 'compose -p pulse-old down -v', 'compose -p pulsedevwk down -v']);
+    const mutations = w.calls().split('\n').filter(l => /prune|down|volume rm/.test(l));
+    assert.deepEqual(mutations, ['builder prune -f --max-used-space 5GB', 'image prune -a -f --filter until=168h', 'compose -p orch-old down -v', 'compose -p pulse-old down -v', 'compose -p pulsedevwk down -v', 'volume rm aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']);
     assert.match(r.stdout, /docker images\s+freed 2\.0 GB/);
   } finally { rmSync(w.base, { recursive: true, force: true }); }
 });

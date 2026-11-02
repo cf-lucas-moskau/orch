@@ -95,6 +95,9 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /leave your changes uncommitted; orch runs the gates and commits/);
   assert.match(b, /in-scope implementation and investigation calls yourself/);
   assert.match(b, /bound to 127\.0\.0\.1/);
+  assert.match(b, /removed when you are done, with their volumes \(`docker run --rm`, or `docker rm -f -v <name>`/);
+  assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'pr7', branch: 'orch/pr7' }, false).includes('Other workers:'), 'no rebase line for PR or stacked workers');
+  assert.match(b, /^Other workers: before the final test run, rebase onto the latest default branch .* and rerun the tests\. .*mention any such overlap in your report\.$/m);
   assert.match(b, /^Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal\.$/m);
   assert.equal(workerPrompt('/x/briefs/flag.md'), 'Read /x/briefs/flag.md and follow it.');
   assert.equal(potetoLine({ kind: 'claude' }, '/p/SKILL.md'), 'First read /p/SKILL.md in full and work by it (poteto-mode).\n\n');
@@ -178,3 +181,44 @@ test('a prompt pasted before the input took over is spotted on screen', () => {
   assert.ok(isGarbledPrompt('  ^U[?2026;2$y^[[?62;22c\n^[[200~/pstack:poteto-mode You are worker idea-3^[[201~'));
   assert.ok(!isGarbledPrompt('⏺ Reading the brief\n❯ '));
 });
+
+test('overlap pairs workers that change the same files, later worker named first', async () => {
+  const { overlaps, overlapLine } = await import('../src/dispatch.ts');
+  const os = overlaps('orch', [
+    { name: 'b', started: '2026-11-01 10:00', files: ['src/orch.ts', 'src/watch.ts', 'README.md'] },
+    { name: 'a', started: '2026-11-01 09:00', files: ['src/orch.ts', 'src/dispatch.ts', 'README.md'] },
+    { name: 'c', started: '2026-11-01 11:00', files: ['docs/x.md'] },
+  ]);
+  assert.deepEqual(os, [{ repo: 'orch', earlier: 'a', later: 'b', files: ['README.md', 'src/orch.ts'] }]);
+  assert.equal(overlapLine(os[0]), 'OVERLAP orch: b (later) and a both change 2 files: README.md, src/orch.ts');
+  assert.deepEqual(overlaps('orch', [{ name: 'a', started: '1', files: ['x'] }, { name: 'b', started: '2', files: ['y'] }]), []);
+  const many = overlaps('r', [{ name: 'a', started: '1', files: 'abcdefghij'.split('') }, { name: 'b', started: '2', files: 'abcdefghij'.split('') }]);
+  assert.equal(overlapLine(many[0]), 'OVERLAP r: b (later) and a both change 10 files: a, b, c, d, e, f, g, h and 2 more');
+});
+
+test('watcher reports a pair once, again only when files join, and forgets pairs that stop overlapping', async () => {
+  const { newOverlaps } = await import('../src/dispatch.ts');
+  const o = (files: string[]) => ({ repo: 'orch', earlier: 'a', later: 'b', files });
+  const first = newOverlaps([o(['x'])], {});
+  assert.deepEqual(first.lines, ['OVERLAP orch: b (later) and a both change 1 file: x']);
+  assert.deepEqual(newOverlaps([o(['x'])], first.seen).lines, []);
+  const grown = newOverlaps([o(['x', 'y'])], first.seen);
+  assert.deepEqual(grown.lines, ['OVERLAP orch: b (later) and a both change 2 files: x, y']);
+  assert.deepEqual(newOverlaps([o(['x'])], grown.seen).lines, [], 'a file leaving is not news');
+  const gone = newOverlaps([], grown.seen);
+  assert.deepEqual(gone.seen, {});
+  assert.equal(newOverlaps([o(['x'])], gone.seen).lines.length, 1, 'a pair that comes back is reported again');
+  const other = { 'tariffs a b': ['y'] };
+  assert.deepEqual(newOverlaps([], { ...grown.seen, ...other }, 'orch').seen, other, 'scanning one repo keeps the others');
+  assert.deepEqual(newOverlaps([], { ...grown.seen, ...other }).seen, {}, 'scanning all repos forgets what is gone');
+});
+
+test('overlap leaves out a Claude/Codex pair and a parent with its stacked child', async () => {
+  const { overlaps } = await import('../src/dispatch.ts');
+  const t = (name: string, started: string, pair?: string) => ({ name, started, files: ['x'], pair });
+  assert.deepEqual(overlaps('r', [t('fix-cl', '1', 'fix'), t('fix-cx', '1', 'fix')]), []);
+  const stacked = (a: string, b: string) => [a, b].sort().join() === 'child,parent';
+  assert.deepEqual(overlaps('r', [t('parent', '1'), t('child', '2'), t('other', '3')], stacked).map(o => `${o.earlier}+${o.later}`),
+    ['parent+other', 'child+other']);
+});
+

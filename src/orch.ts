@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { potetoLine, isGarbledPrompt,
+import { potetoLine, isGarbledPrompt, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -128,7 +128,8 @@ function run([repoArg, name, ...args]: string[]) {
   const k = args.indexOf('--kind');
   const rest = args.filter((a, i) => !['--kind', '--from'].includes(a) && !['--kind', '--from'].includes(args[i - 1]));
   // Without --from, start from the remote's default branch: a stale local checkout put two audit workers 395 commits behind (2026-10-27).
-  const from = flag('--from') ?? remoteDefault(project(repoArg).path);
+  const dflt = remoteDefault(project(repoArg).path);
+  const from = flag('--from') ?? dflt;
   const p = project(repoArg);
   const planFile = `plans/${p.repo}.md`;
   const plan = parsePlan(read(planFile));
@@ -143,11 +144,12 @@ function run([repoArg, name, ...args]: string[]) {
   for (let i = 0; i < names.length; i++) dispatchable([...workers, ...names.slice(0, i).map(() => ({ status: 'running' }) as Worker)], names[i]);
   const base = git(p.path, 'rev-parse', from ?? 'HEAD').trim();
   if (kind === 'both') {
-    startWorker(p, names[0], 'claude', task, { pair: name, base }, from);
-    startWorker(p, names[1], 'codex', task, { pair: name, base }, from);
-  } else startWorker(p, name, kind as Kind, task, { base }, from);
+    startWorker(p, names[0], 'claude', task, { pair: name, base }, from, from !== dflt);
+    startWorker(p, names[1], 'codex', task, { pair: name, base }, from, from !== dflt);
+  } else startWorker(p, name, kind as Kind, task, { base }, from, from !== dflt);
   if (planned) writeFileSync(join(root, planFile), setTaskState(read(planFile), name, 'running'));
 }
+
 
 function remoteDefault(path: string): string | undefined {
   try {
@@ -166,7 +168,7 @@ function remoteDefault(path: string): string | undefined {
   }
 }
 
-function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string }, from?: string) {
+function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string }, from?: string, stacked = false) {
   const branch = `orch/${name}`;
   const wt = herdr('worktree', 'create', '--cwd', p.path, '--branch', branch, ...(from ? ['--base', from] : []), '--label', name, '--no-focus');
   if (wt.error) die(`worktree create failed: ${wt.error.message}`);
@@ -188,7 +190,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   }
   const brief = join(root, 'briefs', `${name}.md`);
   mkdirSync(join(root, 'briefs'), { recursive: true });
-  writeFileSync(brief, potetoLine(rec, potetoSkill()) + workerBrief(task, p, rec));
+  writeFileSync(brief, potetoLine(rec, potetoSkill()) + workerBrief(task, p, rec, !extra.prHead && !stacked));
   // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives.
   herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
   herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
@@ -270,6 +272,45 @@ function cleanup([name, flag]: string[]) {
   const extra = [downed.length ? `compose ${downed.join(', ')} down -v` : '', hadScratch ? 'scratch folder deleted' : ''].filter(Boolean).join(', ');
   log(`cleanup ${name}${abandon ? ' (abandoned, the user decided)' : ''}: pane ${w.pane} closed, worktree removed${extra ? `, ${extra}` : ''}, branch ${w.branch} kept`);
   console.log(`${name} cleaned up${extra ? ` (${extra})` : ''}; branch ${w.branch} kept`);
+}
+
+// Files a worker's branch changes against the default branch: committed, uncommitted and untracked.
+function touched(w: Worker, base: string): string[] {
+  const out = (...a: string[]) => { const r = spawnSync('git', ['-C', w.worktree, ...a], { encoding: 'utf8' }); return r.status === 0 ? r.stdout.trim() : ''; };
+  const mb = out('merge-base', base, 'HEAD');
+  return mb ? [out('diff', '--name-only', mb), out('ls-files', '--others', '--exclude-standard')].join('\n').split('\n').filter(Boolean) : [];
+}
+
+// overlap [<repo>]: pairs of running workers on one repo that change the same files.
+// --new (the watcher, every 10 minutes): only pairs not reported before, or that gained files, as OVERLAP lines.
+function overlap(args: string[]) {
+  const fresh = args.includes('--new');
+  const repoArg = args.find(a => a !== '--new');
+  const only = repoArg ? project(repoArg).repo : undefined;
+  const byRepo = new Map<string, Worker[]>();
+  for (const w of loadWorkers()) {
+    if (w.status !== 'running' || !existsSync(w.worktree) || (only && w.repo !== only)) continue;
+    byRepo.set(w.repo, [...(byRepo.get(w.repo) ?? []), w]);
+  }
+  const found = [...byRepo].filter(([, ws]) => ws.length > 1).flatMap(([repo, ws]) => {
+    const path = projectOf(ws[0]).path;
+    const base = remoteDefault(path) ?? 'HEAD';
+    const branch = (n: string) => ws.find(w => w.name === n)!.branch;
+    // Branches sharing commits that are not on the default branch are a parent and its stacked child.
+    const stacked = (a: string, b: string) => {
+      const mb = spawnSync('git', ['-C', path, 'merge-base', branch(a), branch(b)], { encoding: 'utf8' }).stdout.trim();
+      return !!mb && !ok(path, 'merge-base', '--is-ancestor', mb, base);
+    };
+    return overlaps(repo, ws.map((w): Touch => ({ name: w.name, started: w.started, files: touched(w, base), pair: w.pair })), stacked);
+  });
+  if (fresh) {
+    const file = join(root, 'overlap.json');
+    const r = newOverlaps(found, JSON.parse(read('overlap.json', '{}')) as OverlapSeen, only);
+    writeFileSync(file, JSON.stringify(r.seen, null, 2) + '\n');
+    for (const l of r.lines) console.log(l);
+    return;
+  }
+  console.log(found.length ? found.map(overlapLine).join('\n') : 'no overlap');
 }
 
 function workers() {
@@ -488,6 +529,8 @@ function postReview([repoArg, n, file, ...args]: string[]) {
   console.log(`review ${approve ? 'approved' : 'posted'} on #${n}`);
 }
 
+const ok = (cwd: string, ...args: string[]) => spawnSync('git', ['-C', cwd, ...args]).status === 0;
+
 // Never forced: a rejected push comes back as an error for a decision.
 function push([name, ...args]: string[]) {
   if (!name) die(`usage: orch push <worker> ${OUTWARD}`);
@@ -515,18 +558,38 @@ function openPr([name, ...args]: string[]) {
   console.log(url);
 }
 
-// Squash-merges once nothing blocks it. Never --admin: branch protection always wins.
+// Squash-merges once nothing blocks it. Never --admin: branch protection always wins. A PR behind its base is refused, not
+// rebased here: its worker rebases and reruns its gates, so what merges was tested on top of the current base.
 function merge([repoArg, n, ...args]: string[]) {
   if (!repoArg || !n) die(`usage: orch merge <repo> <pr> ${OUTWARD}`);
   const by = allowed('merge', args);
   const p = project(repoArg);
   const pr = n.replace('#', '');
-  const state: PrState = JSON.parse(gh(p.path, 'pr', 'view', pr, '--json', 'isDraft,mergeable,reviewDecision,statusCheckRollup'));
+  const state: PrState & { headRefName: string; baseRefName: string; headRefOid: string } =
+    JSON.parse(gh(p.path, 'pr', 'view', pr, '--json', 'isDraft,mergeable,reviewDecision,statusCheckRollup,headRefName,baseRefName,headRefOid'));
+  const behind = commitsBehind(p.path, pr, state.baseRefName, state.headRefOid);
+  if (behind) {
+    const w = loadWorkers().find(x => x.status === 'running' && x.repo === p.repo && (x.prHead ?? x.branch) === state.headRefName);
+    const what = `#${pr} is ${behind} commit${behind === 1 ? '' : 's'} behind ${state.baseRefName}`;
+    log(`merge ${p.repo} #${pr} refused: ${what}`);
+    die(`not merged: ${what}. ${w && !w.prHead
+      ? `Steer ${w.name} to rebase onto origin/${state.baseRefName} and rerun its gates; pushing the rewritten branch needs a force push, a decision for the user.`
+      : 'Ask its author to update it.'}`);
+  }
   const blocker = mergeBlocker(state);
   if (blocker) die(`not merged: #${pr} ${blocker}`);
-  gh(p.path, 'pr', 'merge', pr, '--squash');
-  log(`merge ${p.repo} #${pr} (${by}): squash-merged`);
+  // The head checked above is the one merged; a push in between makes GitHub refuse.
+  gh(p.path, 'pr', 'merge', pr, '--squash', '--match-head-commit', state.headRefOid);
+  log(`merge ${p.repo} #${pr} (${by}): squash-merged ${state.headRefOid.slice(0, 8)}`);
   console.log(`merged #${pr}`);
+}
+
+// Commits on the PR's base that its head lacks, from a fresh fetch. A head from a fork is fetched by its PR ref.
+function commitsBehind(path: string, pr: string, base: string, head: string): number {
+  const fail = (why: string) => die(`not merged: ${why}, so #${pr} could not be checked against ${base}`);
+  if (!ok(path, 'fetch', '-q', 'origin')) fail(`git fetch origin failed in ${path}`);
+  if (!ok(path, 'cat-file', '-e', `${head}^{commit}`) && !ok(path, 'fetch', '-q', 'origin', `refs/pull/${pr}/head`)) fail(`its head ${head.slice(0, 8)} could not be fetched`);
+  return Number(git(path, 'rev-list', '--count', `${head}..origin/${base}`).trim());
 }
 
 // Routines: routines/<name>.md, due ones started by `tick`, which launchd runs every minute (npm run setup installs it).
@@ -685,5 +748,5 @@ async function idea(args: string[]) {
 }
 
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, routine, tick, idea };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

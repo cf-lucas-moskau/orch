@@ -38,6 +38,8 @@ Screenshots are evidence only after review. Every brief tells the worker to look
 
 When a worker reports done, orch runs its gates (`orch gates <name>`). Pass: FYI to the user, plan task marked done, then push and merge as Autonomy allows; whatever it doesn't allow becomes a decision. Fail: steer the worker once with the failing output; a second failure is needs the user.
 
+Workers on one repo must not collide at merge time. The watcher reports pairs that change the same files (`OVERLAP`, FYI); orch steers the later worker to rebase early and stay out of the other's way, and files a decision when both rewrite the same code. Every brief tells workers to rebase onto the latest default branch before their final test run. orch never rebases a branch itself: `orch merge` refuses a PR behind its base, and orch steers the worker to rebase and rerun its gates; the force push of the rebased branch is a decision. A colleague's PR behind its base is the author's to update.
+
 Cleanup after the work is merged or abandoned. `orch cleanup` refuses a worktree with uncommitted changes or commits on no other branch; abandoning those needs a decision, then `--abandon`.
 
 ## Claude, Codex and pairs

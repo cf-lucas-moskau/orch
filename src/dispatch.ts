@@ -170,7 +170,8 @@ export function cleanupBlocker(porcelain: string, unpushed: string): string | nu
 // only typed, which is what orch's prompt is. Codex has no pstack.
 export const SERIOUS = '/pstack:poteto-mode';
 
-export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch'>): string {
+// rebase: off for a colleague's PR branch and a stacked worker, whose base is not the default branch.
+export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch'>, rebase = true): string {
   const gates = p.gates.length ? p.gates.map(g => `\`${g}\``).join(', ') : 'none registered; run the repo\'s own tests';
   return [
     `# Brief for worker ${w.name}`, '',
@@ -182,11 +183,14 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Commit rule: leave your changes uncommitted; orch runs the gates and commits them on this branch. Never push, merge, open PRs, reply on GitHub, deploy or touch databases; stop and ask instead. These rules override any playbook step that commits, pushes or opens a PR.`,
     // Questions that stay in scope cost Lucas a round trip; settle them in the worker.
     `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
-    `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done. Stop processes by PID, never by name pattern; other workers run on the same machine.`,
+    // Anonymous Postgres volumes left by workers filled 20 GB of Docker in the week of 2026-10-26.
+    `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done, with their volumes (\`docker run --rm\`, or \`docker rm -f -v <name>\`, \`docker compose down -v\`). Stop processes by PID, never by name pattern; other workers run on the same machine.`,
     // Lucas found a flaw in almost every screenshot workers presented as proof (2026-10-24).
     `Screenshots: before you report or show one, open it and review it critically as a player would. List every flaw you see (misplaced UI, clipping, a character standing where it can't, seams, wrong labels) and fix it or name it. Never present a screenshot as proof without that review.`,
     // Auto mode stops on rm with globs or variables (b3, ew2 on 2026-10-26); nobody is there to approve it.
     `Deleting files: never rm with a glob or an unquoted variable; it stops on a permission prompt nobody answers. Write literal paths, or use find <dir> -mindepth 1 -delete, or write to a fresh folder instead.`,
+    // Parallel workers on one repo collide at merge time; rebasing before the last test run catches it while it is cheap.
+    ...rebase ? [`Other workers: before the final test run, rebase onto the latest default branch (\`git fetch origin\` then \`git rebase --autostash origin/<default>\`; your changes stay uncommitted) and rerun the tests. If orch tells you another worker changes the same files, rebase early and keep your change out of their way; mention any such overlap in your report.`] : [],
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
@@ -241,3 +245,38 @@ export function parseAutonomy(...texts: string[]): Set<Autonomous> {
 // A prompt that reached the pane before Claude's input took over shows up as raw bracketed-paste codes on screen
 // (idea-2 and idea-3 on 2026-10-31): the worker never got its task even when herdr reports it working.
 export const isGarbledPrompt = (screen: string) => /\^\[\[20[01]~|\x1b\[20[01]~/.test(screen);
+
+// Two workers on one repo changing the same files collide at merge time; found early, the later one rebases or coordinates.
+// A Claude/Codex pair works the same task on purpose, and a stacked child carries its parent's changes; neither is a collision.
+export type Touch = { name: string; started: string; files: string[]; pair?: string };
+export type Overlap = { repo: string; earlier: string; later: string; files: string[] };
+export function overlaps(repo: string, ts: Touch[], stacked: (a: string, b: string) => boolean = () => false): Overlap[] {
+  const sorted = [...ts].sort((a, b) => a.started.localeCompare(b.started) || a.name.localeCompare(b.name));
+  const out: Overlap[] = [];
+  for (let i = 0; i < sorted.length; i++) for (let j = i + 1; j < sorted.length; j++) {
+    if ((sorted[i].pair && sorted[i].pair === sorted[j].pair) || stacked(sorted[i].name, sorted[j].name)) continue;
+    const theirs = new Set(sorted[i].files);
+    const files = [...new Set(sorted[j].files)].filter(f => theirs.has(f)).sort();
+    if (files.length) out.push({ repo, earlier: sorted[i].name, later: sorted[j].name, files });
+  }
+  return out;
+}
+
+const listFiles = (fs: string[], n = 8) => fs.slice(0, n).join(', ') + (fs.length > n ? ` and ${fs.length - n} more` : '');
+export const overlapLine = (o: Overlap) =>
+  `OVERLAP ${o.repo}: ${o.later} (later) and ${o.earlier} both change ${o.files.length} file${o.files.length === 1 ? '' : 's'}: ${listFiles(o.files)}`;
+
+// What the watcher reports: a pair once, and again only when files join it. Pairs that stop overlapping are forgotten;
+// with `only`, just that repo was scanned, so other repos' pairs are kept as they were.
+export type OverlapSeen = Record<string, string[]>;
+export function newOverlaps(os: Overlap[], seen: OverlapSeen, only?: string): { lines: string[]; seen: OverlapSeen } {
+  const next: OverlapSeen = only ? Object.fromEntries(Object.entries(seen).filter(([k]) => k.split(' ')[0] !== only)) : {};
+  const lines: string[] = [];
+  for (const o of os) {
+    const key = `${o.repo} ${o.earlier} ${o.later}`;
+    const before = new Set(seen[key] ?? []);
+    if (o.files.some(f => !before.has(f))) lines.push(overlapLine(o));
+    next[key] = o.files;
+  }
+  return { lines, seen: next };
+}
