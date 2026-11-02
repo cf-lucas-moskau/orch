@@ -54,6 +54,8 @@ Workers never commit (orch commits after the gates pass, and Codex's sandbox kee
 
 `orch review` runs Claude and Codex on the same diff. Findings both report count as confirmed; single-model findings are verified against the code before they reach the user.
 
+Review rounds converge or stop. After the second fix round, merge when nothing blocking is left and no medium touches correctness, money, data or security; the rest becomes its own small follow-up worker. When a third round finds a new edge case in the same spot, the approach is wrong, not the last fix: simplify it (let the server decide, drop the client-side guess) instead of patching again. (Lucas, 2026-11-02, after the arena accept screen took five rounds.)
+
 ## Serious work runs in poteto-mode
 
 Claude workers start in pstack's poteto-mode (`/pstack:poteto-mode`): every worker does real engineering work, and poteto-mode picks the playbook (bug fix, feature, refactoring, babysit) and holds it to verification. orch's worker rules (no commits, no pushes, no PRs) override any playbook step. poteto-mode can only be typed, never invoked by a model, so the first line orch sends a worker starts with it and stays one line; the brief is a file. When orch relays a new substantial task into one of the user's own sessions, it starts the message with `/pstack:poteto-mode` the same way. Questions, status checks and one-line answers go without it. Codex has no pstack.
