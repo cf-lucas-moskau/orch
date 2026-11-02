@@ -1366,17 +1366,23 @@ test('thread names lead with the idea id and stay within 100 characters', () => 
   assert.equal(labelName('I-1', 'I-17 · Bats'), 'I-1 · I-17 · Bats', 'another id is not this one');
 });
 
-test('idea mentions link to their threads, except in code, when already linked, unknown or the idea itself', () => {
+test('idea mentions link word by word: only a bare id with a thread, outside fences', () => {
   const ideas = [{ id: 'I-1', thread: '111' }, { id: 'I-17', thread: '1717' }, { id: 'I-5', thread: '' }];
-  assert.equal(linkIdeas('Like I-17, and I-1.', ideas), 'Like I-17 (<#1717>), and I-1 (<#111>).');
-  assert.equal(linkIdeas('I-17 (<#1717>) again: I-17', ideas), 'I-17 (<#1717>) again: I-17 (<#1717>)');
-  assert.equal(linkIdeas('I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2', ideas), 'I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2');
-  assert.equal(linkIdeas('see `I-17` and\n```\nI-1\n```\nthen I-1', ideas), 'see `I-17` and\n```\nI-1\n```\nthen I-1 (<#111>)');
-  assert.equal(linkIdeas('this is I-17, close to I-1', ideas, 'I-17'), 'this is I-17, close to I-1 (<#111>)');
-  assert.equal(linkIdeas('see https://x/ideas/I-17/details and www.x.io/I-1, then I-1', ideas), 'see https://x/ideas/I-17/details and www.x.io/I-1, then I-1 (<#111>)');
-  assert.equal(linkIdeas('[the I-17 page](https://x/I-17) and [notes](ideas/I-1.md)', ideas), '[the I-17 page](https://x/I-17) and [notes](ideas/I-1.md)');
-  assert.equal(linkIdeas('``I-17 has a ` in it`` and ```I-1``` and `` I-1 ``, I-17', ideas), '``I-17 has a ` in it`` and ```I-1``` and `` I-1 ``, I-17 (<#1717>)');
-  assert.equal(linkIdeas('an open ` tick, I-1', ideas), 'an open ` tick, I-1 (<#111>)');
+  const link = (text: string, self?: string) => linkIdeas(text, ideas, self);
+  assert.equal(link('Like I-17 and I-1 here'), 'Like I-17 (<#1717>) and I-1 (<#111>) here', 'plain mention');
+  assert.equal(link('Same as I-1. Or I-17, or (see I-1) I-17?!'), 'Same as I-1 (<#111>). Or I-17 (<#1717>), or (see I-1 (<#111>)) I-17 (<#1717>)?!', 'end of sentence');
+  assert.equal(link('see https://x/ideas/I-17/details and www.x.io/I-1 or x:/I-1'), 'see https://x/ideas/I-17/details and www.x.io/I-1 or x:/I-1', 'URL');
+  assert.equal(link('[I-17](https://x/I-17) and [I-1]'), '[I-17](https://x/I-17) and [I-1]', 'Markdown link');
+  assert.equal(link('see `I-17` and ``I-1`` and `I-1'), 'see `I-17` and ``I-1`` and `I-1', 'backticks');
+  assert.equal(link('before I-1\n```ts\nI-1 and I-17\n  ```\nafter I-17'), 'before I-1 (<#111>)\n```ts\nI-1 and I-17\n  ```\nafter I-17 (<#1717>)', 'fence');
+  assert.equal(link('I-17 (<#1717>) again: I-17'), 'I-17 (<#1717>) again: I-17 (<#1717>)', 'already linked');
+  assert.equal(link('I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2 and <#I-1'), 'I-99 and I-5 and II-17 and I-170 and idea-17 and I-17-2 and <#I-1', 'unknown or not an id');
+  assert.equal(link('this is I-17, close to I-1', 'I-17'), 'this is I-17, close to I-1 (<#111>)', 'the idea itself');
+  assert.equal(link('one\n\n  I-1  two'), 'one\n\n  I-1 (<#111>)  two', 'whitespace kept');
+  const run = 'x ' + '`'.repeat(10_000) + ' I-1 ' + '`'.repeat(10_000);
+  const t0 = performance.now();
+  assert.equal(link(run), 'x ' + '`'.repeat(10_000) + ' I-1 (<#111>) ' + '`'.repeat(10_000));
+  assert.ok(performance.now() - t0 < 50, 'a 10k backtick run is fast');
 });
 
 test('end to end on mocks: every post in a thread links the other ideas it names', async () => {

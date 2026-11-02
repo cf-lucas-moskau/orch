@@ -202,13 +202,25 @@ export const labelled = (id: string, name: string) => name.startsWith(label(id))
 export const labelName = (id: string, name: string) => labelled(id, name) ? name : (label(id) + name.trim()).slice(0, NAME_MAX).trim();
 export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
 
-// Idea ids in orch's posts become links to their threads: I-17 reads I-17 (<#thread>). The idea's own id, ids without
-// a thread, ids inside code (any number of backticks), URLs, Markdown links, and ids already linked stay
-// as they are. The kept spans match first, so an id inside one is never seen on its own.
-const LINKABLE = /(`+)[\s\S]*?(?<!`)\1(?!`)|\b(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)\S+|\[[^\]\n]*\]\([^)\s]*\)|\b(I-\d+)\b(?!-\d)(?! \(<#[^>\s]+>\))/g;
+// Idea ids in orch's posts become links to their threads: I-17 reads I-17 (<#thread>). Word by word, no Markdown
+// parsing: a word is linked only when, without trailing .,;:!?) it is exactly an id, so ids in code, URLs, paths and
+// links (any word with a backtick, slash, bracket or paren around the id) stay. Lines inside a ``` fence, the idea's
+// own id, ids without a thread and ids already followed by (<# stay too.
+const TRAILING = /[.,;:!?)]+$/;
+const ID = /^I-\d+$/;
 export function linkIdeas(text: string, ideas: Pick<Idea, 'id' | 'thread'>[], self?: string): string {
   const thread = new Map(ideas.filter(i => i.thread && i.id !== self).map(i => [i.id, i.thread]));
-  return text.replace(LINKABLE, (all, _ticks, id?: string) => id && thread.has(id) ? `${id} (<#${thread.get(id)}>)` : all);
+  let fenced = false;
+  return text.split('\n').map(line => {
+    if (line.trimStart().startsWith('```')) { fenced = !fenced; return line; }
+    if (fenced) return line;
+    const words = line.split(/(\s+)/);
+    return words.map((w, n) => {
+      const id = w.replace(TRAILING, '');
+      if (!ID.test(id) || !thread.has(id) || words[n + 2]?.startsWith('(<#')) return w;
+      return `${id} (<#${thread.get(id)}>)${w.slice(id.length)}`;
+    }).join('');
+  }).join('\n');
 }
 
 // One line for orch's watcher. The text is untrusted; orch reads it as data.
