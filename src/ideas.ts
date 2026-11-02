@@ -125,11 +125,13 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
 // Ideas build only on the Evrloot game, whatever ideas/config.json says.
 export const IDEA_REPOS = ['evrloot-next'];
 
-export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boolean): string | null {
+// live: the worker names still running. An idea that is merged and only waits for its deploy has no live worker and
+// holds no slot; only ideas still being built count toward the limit (I-7, I-8, I-10 blocked every start on 2026-11-02).
+export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boolean, live?: Set<string>): string | null {
   if (off) return 'the idea bridge is off (ideas/off); turn it on first';
   if (!IDEA_REPOS.includes(config.repo)) return `ideas build only on ${IDEA_REPOS.join(', ')}, not ${config.repo}`;
   if (idea.state !== 'approved' || !idea.plan) return `${idea.id} is ${idea.state}; start needs a plan with a go`;
-  const busy = ideas.filter(i => i.state === 'building' && i.id !== idea.id);
+  const busy = ideas.filter(i => i.state === 'building' && i.id !== idea.id && (!live || (!!i.worker && live.has(i.worker))));
   if (busy.length >= config.building) return `${busy.map(i => i.id).join(', ')} already building (limit ${config.building})`;
   return null;
 }

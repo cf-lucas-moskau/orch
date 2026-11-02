@@ -1106,3 +1106,9 @@ test('ship carries the newest unposted note media and marks every note posted', 
   assert.deepEqual(out.files, ['live.png']);
   assert.deepEqual(loadIdeas(w.root)[0].notesSeen, [noteKey(LATER(1), 'Taken live.')]);
 });
+
+test('an idea waiting only for its deploy holds no building slot', () => {
+  const a = { ...base, state: 'approved' as const, plan: 'p' }, b = { ...base, id: 'I-2', state: 'building' as const, worker: 'idea-2' };
+  assert.equal(startBlocker(a, [a, b], config, false, new Set(['idea-2'])), 'I-2 already building (limit 1)');
+  assert.equal(startBlocker(a, [a, b], config, false, new Set()), null, 'worker cleaned up after merge: the slot is free');
+});

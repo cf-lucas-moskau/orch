@@ -302,7 +302,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const building = locked(d.root, () => {
       const fresh = loadIdeas(d.root, d.log);
       const me = fresh.find(i => i.id === id)!;
-      const blocker = startBlocker(me, fresh, config, isOff(d.root));
+      const blocker = startBlocker(me, fresh, config, isOff(d.root), new Set(workers(d.root).filter(w => w.status === 'running').map(w => w.name)));
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
