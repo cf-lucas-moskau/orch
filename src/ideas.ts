@@ -195,7 +195,35 @@ export function workerName(id: string, taken: string[]): string {
 export const planPost = (plan: string) => `**Plan**\n\n${plan.trim()}\n\nReply **go** to build it.`;
 export const startPost = () => 'Building it now. I will post here when it is live.';
 export const shipPost = (changelog: string, url: string) => `**Shipped**\n\n${changelog.trim()}\n\nLive on ${url}, please try it.`;
-export const threadName = (text: string) => (text.split('\n')[0].slice(0, 90).trim() || 'idea');
+// Discord caps thread names at 100 characters; the id leads, so threads are easy to tell apart.
+const NAME_MAX = 100;
+const label = (id: string) => `${id} · `;
+export const labelled = (id: string, name: string) => name.startsWith(label(id));
+export const labelName = (id: string, name: string) => labelled(id, name) ? name : (label(id) + name.trim()).slice(0, NAME_MAX).trim();
+export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
+
+// The idea ids a text names, in order of first mention: I- and digits with no letter or digit right before or after.
+// One pass over the text, no regex.
+const alnum = (c: string | undefined) => !!c && /^[A-Za-z0-9]$/.test(c);
+const digit = (c: string | undefined) => !!c && c >= '0' && c <= '9';
+export function mentionedIds(text: string): string[] {
+  const ids = new Set<string>();
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== 'I' || text[i + 1] !== '-' || alnum(text[i - 1])) continue;
+    let j = i + 2;
+    while (digit(text[j])) j++;
+    if (j > i + 2 && !alnum(text[j])) ids.add(text.slice(i, j));
+    i = j - 1;
+  }
+  return [...ids];
+}
+
+// The body goes out exactly as written; the other ideas it names that have a thread are linked in one footer line.
+export function withRelated(text: string, ideas: Pick<Idea, 'id' | 'thread'>[], self?: string): string {
+  const thread = new Map(ideas.filter(i => i.thread && i.id !== self).map(i => [i.id, i.thread]));
+  const related = mentionedIds(text).filter(id => thread.has(id)).map(id => `${id} <#${thread.get(id)}>`);
+  return related.length ? `${text}\n\nRelated: ${related.join(' · ')}` : text;
+}
 
 // One line for orch's watcher. The text is untrusted; orch reads it as data.
 export const ideaLine = (id: string, kind: string, author: string, text: string) =>

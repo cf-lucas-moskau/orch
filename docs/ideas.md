@@ -1,6 +1,6 @@
 # Idea bridge
 
-The old Evrloot team posts ideas in a Discord channel. The bridge (`src/ideas-run.ts`) opens a thread on each post and turns every message into a watcher line, `IDEA <id> <kind> <author>: <text>`. orch does the thinking and answers with `orch idea` commands. The `orch-ideas` skill has the rules orch follows in a thread.
+The old Evrloot team posts ideas in a Discord channel. The bridge (`src/ideas-run.ts`) opens a thread on each post, named `I-<n> · <first line of the post>` (at most 100 characters) and turns every message into a watcher line, `IDEA <id> <kind> <author>: <text>`. orch does the thinking and answers with `orch idea` commands. The `orch-ideas` skill has the rules orch follows in a thread.
 
 It runs on mocks until the bot exists: `ideas/mock/inbox.jsonl` stands in for the channel, `ideas/mock/outbox.jsonl` holds everything posted back.
 
@@ -20,7 +20,10 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
 | `record <id> <file\|text>` | Add a line to the idea's dossier without posting anything: the merged PR, gate and review results, the live check, a short summary of the worker's final report, known limits. |
 | `close <id> [reason] [--force]` | Dropped, merged into another idea, or done on request. A building idea needs its worker cleaned up first, or `--force`. |
+| `relabel` | One-off: put the id in front of every idea thread still named the old way (`Bats drop loot` becomes `I-3 · Bats drop loot`). Threads already labelled are skipped, every rename is logged, renames go one at a time 2 seconds apart, an archived thread is unarchived for the rename and archived again even when the rename fails, a rename that fails is logged and skipped, and a rename whose re-archive fails is logged and counted on its own as "renamed but left unarchived". Safe to run again, but a rerun does not re-archive those threads: they already carry their id, so it skips them. Discord archives them again by itself after 7 days without a message. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
+
+Everything orch posts in a thread (`say`, `ask`, `plan`, `ship`, `close`, question timeouts, progress notes) goes out exactly as written, with one footer line after a blank line that links the other ideas it names: `Related: I-17 <#thread> · I-14 <#thread>`, which Discord shows as links to their threads. An id is `I-` and digits with no letter or digit right before or after it, wherever it stands (code and links included); each one is listed once, in order of first mention. The idea's own id and ids with no thread are left out, and a post that names none gets no footer. The stored text has no footer.
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
 
