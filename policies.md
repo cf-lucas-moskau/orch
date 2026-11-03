@@ -81,6 +81,8 @@ When on, each still has a bar:
 
 Every autonomous action is logged and listed in the next brief, never pushed as a notification. Deploys, DB writes, force pushes, money, Slack, email, Jira and permission prompts stay needs the user regardless. A merge or push that fails twice becomes a decision.
 
+Recurring permission blocks get fixed at the root. When a permission prompt or the auto-mode classifier blocks the same kind of action a second time, for orch or any worker, stop relaying single prompts: find the cause and file one decision with one permanent fix (an allow rule in settings, a command shape that passes the classifier, or a rule in the worker brief), ready for the user to accept. orch still never answers a dialog for a session, and a fix never widens what Autonomy allows.
+
 ## Learning
 
 The nightly reflect job only proposes. orch applies an item after the user approves it and logs it. Auto-apply per category, all off until the user switches one on:
