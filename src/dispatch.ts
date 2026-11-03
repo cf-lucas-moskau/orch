@@ -247,6 +247,21 @@ export function parseAutonomy(...texts: string[]): Set<Autonomous> {
 // (idea-2 and idea-3 on 2026-10-31): the worker never got its task even when herdr reports it working.
 export const isGarbledPrompt = (screen: string) => /\^\[\[20[01]~|\x1b\[20[01]~/.test(screen);
 
+// Did a submitted prompt reach the agent? One sample every 2 s after the paste: herdr's status, the screen (with ANSI
+// codes) and the text left in the input box. herdr can say working while the paste sits on screen as raw codes and
+// the agent never starts (idea-28 and idea-25-2 on 2026-11-03), and the codes can show up a few seconds late, so a
+// prompt counts as landed only after 6 s, with no raw codes on any sample, an empty input box and a busy agent on the
+// last two samples.
+export type PromptSample = { status?: string; screen: string; draft: string | null };
+export type PromptVerdict = 'landed' | 'garbled' | 'pending' | 'idle';
+const BUSY = ['working', 'blocked', 'done'];
+export function promptVerdict(samples: PromptSample[], max = 10): PromptVerdict {
+  if (samples.some(x => isGarbledPrompt(x.screen))) return 'garbled';
+  const last2 = samples.slice(-2);
+  if (samples.length >= 3 && last2.every(x => BUSY.includes(x.status ?? '') && !x.draft)) return 'landed';
+  return samples.length >= max ? 'idle' : 'pending';
+}
+
 // Two workers on one repo changing the same files collide at merge time; found early, the later one merges the default branch in or coordinates.
 // A Claude/Codex pair works the same task on purpose, and a stacked child (started on its parent's branch head) carries its
 // parent's changes, as does a grandchild; neither is a collision.

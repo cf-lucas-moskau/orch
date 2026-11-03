@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { potetoLine, isGarbledPrompt, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { potetoLine, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -80,27 +80,43 @@ const worker = (name: string) => loadWorkers().find(w => w.name === name && w.st
 // Submit and confirm the session picked it up, without waiting for the whole turn.
 // A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28):
 // clear the input line and send it once more before giving up.
-function submit(target: string, text: string) {
+// Pastes the prompt and watches it land (promptVerdict). Returns the agent's status, or the reason it did not land.
+function trySubmit(target: string, text: string): { status: string } | { failed: string } {
   const send = () => herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
-  let r = send();
+  const r = send();
   // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter: the text sits in
   // the box. Press Enter once more instead of pasting again; a second paste on top garbled idea-2/3/4/followups.
   if (r.error?.code === 'agent_prompt_stalled') {
     spawnSync('sleep', ['2']);
     herdr('agent', 'send-keys', target, 'enter');
-    r = { result: { agent: { agent_status: 'unknown' } } } as typeof r;
-  }
-  if (r.error) die(`prompt to ${target} failed: ${r.error.code} ${r.error.message}`);
-  // herdr can report working while the pasted prompt sits on screen as raw codes and the agent is idle (idea-2, idea-3,
-  // idea-4 on 2026-10-31 and 11-01). Watch for 20 s: garbled or never working means the agent did not get it.
-  for (let i = 0; i < 10; i++) {
+  } else if (r.error) return { failed: `${r.error.code} ${r.error.message}` };
+  const samples: PromptSample[] = [];
+  for (;;) {
     spawnSync('sleep', ['2']);
-    const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible'], { encoding: 'utf8' }).stdout;
-    if (isGarbledPrompt(screen)) die(`prompt to ${target} arrived garbled (raw paste codes on screen); the agent did not get it. Clean up the worker and run it again.`);
+    const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible', '--ansi'], { encoding: 'utf8' }).stdout ?? '';
     const status = herdr('agent', 'get', target).result?.agent?.agent_status;
-    if (['working', 'blocked', 'done'].includes(status)) return status as string;
+    samples.push({ status, screen, draft: inputDraft(screen) });
+    const v = promptVerdict(samples);
+    if (v === 'landed') return { status };
+    if (v === 'garbled') return { failed: 'it arrived garbled (raw paste codes on screen)' };
+    if (v === 'idle') return { failed: 'the agent never picked it up (idle or the text still in the input box after 20 s)' };
   }
-  die(`prompt to ${target} was not picked up: the agent stayed idle for 20 s. Read the pane; clean up and run again if it never started.`);
+}
+
+function submit(target: string, text: string) {
+  const r = trySubmit(target, text);
+  if ('failed' in r) die(`prompt to ${target} did not land: ${r.failed}. Read the pane; clean up and run again if it never started.`);
+  return r.status;
+}
+
+// Quits the agent in a pane and starts it again, for a first prompt that did not land. Ctrl+C clears the box, a second
+// one quits Claude; the shell prompt is back once herdr no longer sees an agent there.
+function relaunch(name: string, kind: Kind, pane: string) {
+  herdr('agent', 'send-keys', name, 'ctrl+c'); spawnSync('sleep', ['1']);
+  herdr('agent', 'send-keys', name, 'ctrl+c');
+  for (let i = 0; i < 15 && herdr('agent', 'get', name).result?.agent?.agent_status; i++) spawnSync('sleep', ['1']);
+  const started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000');
+  return started.error ? started : waitReady(name);
 }
 
 // herdr reports ready a moment before Claude's input box takes pastes, also after the trust dialog.
@@ -209,7 +225,24 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives.
   herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
   herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
-  const status = submit(name, workerPrompt(brief));
+  const prompt = workerPrompt(brief);
+  let sent = trySubmit(name, prompt);
+  // One fresh start when the first prompt did not land: idea-28 and idea-25-2 sat idle for hours with it garbled.
+  if ('failed' in sent && kind !== 'codex') {
+    log(`run ${name}: first prompt did not land (${sent.failed}); restarting the agent in ${pane} and sending it again`);
+    const again = relaunch(name, kind, pane);
+    if (!again.error) {
+      saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, sid: herdr('agent', 'get', name).result?.agent?.agent_session?.value ?? w.sid } : w));
+      herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
+      herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+      sent = trySubmit(name, prompt);
+    }
+  }
+  if ('failed' in sent) {
+    log(`run ${name} on ${p.repo}: the brief never reached the agent (${sent.failed}), pane ${pane}. Needs a decision.`);
+    die(`worker ${name} never got its brief: ${sent.failed}. Read pane ${pane}, then clean up and run it again.`);
+  }
+  const status = sent.status;
   log(`run ${name} (${kind}${extra.pair ? `, pair ${extra.pair}` : ''}) on ${p.repo} (${branch}, pane ${pane}): ${task.slice(0, 120)}`);
   console.log(`${name} (${kind}) ${status} in ${pane}, worktree ${path}`);
 }

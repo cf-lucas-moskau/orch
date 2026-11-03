@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isGarbledPrompt, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { isGarbledPrompt, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -222,3 +222,18 @@ test('overlap leaves out a Claude/Codex pair and a stack of parent, child and gr
   assert.deepEqual(overlaps('r', [t('a', '1', { parent: 'b' }), t('b', '2', { parent: 'a' })]), [], 'a parent cycle ends');
 });
 
+
+test('a prompt counts as landed only after 6 s busy with an empty box and no raw paste codes', () => {
+  const busy = { status: 'working', screen: '⏺ Reading the brief\n❯ ', draft: '' };
+  const idle = { status: 'idle', screen: '❯ ', draft: '' };
+  const raw = { status: 'working', screen: '❯ Read brief.md\n^[[200~Read brief.md^[[201~', draft: 'Read brief.md' };
+  assert.equal(promptVerdict([busy]), 'pending');
+  assert.equal(promptVerdict([busy, busy]), 'pending', 'herdr says working early; wait for late raw codes');
+  assert.equal(promptVerdict([busy, busy, busy]), 'landed');
+  assert.equal(promptVerdict([busy, busy, raw]), 'garbled', 'codes that show up late still fail it (idea-28, 2026-11-03)');
+  assert.equal(promptVerdict([busy, busy, { ...busy, draft: 'Read brief.md' }]), 'pending', 'text still in the box has not been sent');
+  assert.equal(promptVerdict([idle, idle, idle]), 'pending');
+  assert.equal(promptVerdict(Array(10).fill(idle)), 'idle');
+  assert.equal(promptVerdict([idle, { ...busy, status: 'done' }, busy]), 'landed');
+  assert.equal(promptVerdict([busy, busy, { ...busy, draft: null }]), 'landed', 'no input box drawn while it works');
+});
