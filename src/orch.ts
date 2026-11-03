@@ -29,7 +29,7 @@ function herdr(...args: string[]): any {
   try { return JSON.parse(out); } catch { return { error: { code: 'unparsed', message: out } }; }
 }
 const git = (cwd: string, ...args: string[]) => {
-  try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); }
+  try { return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1 << 26 }); }
   catch (e: any) { return die(`git ${args.join(' ')} failed in ${cwd}: ${e.stderr ?? e.message}`); }
 };
 const ok = (cwd: string, ...args: string[]) => spawnSync('git', ['-C', cwd, ...args]).status === 0;
