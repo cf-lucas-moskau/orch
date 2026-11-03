@@ -24,6 +24,7 @@ export const FINDINGS_SCHEMA = {
 export function reviewPrompt(o: { repo: string; base: string; head: string; diff: string }): string {
   return `Review this change to ${o.repo} (${o.base}..${o.head}). The checkout is at the new version; read surrounding code where the diff alone is not enough.
 Report correctness bugs, security problems, data loss, broken contracts and missing tests for risky paths. Skip style and naming.
+Also report performance regressions you can see in the code, without benchmarking: work per frame or per render that grows with the world or the item count, listeners, timers, textures or caches that are never released, unbounded arrays and maps, repeated fetches or full re-renders on every tick, large assets loaded eagerly. Name what grows or leaks and when a player would feel it.
 Severity: blocking = must not merge; medium = should be fixed before merge; minor = optional.
 Each finding names the file path as in the diff, the line in the new version (null if not line-specific), a one-line title and a why with the concrete failure scenario.
 Answer with JSON only, no prose and no code fence: {"findings": [{"file": "...", "line": 12, "severity": "medium", "title": "...", "why": "..."}]}. An empty list is a valid answer.
