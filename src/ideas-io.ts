@@ -6,7 +6,7 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueQuestions, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
@@ -377,9 +377,9 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     // From shipped, check starts the next round.
     update(d.root, id, i => ({ ...check('plan', i), state: 'talk', plan: undefined, goBy: undefined }));
     const sentAt = clock();
-    await postIn(d.root, chat(), cur, planPost(text));
+    await postIn(d.root, chat(), cur, planPost(text, cur.author.id), { ping: cur.author.id });
     // A go counts only for the version that was on screen; planAt is taken once the post is up.
-    update(d.root, id, i => answered(entry({ ...check('plan', i), plan: text, planVersion: (i.planVersion ?? 0) + 1, planAt: clock() }, 'plan', `v${(i.planVersion ?? 0) + 1}\n\n${text}`, now), planPost(text), sentAt));
+    update(d.root, id, i => answered(entry({ ...check('plan', i), plan: text, planVersion: (i.planVersion ?? 0) + 1, planAt: clock() }, 'plan', `v${(i.planVersion ?? 0) + 1}\n\n${text}`, now), planPost(text, cur.author.id), sentAt));
     d.log(`idea ${id} plan posted: ${text.split('\n')[0].slice(0, 100)}`);
     return `plan posted in ${id}; waiting for go`;
   }
@@ -499,6 +499,16 @@ export async function tick(d: Deps & { chat: Chat }) {
       if (!won) { d.log(`idea ${i.id}: an answer came in while the timeout posted; the answer wins`); continue; }
       feed(d.root, ideaLine(i.id, 'timeout', i.author.name, q.recommend!), now);
       d.log(`idea ${i.id}: no answer in 10 minutes, going with: ${q.recommend!.slice(0, 100)}`);
+    }
+    if (dueGoReminder(i, now) && dueGoReminder(locked(d.root, () => loadIdeas(d.root, d.log).find(x => x.id === i.id)) ?? i, now)) {
+      // Counted once the post is out: a failed post is retried on the next tick.
+      const text = goReminderPost(i.author.id);
+      await postIn(d.root, d.chat, i, text, { ping: i.author.id });
+      update(d.root, i.id, x => {
+        const n = x.goReminders?.v === x.planVersion ? x.goReminders.n : 0;
+        return { ...said('orch', text, now)(x), goReminders: { v: x.planVersion!, n: n + 1 } };
+      });
+      d.log(`idea ${i.id}: plan v${i.planVersion} still waiting for a go, reminded ${i.author.name}`);
     }
     const p = progress(i, readNotes(d.root, i.id), now);
     if (!p) continue;
