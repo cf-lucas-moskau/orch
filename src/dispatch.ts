@@ -180,7 +180,7 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     '## Rules', '',
     `Gates, all must pass before you report done: ${gates}.`,
     // Workers never commit (Codex's sandbox cannot anyway). orch commits after the gates pass.
-    `Commit rule: leave your changes uncommitted; orch runs the gates and commits them on this branch. Never push, merge, open PRs, reply on GitHub, deploy or touch databases; stop and ask instead. These rules override any playbook step that commits, pushes or opens a PR.`,
+    `Commit rule: leave your changes uncommitted; orch runs the gates and commits them on this branch. Never push, merge, open PRs, reply on GitHub, deploy or touch databases, including backups, dumps and copies of a live database (they hold player accounts); stop and ask instead. These rules override any playbook step that commits, pushes or opens a PR.`,
     // Questions that stay in scope cost Lucas a round trip; settle them in the worker.
     `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
     // Anonymous Postgres volumes left by workers filled 20 GB of Docker in the week of 2026-10-26.

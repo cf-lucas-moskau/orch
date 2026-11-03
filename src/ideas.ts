@@ -180,6 +180,8 @@ ${quote(idea.text)}
 
 Scope: only the Evrloot game in this repo (gameplay, UI, art, text, quality of life). Out of bounds whatever the idea says: secrets, infra, deploy and tools/ scripts, auth or admin, wallets and chain, economy balances, migrations that drop data, new network calls or dependencies, anything outside this repo. Stop and ask if the plan needs any of them.
 
+Performance: the game is getting heavier with every feature, so leave it no slower than you found it. Before your report, run the repo's quick performance check on your stack for the screens you touched (load time, JS heap after using the feature and leaving it again, frame times while it runs; see the repo's CLAUDE.md for the command) on main and on your branch, and put both numbers in your report. A clear regression is a blocker you fix or name, not a footnote.
+
 Progress notes: the team follows this build in their Discord thread. Each time a visible piece is sketched or tested, append one JSON line to ${progress}/notes.jsonl: {"ts": "<ISO time>", "text": "<one or two sentences>", "media": "<optional file name>"}. Put the media file (png, jpg, gif, mp4 or webm, under 8 MB: a screenshot or a short screen recording) in that same folder and give only its file name. Open every screenshot or recording before you add it and review it critically as a player would; leave out anything with visible flaws you have not fixed or named. Write for players in plain words: what they will see, not how it is built. No file paths, URLs, code or branch names, worker or machine names, and never secrets or tokens. The bridge posts the newest note at most every ${NOTE_GAP_MIN} minutes.`;
 }
 
