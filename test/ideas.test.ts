@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -139,7 +139,7 @@ test('end to end on mocks: post, talk, plan, go, start, ship', async () => {
   mkdirSync(join(w.root, 'ideas', 'drafts'));
   writeFileSync(join(w.root, 'ideas', 'drafts', 'plan-I-1.md'), 'Bats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.');
   await idea(['plan', 'I-1', 'ideas/drafts/plan-I-1.md'], w.d);
-  assert.equal(w.replies().at(-1), '**Plan**\n\nBats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.\n\nReply **go** to build it.');
+  assert.equal(w.replies().at(-1), '**Plan**\n\nBats in the north cave drop 2x loot.\nNothing else changes.\nTested with a unit test on the drop table.\n\n<@ann> Reply **go** to build it.');
   await assert.rejects(idea(['start', 'I-1'], w.d), /not started: I-1 is planned/);
 
   await w.post('--in', 'I-1', 'go', '--as', 'eve');
@@ -1390,7 +1390,7 @@ test('end to end on mocks: every post in a thread links the other ideas it names
   await idea(['say', 'I-2', 'Same', 'area', 'as', 'I-1,', 'see', '`I-1`.', 'I-2', 'is', 'this', 'one,', 'I-9', 'is', 'unknown.'], w.d);
   assert.equal(w.replies().at(-1), 'Same area as I-1, see `I-1`. I-2 is this one, I-9 is unknown.\n\nRelated: I-1 <#t-m1>');
   await idea(['plan', 'I-2', 'Build on I-1.'], w.d);
-  assert.equal(w.replies().at(-1), '**Plan**\n\nBuild on I-1.\n\nReply **go** to build it.\n\nRelated: I-1 <#t-m1>');
+  assert.equal(w.replies().at(-1), '**Plan**\n\nBuild on I-1.\n\n<@bob> Reply **go** to build it.\n\nRelated: I-1 <#t-m1>');
   assert.equal(loadIdeas(w.root)[1].plan, 'Build on I-1.', 'the stored plan stays plain');
   await idea(['ask', 'I-2', 'Like', 'I-1?', '--recommend', 'Yes,', 'like', 'I-1'], w.d);
   assert.equal(w.replies().at(-1), '<@bob> Like I-1?\n\nMy recommendation: Yes, like I-1\n\nIf I hear nothing in 10 minutes, I\'ll go with that.\n\nRelated: I-1 <#t-m1>');
@@ -1523,4 +1523,41 @@ test('DiscordChat tells a failed re-archive after a good rename apart from a fai
   assert.equal(archive.calls.length, 4);
   const both = stub(b => b.archived === true || !!b.name);
   await assert.rejects(both.chat.renameThread('300', 'I-2 · Boats'), e => !(e instanceof RearchiveFailed) && (e as Error).message === 'Invalid Form Body; re-archive failed too: Missing Access');
+});
+
+test('go reminders: a quiet plan is brought up again, at most three times per plan version', () => {
+  const H = (h: number) => new Date(Date.parse(NOW) + h * 3_600_000).toISOString();
+  const p: Idea = { ...base, state: 'planned', planVersion: 1, planAt: NOW, messages: [{ ts: NOW, by: 'orch', text: 'plan' }] };
+  assert.equal(goReminderPost('42'), '<@42> The plan above is still waiting for a go. Reply **go** to build it, or tell me what to change.');
+  assert.equal(dueGoReminder(p, H(11.9)), false);
+  assert.equal(dueGoReminder(p, H(12)), true);
+  assert.equal(dueGoReminder({ ...p, messages: [...p.messages!, { ts: H(6), by: 'ann', text: 'hmm' }] }, H(12)), false, 'any message restarts the wait');
+  assert.equal(dueGoReminder({ ...p, goReminders: { v: 1, n: 3 } }, H(100)), false);
+  assert.equal(dueGoReminder({ ...p, goReminders: { v: 1, n: 2 } }, H(100)), true);
+  assert.equal(dueGoReminder({ ...p, planVersion: 2, goReminders: { v: 1, n: 3 } }, H(100)), true, 'a new plan version gets its own reminders');
+  for (const state of ['talk', 'approved', 'building', 'shipped', 'closed'] as const) assert.equal(dueGoReminder({ ...p, state }, H(100)), false, state);
+});
+
+test('end to end on mocks: the plan tags the author, a quiet plan is reminded every 12 hours, three times, and a go stops it', async () => {
+  const w = world();
+  const H = (h: number) => new Date(Date.parse(NOW) + h * 3_600_000).toISOString();
+  await w.post('Boats for the lake', '--as', 'ann');
+  mkdirSync(join(w.root, 'ideas', 'drafts'));
+  writeFileSync(join(w.root, 'ideas', 'drafts', 'plan-I-1.md'), 'A boat on the lake.');
+  await idea(['plan', 'I-1', 'ideas/drafts/plan-I-1.md'], w.d);
+  assert.equal((w.chat.outbox().at(-1) as any).ping, 'ann');
+  const reminders = () => w.chat.outbox().filter((o: any) => o.text?.includes('still waiting for a go'));
+  w.setNow(H(11)); await tick(w.d);
+  assert.equal(reminders().length, 0);
+  for (const h of [12, 12.5, 24, 36, 48, 60]) { w.setNow(H(h)); await tick(w.d); }
+  assert.equal(reminders().length, 3);
+  assert.ok(reminders().every((o: any) => o.ping === 'ann' && o.text.startsWith('<@ann> ')));
+  assert.deepEqual(loadIdeas(w.root)[0].goReminders, { v: 1, n: 3 });
+
+  await idea(['plan', 'I-1', 'ideas/drafts/plan-I-1.md'], w.d);
+  w.setNow(H(80)); await tick(w.d);
+  assert.equal(reminders().length, 4, 'a new plan version is reminded again');
+  await w.post('--in', 'I-1', 'go', '--as', 'bob');
+  w.setNow(H(200)); await tick(w.d);
+  assert.equal(reminders().length, 4, 'no reminder once approved');
 });

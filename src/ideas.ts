@@ -31,6 +31,8 @@ export type Idea = {
   // round, rendered to ideas/<id>/dossier.md; it outlives every worker. An idea without round is from before rounds
   // existed and goes through migrate.
   round?: number; dossier?: Entry[];
+  // goReminders: how many reminders went out for plan version v (dueGoReminder).
+  goReminders?: { v: number; n: number };
 };
 // One step in an idea's dossier. by: who said it (go, feedback). Feedback text is the team's, untrusted.
 export type Entry = { ts: string; round: number; kind: 'plan' | 'go' | 'start' | 'ship' | 'record' | 'feedback' | 'close'; text: string; by?: string };
@@ -192,7 +194,20 @@ export function workerName(id: string, taken: string[]): string {
   const base = `idea-${id.replace(/^I-/, '')}`;
   for (let n = 1; ; n++) { const name = n === 1 ? base : `${base}-${n}`; if (!taken.includes(name)) return name; }
 }
-export const planPost = (plan: string) => `**Plan**\n\n${plan.trim()}\n\nReply **go** to build it.`;
+// author: the idea's author, tagged so the ask for a go reaches them.
+export const planPost = (plan: string, author?: string) => `**Plan**\n\n${plan.trim()}\n\n${author ? `${mention(author)} ` : ''}Reply **go** to build it.`;
+// A plan nobody has said go to is brought up again: after GO_REMIND_HOURS of a quiet thread, at most GO_REMINDERS
+// times per plan version. Any message in the thread, from the team or orch, restarts the wait.
+export const GO_REMIND_HOURS = 12;
+export const GO_REMINDERS = 3;
+export const goReminderPost = (author: string) => `${mention(author)} The plan above is still waiting for a go. Reply **go** to build it, or tell me what to change.`;
+export function dueGoReminder(i: Idea, now: string): boolean {
+  if (i.state !== 'planned' || !i.planAt || !i.planVersion) return false;
+  const sent = i.goReminders?.v === i.planVersion ? i.goReminders.n : 0;
+  if (sent >= GO_REMINDERS) return false;
+  const last = [i.planAt, ...(i.messages ?? []).map(m => m.ts)].sort().at(-1)!;
+  return minsSince(last, now) >= GO_REMIND_HOURS * 60;
+}
 export const startPost = () => 'Building it now. I will post here when it is live.';
 export const shipPost = (changelog: string, url: string) => `**Shipped**\n\n${changelog.trim()}\n\nLive on ${url}, please try it.`;
 // Discord caps thread names at 100 characters; the id leads, so threads are easy to tell apart.
@@ -417,7 +432,7 @@ export function migrate(i: Idea): Idea {
     }
     if (m.text.startsWith('**Plan**')) {
       if (shipped) { round++; shipped = false; }
-      add({ ts: m.ts, kind: 'plan', text: m.text.replace(/^\*\*Plan\*\*\s*/, '').replace(/\s*Reply \*\*go\*\* to build it\.$/, '') });
+      add({ ts: m.ts, kind: 'plan', text: m.text.replace(/^\*\*Plan\*\*\s*/, '').replace(/\s*(<@\d+> )?Reply \*\*go\*\* to build it\.$/, '') });
     } else if (m.text === startPost()) {
       const name = i.builds?.[built++];
       add({ ts: m.ts, kind: 'start', text: name ? `worker ${name}, branch orch/${name}` : '' });
