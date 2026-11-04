@@ -19,6 +19,7 @@ All of them run in orch's directory as `npm run -s orch -- idea <sub>`.
 | `stage <id> <building\|checking\|deploying\|playtesting>` | Where a building idea is, named in its stage pulses. |
 | `ship <id> <changelog file\|text>` | Post the changelog and "Live on <liveUrl>, please try it". |
 | `record <id> <file\|text>` | Add a line to the idea's dossier without posting anything: the merged PR, gate and review results, the live check, a short summary of the worker's final report, known limits. |
+| `park <id> <D-NN>` / `unpark <id>` | A building idea waiting on an open decision stops counting toward `building`, shown as `parked on D-NN` in `list`. The park clears itself on the next `orch idea` command or bridge tick once that decision's file no longer says `- Status: open` (a file without a Status line counts as not open, so does a missing file), or the idea left `building`. Only the decision files of parked ideas are read. |
 | `close <id> [reason] [--force]` | Dropped, merged into another idea, or done on request. A building idea needs its worker cleaned up first, or `--force`. |
 | `relabel` | One-off: put the id in front of every idea thread still named the old way (`Bats drop loot` becomes `I-3 · Bats drop loot`). Threads already labelled are skipped, every rename is logged, renames go one at a time 2 seconds apart, an archived thread is unarchived for the rename and archived again even when the rename fails, a rename that fails is logged and skipped, and a rename whose re-archive fails is logged and counted on its own as "renamed but left unarchived". Safe to run again, but a rerun does not re-archive those threads: they already carry their id, so it skips them. Discord archives them again by itself after 7 days without a message. |
 | `off` / `on` | Kill switch. Off, the bridge answers "paused" once a day per member, stays silent for strangers, and `start` refuses. |
@@ -61,7 +62,7 @@ Every new idea, thread message, go, feedback, question timeout and unanswered nu
 }
 ```
 
-Only allowlisted user ids can post ideas, talk in their threads and say go; taking someone off the list also takes them out of their own ideas. Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day (the limit is also said once a day), `building` caps ideas building at once.
+Only allowlisted user ids can post ideas, talk in their threads and say go; taking someone off the list also takes them out of their own ideas. Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day (the limit is also said once a day), `building` caps ideas building at once; an idea parked on an open decision does not count.
 
 The live bridge remembers the last message it handled in the channel and in each thread. After a restart it catches up on everything posted since, in the channel and its active threads, before it handles new messages.
 

@@ -40,6 +40,9 @@ export type Idea = {
   round?: number; dossier?: Entry[];
   // goReminders: how many reminders went out for plan version v (dueGoReminder).
   goReminders?: { v: number; n: number };
+  // parked: the decision (D-NN) a building idea waits on. While that decision is open the idea holds no build slot;
+  // once its Status is anything else the park is cleared (isParked, `orch idea park`).
+  parked?: string;
 };
 // One team message's images to fetch. line: the watcher line's kind and text, fed once the images are in.
 export type Download = { msg: string; ts: string; by: string; picks: InboxPick[]; line?: { kind: string; text: string } };
@@ -160,12 +163,29 @@ export const IDEA_REPOS = ['evrloot-next'];
 
 // live: the worker names still running. An idea that is merged and only waits for its deploy has no live worker and
 // holds no slot; only ideas still being built count toward the limit (I-7, I-8, I-10 blocked every start on 2026-11-02).
-export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boolean, live?: Set<string>): string | null {
+// open: the ids of the decisions still open. A build parked on one of them holds no slot either.
+export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boolean, live?: Set<string>, open: Set<string> = new Set()): string | null {
   if (off) return 'the idea bridge is off (ideas/off); turn it on first';
   if (!IDEA_REPOS.includes(config.repo)) return `ideas build only on ${IDEA_REPOS.join(', ')}, not ${config.repo}`;
   if (idea.state !== 'approved' || !idea.plan) return `${idea.id} is ${idea.state}; start needs a plan with a go`;
-  const busy = ideas.filter(i => i.state === 'building' && i.id !== idea.id && (!live || (!!i.worker && live.has(i.worker))));
+  const busy = ideas.filter(i => i.state === 'building' && i.id !== idea.id && !isParked(i, open) && (!live || (!!i.worker && live.has(i.worker))));
   if (busy.length >= config.building) return `${busy.map(i => i.id).join(', ')} already building (limit ${config.building})`;
+  return null;
+}
+
+// A park counts only on a building idea and only while its decision is open; any other park is stale and gets cleared.
+export const isParked = (i: Idea, open: Set<string>) => i.state === 'building' && !!i.parked && open.has(i.parked);
+export const DECISION_ID = /^D-\d+$/;
+// A decision file's Status, '' when it has none. Only an explicit `- Status: open` keeps a build parked, so a file
+// without a Status line never holds a park forever.
+export const decisionStatus = (text: string) => /^- Status:\s*(\w+)/m.exec(text)?.[1] ?? '';
+// status: the decision file's Status, undefined when there is no such file.
+export function parkBlocker(i: Idea, decision: string, status: string | undefined): string | null {
+  if (i.state !== 'building') return `${i.id} is ${i.state}; only a building idea can be parked`;
+  if (!DECISION_ID.test(decision)) return `${decision} is not a decision id (D-NN)`;
+  if (status === undefined) return `no decisions/${decision}.md`;
+  if (status === '') return `${decision} has no Status line, so it is not open`;
+  if (status !== 'open') return `${decision} is ${status}, not open`;
   return null;
 }
 

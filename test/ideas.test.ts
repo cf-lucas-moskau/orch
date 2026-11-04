@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { dossierFile, download, handle, idea, inboxDir, settled, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk, isParked, parkBlocker, decisionStatus,
   imageOk, inboxOrder, inboxPicks, inboxUrlOk, type Upload,
 } from '../src/ideas.ts';
 
@@ -1115,6 +1115,77 @@ test('an idea waiting only for its deploy holds no building slot', () => {
   const a = { ...base, state: 'approved' as const, plan: 'p' }, b = { ...base, id: 'I-2', state: 'building' as const, worker: 'idea-2' };
   assert.equal(startBlocker(a, [a, b], config, false, new Set(['idea-2'])), 'I-2 already building (limit 1)');
   assert.equal(startBlocker(a, [a, b], config, false, new Set()), null, 'worker cleaned up after merge: the slot is free');
+});
+
+test('a build parked on an open decision holds no building slot', () => {
+  const a = { ...base, state: 'approved' as const, plan: 'p' }, b = { ...base, id: 'I-2', state: 'building' as const, worker: 'idea-2', parked: 'D-7' };
+  assert.equal(startBlocker(a, [a, b], config, false, new Set(['idea-2']), new Set(['D-7'])), null);
+  assert.equal(startBlocker(a, [a, b], config, false, new Set(['idea-2']), new Set(['D-8'])), 'I-2 already building (limit 1)', 'decided: it counts again');
+  assert.equal(startBlocker(a, [a, b], config, false, new Set(['idea-2'])), 'I-2 already building (limit 1)');
+  assert.equal(isParked({ ...b, state: 'shipped' }, new Set(['D-7'])), false, 'only a building idea is parked');
+  assert.equal(parkBlocker(b, 'D-7', 'open'), null);
+  assert.equal(parkBlocker(b, 'D-7', 'accepted'), 'D-7 is accepted, not open');
+  assert.equal(parkBlocker(b, 'D-9', undefined), 'no decisions/D-9.md');
+  assert.equal(parkBlocker(b, 'I-3', 'open'), 'I-3 is not a decision id (D-NN)');
+  assert.equal(parkBlocker(a, 'D-7', 'open'), 'I-1 is approved; only a building idea can be parked');
+  assert.equal(parkBlocker(b, 'D-7', ''), 'D-7 has no Status line, so it is not open');
+  assert.equal(decisionStatus('# D-7: x\n\n- Status: open\n'), 'open');
+  assert.equal(decisionStatus('# D-7: x\n\nno status here\n'), '', 'no Status line is not open');
+});
+
+test('park, list, start past the limit, unpark when the decision closes', async () => {
+  const w = world();
+  const approve = async (n: number) => {
+    await w.post(`idea ${n}`, '--as', 'ann');
+    await idea(['plan', `I-${n}`, 'the plan'], w.d);
+    await w.post('--in', `I-${n}`, 'go', '--as', 'ann');
+  };
+  await approve(1);
+  await idea(['start', 'I-1'], w.d);
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'running' }]));
+  await approve(2);
+  await assert.rejects(idea(['start', 'I-2'], w.d), /I-1 already building \(limit 1\)/);
+
+  mkdirSync(join(w.root, 'decisions'));
+  const decision = (status: string) => writeFileSync(join(w.root, 'decisions', 'D-3.md'), `# D-3: Which boss art?\n\n- Session: idea-1\n- Status: ${status}\n`);
+  decision('open');
+  await assert.rejects(idea(['park', 'I-1', 'D-4'], w.d), /not parked: no decisions\/D-4.md/);
+  await assert.rejects(idea(['park', 'I-2', 'D-3'], w.d), /not parked: I-2 is approved/);
+  assert.equal(await idea(['park', 'I-1', 'D-3'], w.d), 'I-1 parked on D-3');
+  assert.match(await idea(['list'], w.d), /^I-1 \[building idea-1, parked on D-3\] ann: idea 1/m);
+  assert.equal(await idea(['start', 'I-2'], w.d), 'I-2 building as worker idea-2');
+
+  decision('accepted');
+  assert.match(await idea(['list'], w.d), /^I-1 \[building idea-1\] ann: idea 1/m);
+  assert.equal(loadIdeas(w.root)[0].parked, undefined);
+  assert.ok(w.logs.includes('idea I-1 unparked: D-3 is no longer open'));
+  await idea(['list'], w.d);
+  assert.equal(w.logs.filter(l => l.includes('unparked')).length, 1, 'only a real unpark is logged');
+
+  decision('open');
+  await idea(['park', 'I-1', 'D-3'], w.d);
+  assert.equal(await idea(['unpark', 'I-1'], w.d), 'I-1 unparked');
+  assert.equal(await idea(['unpark', 'I-1'], w.d), 'I-1 is not parked');
+  assert.equal(w.logs.filter(l => l.startsWith('idea I-1 unparked from')).length, 1);
+
+  await idea(['park', 'I-1', 'D-3'], w.d);
+  writeFileSync(join(w.root, 'decisions', 'D-3.md'), '# D-3: Which boss art?\n\n- Session: idea-1\n');
+  await idea(['list'], w.d);
+  assert.equal(loadIdeas(w.root)[0].parked, undefined, 'a decision without a Status line holds no park');
+  await assert.rejects(idea(['park', 'I-1', 'D-3'], w.d), /no Status line/);
+  decision('open');
+
+  await idea(['park', 'I-1', 'D-3'], w.d);
+  rmSync(join(w.root, 'decisions', 'D-3.md'));
+  await tick(w.d);
+  assert.equal(loadIdeas(w.root)[0].parked, undefined, 'the bridge tick clears a park whose decision is gone');
+
+  decision('open');
+  await idea(['park', 'I-1', 'D-3'], w.d);
+  rmSync(join(w.root, 'decisions', 'D-3.md'));
+  mkdirSync(join(w.root, 'decisions', 'D-3.md'));
+  await idea(['list'], w.d);
+  assert.equal(loadIdeas(w.root)[0].parked, undefined, 'an unreadable decision file counts as gone, nothing throws');
 });
 
 // The first round of ready(): built by idea-1, shipped, its PR recorded.
