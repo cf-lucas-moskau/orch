@@ -4,9 +4,10 @@
 // never across an await, and every write replaces its file atomically.
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
+import { parseDecision } from './state.ts';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
@@ -65,6 +66,26 @@ export function migrateAll(root: string, log: (msg: string) => void) {
       catch (e) { failed(f, e); }
     }
   });
+}
+// The Status of every decision in decisions/, by id.
+function decisions(root: string): Map<string, string> {
+  const d = join(root, 'decisions');
+  if (!existsSync(d)) return new Map();
+  return new Map(readdirSync(d).filter(f => /^D-\d+\.md$/.test(f)).map(f => {
+    const x = parseDecision(f.slice(0, -3), readFileSync(join(d, f), 'utf8'));
+    return [x.id, x.status];
+  }));
+}
+const openDecisions = (root: string) => new Set([...decisions(root)].filter(([, s]) => s === 'open').map(([id]) => id));
+// A park whose decision is no longer open, or whose idea stopped building, is cleared. Every `orch idea` and every
+// bridge tick runs it.
+export function unparkSettled(root: string, log: (msg: string) => void) {
+  const open = openDecisions(root);
+  const stale = (i: Idea) => !!i.parked && !isParked(i, open);
+  for (const i of loadIdeas(root, log).filter(stale)) {
+    update(root, i.id, x => stale(x) ? { ...x, parked: undefined } : x);
+    log(`idea ${i.id} unparked: ${i.state === 'building' ? `${i.parked} is no longer open` : `it is ${i.state}`}`);
+  }
 }
 const reopenedTalk = (i: Idea) => roundOf(i) > 1 && !(i.dossier ?? []).some(e => e.round === roundOf(i) && e.kind === 'plan');
 const said = (by: string, text: string, ts: string, media?: string) => (i: Idea): Idea => ({ ...i, messages: [...i.messages ?? [], { ts, by, text, ...(media ? { media } : {}) }] });
@@ -264,6 +285,7 @@ const running = (root: string, name?: string) => !!name && workers(root).some(w 
 const USAGE = `usage: orch idea list | off | on | relabel
        orch idea fake "<text>" --as <user> [--in <id>]   (mock adapter only)
        orch idea say <id> <text|file> | ask <id> <question file|text> [--recommend <text>] [--wait] | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
+       orch idea park <id> <D-NN> | unpark <id>   (a building idea parked on an open decision holds no build slot)
        orch idea record <id> <file|text>   (dossier only, nothing is posted)
        files are read only from ideas/drafts/`;
 
@@ -288,12 +310,13 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const config = loadConfig(d.root);
   const chat = () => d.chat ?? chatFor(d.root, config, d.log);
   migrateAll(d.root, d.log);
+  unparkSettled(d.root, d.log);
   if (sub === 'list' || !sub) {
     const all = loadIdeas(d.root, d.log);
     // reopened: a round after the first that has not shipped yet.
     const round = (i: Idea) => roundOf(i) < 2 ? '' : ` round ${roundOf(i)}${['shipped', 'closed'].includes(i.state) ? '' : ', reopened'}`;
     return [`bridge ${isOff(d.root) ? 'off' : 'on'}, adapter ${config.adapter}`,
-      ...all.map(i => `${i.id} [${i.state}${round(i)}${i.worker ? ` ${i.worker}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
+      ...all.map(i => `${i.id} [${i.state}${round(i)}${i.worker ? ` ${i.worker}` : ''}${i.parked ? `, parked on ${i.parked}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
   }
   if (sub === 'off' || sub === 'on') {
     mkdirSync(dir(d.root), { recursive: true });
@@ -389,7 +412,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const building = locked(d.root, () => {
       const fresh = loadIdeas(d.root, d.log);
       const me = fresh.find(i => i.id === id)!;
-      const blocker = startBlocker(me, fresh, config, isOff(d.root), new Set(workers(d.root).filter(w => w.status === 'running').map(w => w.name)));
+      const blocker = startBlocker(me, fresh, config, isOff(d.root), new Set(workers(d.root).filter(w => w.status === 'running').map(w => w.name)), openDecisions(d.root));
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
@@ -426,6 +449,22 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     update(d.root, id, i => ({ ...i, stage, updated: now }));
     return `${id} stage ${stage}`;
   }
+  if (sub === 'park') {
+    const decision = rest[0] ?? fail(USAGE);
+    const status = decisions(d.root).get(decision);
+    update(d.root, id, i => {
+      const blocker = parkBlocker(i, decision, status);
+      return blocker ? fail(`not parked: ${blocker}`) : { ...i, parked: decision };
+    });
+    d.log(`idea ${id} parked on ${decision}; its build slot is free until ${decision} is decided`);
+    return `${id} parked on ${decision}`;
+  }
+  if (sub === 'unpark') {
+    if (!cur.parked) return `${id} is not parked`;
+    update(d.root, id, i => ({ ...i, parked: undefined }));
+    d.log(`idea ${id} unparked`);
+    return `${id} unparked`;
+  }
   if (sub === 'ship') {
     if (!text) throw new Error(USAGE);
     // The changelog carries the newest note's media that has not gone out yet (the bridge posts notes only while an
@@ -457,6 +496,7 @@ const fail = (msg: string): never => { throw new Error(msg); };
 // open questions time out or nudge orch.
 export async function tick(d: Deps & { chat: Chat }) {
   const now = (d.now ?? (() => new Date().toISOString()))();
+  unparkSettled(d.root, d.log);
   for (const i of loadIdeas(d.root, d.log)) {
     if (stale(i, now)) {
       const reason = `no message in ${STALE_DAYS} days`;
