@@ -7,10 +7,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChat, MockChat, RearchiveFailed, type ReplyOptions } from '../src/discord.ts';
 import { buildBrief } from '../src/brief.ts';
-import { dossierFile, handle, idea, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
+import { dossierFile, download, handle, idea, inboxDir, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
   bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk,
+  imageOk, inboxPicks, inboxUrlOk, type Upload,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -1560,4 +1561,132 @@ test('end to end on mocks: the plan tags the author, a quiet plan is reminded ev
   await w.post('--in', 'I-1', 'go', '--as', 'bob');
   w.setNow(H(200)); await tick(w.d);
   assert.equal(reminders().length, 4, 'no reminder once approved');
+});
+
+const CDN = 'https://cdn.discordapp.com/attachments/1/2';
+const WEBP = Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'latin1');
+test('team images: Discord CDN only, image types by name and bytes, five per message, our own names', () => {
+  assert.equal(inboxUrlOk(`${CDN}/a.png?ex=1&hm=2`), true);
+  assert.equal(inboxUrlOk('https://media.discordapp.net/attachments/1/2/a.png'), true);
+  assert.equal(inboxUrlOk('http://cdn.discordapp.com/a.png'), false, 'no plain http');
+  assert.equal(inboxUrlOk('https://cdn.discordapp.com.evil.example/a.png'), false);
+  assert.equal(inboxUrlOk('https://user:pw@cdn.discordapp.com/a.png'), false);
+  assert.equal(inboxUrlOk('https://cdn.discordapp.com:8443/a.png'), false);
+  assert.equal(inboxUrlOk('file:///etc/passwd'), false);
+  assert.equal(imageOk('webp', WEBP), true);
+  assert.equal(imageOk('png', PNG), true);
+  assert.equal(imageOk('png', Buffer.from('#!/bin/sh')), false);
+  assert.equal(imageOk('mp4', Buffer.from('\0\0\0\x20ftypisom', 'latin1')), false, 'video is not a screenshot');
+  const up = (filename: string, o: Partial<Upload> = {}): Upload => ({ url: `${CDN}/${filename}`, filename, size: 1000, ...o });
+  const picks = inboxPicks('42', [
+    up('a.PNG'), up('b.jpeg'), up('../../x.gif'), up('run.sh'), up('c.webp', { url: 'https://evil.example/c.webp' }),
+    up('big.png', { size: 9 * 1024 * 1024 }), up('d.png'), up('e.png'), up('f.png'),
+  ]);
+  assert.deepEqual(picks.take.map(p => p.name), ['42-1.png', '42-2.jpg', '42-3.gif', '42-4.png', '42-5.png']);
+  assert.deepEqual(picks.skip, [
+    '"run.sh" not a png, jpg, gif or webp', '"c.webp" not on Discord\'s CDN', '"big.png" 9.0 MB is over 8 MB', '"f.png" more than 5 images in one message',
+  ]);
+  assert.deepEqual(inboxPicks('../m', [up('a.png')]).skip, ['"a.png" odd message id']);
+});
+
+// A stand-in for fetch: url -> [status, body, headers]. Every request is recorded.
+function fakeFetch(routes: Record<string, [number, Buffer | string, Record<string, string>?]>) {
+  const asked: string[] = [];
+  const f = (async (url: string, o: RequestInit) => {
+    asked.push(url);
+    assert.equal(o.redirect, 'manual');
+    const r = routes[url];
+    if (!r) return new Response('nope', { status: 404 });
+    return new Response(r[0] >= 300 && r[0] < 400 ? null : r[1], { status: r[0], headers: r[2] });
+  }) as unknown as typeof fetch;
+  return { f, asked };
+}
+
+test('downloads follow redirects only on Discord\'s CDN and stop at 8 MB', async () => {
+  const { f, asked } = fakeFetch({
+    [`${CDN}/a.png`]: [302, '', { location: 'https://media.discordapp.net/x/a.png' }],
+    'https://media.discordapp.net/x/a.png': [200, PNG],
+    [`${CDN}/b.png`]: [301, '', { location: 'https://evil.example/b.png' }],
+    [`${CDN}/big.png`]: [200, Buffer.alloc(8 * 1024 * 1024 + 1)],
+    [`${CDN}/loop.png`]: [302, '', { location: `${CDN}/loop.png` }],
+  });
+  assert.deepEqual(await download(f, `${CDN}/a.png`), { data: PNG });
+  assert.deepEqual(await download(f, `${CDN}/b.png`), { refused: 'redirected off Discord\'s CDN' });
+  assert.ok(!asked.includes('https://evil.example/b.png'), 'the other host is never asked');
+  assert.deepEqual(await download(f, `${CDN}/big.png`), { refused: 'over 8 MB' });
+  assert.deepEqual(await download(f, `${CDN}/loop.png`), { refused: 'too many redirects' });
+  assert.deepEqual(await download(f, `${CDN}/gone.png`), { refused: 'HTTP 404' });
+});
+
+test('end to end on mocks: images posted with an idea reach orch, the dossier and the worker', async () => {
+  const w = world();
+  const { f, asked } = fakeFetch({
+    [`${CDN}/shot.png`]: [200, PNG],
+    [`${CDN}/fake.png`]: [200, '#!/bin/sh\nrm -rf ~'],
+    [`${CDN}/b.webp`]: [200, WEBP],
+    [`${CDN}/eve.png`]: [200, PNG],
+  });
+  w.d.fetch = f;
+  const up = (filename: string): Upload => ({ url: `${CDN}/${filename}`, filename, size: 100, contentType: 'image/png' });
+  w.chat.post('ann', 'Bats drop more loot', undefined, NOW, [up('shot.png'), up('fake.png'), up('notes.txt')]);
+  await w.chat.poll();
+  assert.deepEqual(w.feed(), ['IDEA I-1 new ann: Bats drop more loot [1 image]']);
+  assert.deepEqual(readFileSync(join(inboxDir(w.root, 'I-1'), 'm1-1.png')), PNG);
+  assert.ok(!existsSync(join(inboxDir(w.root, 'I-1'), 'm1-2.png')), 'bytes that are not a png are not kept');
+  assert.ok(w.logs.includes('idea bridge: attachment "notes.txt" not a png, jpg, gif or webp on message m1 from ann skipped'));
+  assert.ok(w.logs.includes('idea bridge: attachment "fake.png" its bytes are not a png on message m1 from ann skipped'));
+
+  w.chat.post('ann', 'like this, in the cave', 't-m1', LATER(1), [up('b.webp')]);
+  w.chat.post('eve', 'mine too', 't-m1', LATER(2), [up('eve.png')]);
+  await w.chat.poll();
+  assert.equal(w.feed().at(-1), 'IDEA I-1 msg ann: like this, in the cave [1 image]');
+  assert.ok(!asked.includes(`${CDN}/eve.png`), 'a stranger\'s attachment is never downloaded');
+  const i = loadIdeas(w.root)[0];
+  assert.deepEqual(i.messages!.map(m => m.screenshots), [['m1-1.png'], ['m2-1.webp']]);
+  assert.ok(readFileSync(dossierFile(w.root, 'I-1'), 'utf8').includes('screenshots: m1-1.png\n'));
+  assert.ok(readFileSync(dossierFile(w.root, 'I-1'), 'utf8').includes('screenshots: m2-1.webp\n'));
+
+  await idea(['plan', 'I-1', 'Bats drop 2x loot.'], w.d);
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+  await idea(['start', 'I-1'], w.d);
+  const task = w.runs[0][2];
+  assert.ok(task.includes(`- ${join(inboxDir(w.root, 'I-1'), 'm1-1.png')}\n- ${join(inboxDir(w.root, 'I-1'), 'm2-1.webp')}\n`));
+});
+
+test('feedback with an image carries it on its own dossier entry', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({ [`${CDN}/bug.png`]: [200, PNG] }).f;
+  await w.post('idea', '--as', 'ann');
+  await idea(['close', 'I-1'], w.d);
+  w.chat.post('bob', 'it broke', 't-m1', LATER(1), [{ url: `${CDN}/bug.png`, filename: 'bug.png', size: 10 }]);
+  await w.chat.poll();
+  assert.equal(w.feed().at(-1), 'IDEA I-1 feedback bob: it broke [1 image]');
+  const fb = loadIdeas(w.root)[0].dossier!.filter(e => e.kind === 'feedback' || e.kind === 'screenshots');
+  assert.deepEqual(fb.map(e => [e.kind, e.screenshots]), [['feedback', ['m2-1.png']]]);
+});
+
+test('the live adapter passes attachments on, from the backfill and live', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const file = { id: '9', filename: 'a.png', size: 5, url: `${CDN}/a.png`, content_type: 'image/png' };
+  const { lib } = discordStub({
+    '/channels/100': { guild_id: 'g', last_message_id: '10' },
+    '/guilds/g/threads/active': { threads: [] },
+    '/channels/100/messages?after=10&limit=100': [{ ...raw('11', '100', 'old'), attachments: [file] }],
+  });
+  const got: Incoming[] = [];
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'cursor.json'), onError: () => {}, lib });
+  chat.onMessage(async m => { got.push(m); });
+  await chat.start();
+  const client = (chat as any).client as EventEmitter;
+  client.emit('clientReady');
+  await settle();
+  client.emit('messageCreate', {
+    id: '12', channelId: '100', content: 'live', author: { id: 'u1', username: 'ann', bot: false }, channel: { isThread: () => false, parentId: null },
+    attachments: new Map([['8', { url: `${CDN}/b.gif`, name: 'b.gif', size: 7, contentType: null }]]),
+  });
+  await settle();
+  assert.deepEqual(got.map(m => m.attachments), [
+    [{ url: `${CDN}/a.png`, filename: 'a.png', size: 5, contentType: 'image/png' }],
+    [{ url: `${CDN}/b.gif`, filename: 'b.gif', size: 7 }],
+  ]);
 });

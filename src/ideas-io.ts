@@ -6,12 +6,13 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, imageOk, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
 // sleep: the pause between thread renames in `idea relabel`; tests pass a fast one.
-export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string; sleep?: (ms: number) => Promise<void> };
+// fetch: how attachments are downloaded; tests pass a stub.
+export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string; sleep?: (ms: number) => Promise<void>; fetch?: typeof fetch };
 const RENAME_GAP_MS = 2000;
 
 const dir = (root: string) => join(root, 'ideas');
@@ -93,6 +94,59 @@ export function mediaFile(root: string, id: string, name: string): { file: Attac
   } catch { return { refused: 'not found' }; }
   finally { if (fd !== undefined) closeSync(fd); }
 }
+// Images the team posted for an idea, kept for orch and its workers.
+export const inboxDir = (root: string, id: string) => join(dir(root), 'inbox', id);
+const inboxFiles = (root: string, id: string) => { try { return readdirSync(inboxDir(root, id)).sort().map(f => join(inboxDir(root, id), f)); } catch { return []; } };
+const REDIRECTS = 3;
+// One attachment's bytes, or why not. Every hop, redirects included, must be on Discord's CDN, and the body stops
+// at 8 MB. The bytes are only ever compared against magic numbers, never parsed.
+export async function download(get: typeof fetch, url: string): Promise<{ data: Buffer } | { refused: string }> {
+  for (let hop = 0, u = url; hop <= REDIRECTS; hop++) {
+    if (!inboxUrlOk(u)) return { refused: 'redirected off Discord\'s CDN' };
+    let res: Response;
+    try { res = await get(u, { redirect: 'manual', signal: AbortSignal.timeout(30_000) }); }
+    catch (e) { return { refused: `download failed: ${e instanceof Error ? e.message : e}` }; }
+    if (res.status >= 300 && res.status < 400) {
+      await res.body?.cancel();
+      const to = res.headers.get('location');
+      if (!to) return { refused: `HTTP ${res.status} without a location` };
+      u = new URL(to, u).href;
+      continue;
+    }
+    if (!res.ok) { await res.body?.cancel(); return { refused: `HTTP ${res.status}` }; }
+    const over = { refused: 'over 8 MB' };
+    if (Number(res.headers.get('content-length')) > MAX_MEDIA) { await res.body?.cancel(); return over; }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const c of res.body ?? []) {
+      size += c.length;
+      if (size > MAX_MEDIA) return over;
+      chunks.push(Buffer.from(c));
+    }
+    return { data: Buffer.concat(chunks) };
+  }
+  return { refused: 'too many redirects' };
+}
+type Image = { name: string; data: Buffer };
+async function fetchImages(d: Deps, m: Incoming): Promise<Image[]> {
+  const { take, skip } = inboxPicks(m.id, m.attachments ?? []);
+  const left = (what: string) => d.log(`idea bridge: attachment ${what} on message ${m.id} from ${m.author.name} skipped`);
+  skip.forEach(left);
+  const out: Image[] = [];
+  for (const p of take) {
+    const got = await download(d.fetch ?? fetch, p.url);
+    if ('refused' in got) left(`${p.from} ${got.refused}`);
+    else if (!imageOk(p.ext, got.data)) left(`${p.from} its bytes are not a ${p.ext}`);
+    else out.push({ name: p.name, data: got.data });
+  }
+  return out;
+}
+const keep = (root: string, id: string, images: Image[]) => {
+  if (images.length) mkdirSync(inboxDir(root, id), { recursive: true });
+  for (const f of images) writeFileSync(join(inboxDir(root, id), f.name), f.data);
+  return images.map(f => f.name);
+};
+
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
 
@@ -147,29 +201,39 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
   const now = (d.now ?? (() => new Date().toISOString()))();
   const config = loadConfig(d.root);
   const text = sanitize(m.text);
+  const routeNow = () => route(m, { ideas: loadIdeas(d.root, d.log), config, off: isOff(d.root), now, told: loadTold(d.root) });
+  // Images are fetched before the lock, only for a message that would be taken; the decision under the lock stands.
+  const pre = m.attachments?.length ? routeNow().kind : 'ignore';
+  const images = pre === 'ignore' || pre === 'decline' ? [] : await fetchImages(d, m);
+  const ts = m.ts ?? now;
   // Decide and record under the lock; talk to Discord after it.
   const r = locked(d.root, () => {
     const told = loadTold(d.root);
-    const r = route(m, { ideas: loadIdeas(d.root, d.log), config, off: isOff(d.root), now, told });
+    const r = routeNow();
     if (r.kind === 'decline' && r.answer) writeAtomic(join(dir(d.root), 'told.json'), JSON.stringify(tell(told, `${r.reason}:${m.author.id}`, now)) + '\n');
     if (r.kind === 'new') {
       const id = nextId(ideaFiles(d.root).map(f => f.slice(0, -5)));
-      save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text }], round: 1, dossier: [] });
+      const shots = keep(d.root, id, images);
+      const fresh: Idea = { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text, ...(shots.length ? { screenshots: shots } : {}) }], round: 1, dossier: [] };
+      save(d.root, withScreenshots(fresh, 0, shots, now, m.author.name));
       return { ...r, id };
     }
     if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go' || r.kind === 'feedback') {
       const fresh = read(d.root, r.idea!.id);
+      const shots = keep(d.root, fresh.id, images);
       // Any allowed reply in the thread answers orch's open questions.
-      const cur: Idea = { ...answer(fresh, m.ts ?? now), messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
+      const cur: Idea = { ...answer(fresh, ts), messages: [...fresh.messages ?? [], { ts, by: m.author.name, text, plan: visiblePlan(fresh, ts), ...(shots.length ? { screenshots: shots } : {}) }] };
+      const store = (i: Idea) => save(d.root, withScreenshots(i, (fresh.dossier ?? []).length, shots, ts, m.author.name));
       const step = r.kind === 'go' ? 'go' : r.kind === 'feedback' ? 'reopen' : undefined;
       const next = step ? advance(cur, step, now) : cur;
-      if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
-      if (r.kind === 'answer') save(d.root, next);
+      if (typeof next === 'string') { store(cur); return { kind: 'ignore' as const }; }
+      if (r.kind === 'answer') store(next);
       // Talk in a reopened round before its plan is feedback too, every message of it.
-      else if (r.kind === 'message') save(d.root, { ...(reopenedTalk(next) ? entry(next, 'feedback', text, m.ts ?? now, m.author.name) : next), needsOrch: 'msg', needsAt: now });
-      else if (r.kind === 'go') save(d.root, { ...entry(next, 'go', `on plan v${next.planVersion}`, now, m.author.name), needsOrch: 'go', needsAt: now, goBy: m.author.id });
-      else save(d.root, { ...entry(next, 'feedback', text, m.ts ?? now, m.author.name), needsOrch: 'feedback', needsAt: now });
-      if (r.kind === 'feedback') return { ...r, round: roundOf(next) };
+      else if (r.kind === 'message') store({ ...(reopenedTalk(next) ? entry(next, 'feedback', text, ts, m.author.name) : next), needsOrch: 'msg', needsAt: now });
+      else if (r.kind === 'go') store({ ...entry(next, 'go', `on plan v${next.planVersion}`, now, m.author.name), needsOrch: 'go', needsAt: now, goBy: m.author.id });
+      else store({ ...entry(next, 'feedback', text, ts, m.author.name), needsOrch: 'feedback', needsAt: now });
+      if (r.kind === 'feedback') return { ...r, round: roundOf(next), images: shots.length };
+      return { ...r, images: shots.length };
     }
     return r;
   });
@@ -196,20 +260,21 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     d.log(`idea bridge answered ${m.author.name} in ${id}: ${r.text.slice(0, 80)}`);
     return;
   }
-  if (r.kind === 'message') return feed(d.root, ideaLine(id, 'msg', m.author.name, r.text), now);
+  const n = 'images' in r ? r.images : 0;
+  if (r.kind === 'message') return feed(d.root, ideaLine(id, 'msg', m.author.name, r.text, n), now);
   if (r.kind === 'feedback') {
-    feed(d.root, ideaLine(id, 'feedback', m.author.name, r.text), now);
+    feed(d.root, ideaLine(id, 'feedback', m.author.name, r.text, n), now);
     d.log(`idea ${id}: feedback from ${m.author.name} reopens it as round ${r.round}`);
     return react('👀', id);
   }
-  feed(d.root, ideaLine(id, 'go', m.author.name, 'go'), now);
+  feed(d.root, ideaLine(id, 'go', m.author.name, 'go', n), now);
   d.log(`idea ${id}: go from ${m.author.name}`);
   await react('✅', id);
 }
 
 function opened(d: Deps, id: string, thread: string, now: string) {
   const i = update(d.root, id, i => ({ ...i, thread, state: 'talk', needsOrch: 'new', needsAt: now }));
-  feed(d.root, ideaLine(id, 'new', i.author.name, i.text), now);
+  feed(d.root, ideaLine(id, 'new', i.author.name, i.text, i.messages?.[0]?.screenshots?.length), now);
   d.log(`idea ${id} from ${i.author.name}: ${i.text.slice(0, 100)}`);
 }
 
@@ -400,7 +465,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     });
     const name = building.worker!;
     mkdirSync(progressDir(d.root, id), { recursive: true });
-    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id))]); }
+    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id), inboxFiles(d.root, id))]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
