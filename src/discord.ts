@@ -2,7 +2,7 @@
 // outbox read by tests and people). discord: the discord.js gateway for incoming messages, REST for posting.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { MAX_MEDIA, mediaOk, serial, split, type Config, type Incoming } from './ideas.ts';
+import { MAX_MEDIA, mediaOk, serial, split, type Config, type Incoming, type Upload } from './ideas.ts';
 
 export interface Chat {
   onMessage(handler: (m: Incoming) => Promise<void>): void;
@@ -42,7 +42,7 @@ const why = (e: unknown) => e instanceof Error ? e.message : String(e);
 export class RearchiveFailed extends Error {}
 
 // Readers never see a half-written file.
-export function writeAtomic(file: string, text: string) {
+export function writeAtomic(file: string, text: string | Buffer) {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   writeFileSync(tmp, text);
@@ -113,9 +113,9 @@ export class MockChat implements Chat {
   async react(target: string, message: string, emoji: string) { this.out({ kind: 'react', target, message, emoji }); }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
   // `orch idea fake`: post as someone, at the top level or inside an idea's thread. Mock user ids are their names.
-  post(as: string, text: string, thread?: string, ts = new Date().toISOString()): Incoming {
+  post(as: string, text: string, thread?: string, ts = new Date().toISOString(), attachments: Upload[] = []): Incoming {
     const file = join(this.dir, 'inbox.jsonl');
-    const m: Incoming = { id: `m${lines(file).length + 1}`, channel: thread ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text, ts };
+    const m: Incoming = { id: `m${lines(file).length + 1}`, channel: thread ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text, ts, ...(attachments.length ? { attachments } : {}) };
     appendFileSync(file, JSON.stringify(m) + '\n');
     return m;
   }
@@ -132,7 +132,8 @@ const route = {
   reaction: (c: string, m: string, emoji: string) => `/channels/${c}/messages/${m}/reactions/${encodeURIComponent(emoji)}/@me`,
   activeThreads: (g: string) => `/guilds/${g}/threads/active`,
 };
-type Raw = { id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string; timestamp?: string };
+type RawFile = { url: string; filename: string; size: number; content_type?: string };
+type Raw = { id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string; timestamp?: string; attachments?: RawFile[] };
 const byId = (a: { id: string }, b: { id: string }) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1);
 
 export type DiscordOptions = { token: string; channel: string; cursorFile: string; onError?: OnError; lib?: any; retryMs?: number };
@@ -199,7 +200,11 @@ export class DiscordChat implements Chat {
 
   private incoming(r: Raw, thread: boolean): Incoming | null {
     if (r.author.bot) return null;
-    return { id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}), author: { id: r.author.id, name: r.author.username }, text: r.content, ...(r.timestamp ? { ts: new Date(r.timestamp).toISOString() } : {}) };
+    const files: Upload[] = (r.attachments ?? []).map(a => ({ url: a.url, filename: a.filename, size: a.size, ...(a.content_type ? { contentType: a.content_type } : {}) }));
+    return {
+      id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}), author: { id: r.author.id, name: r.author.username }, text: r.content,
+      ...(r.timestamp ? { ts: new Date(r.timestamp).toISOString() } : {}), ...(files.length ? { attachments: files } : {}),
+    };
   }
 
   // The channel from its cursor, and every active thread under it from its cursor or its start. On a first start the
@@ -233,7 +238,8 @@ export class DiscordChat implements Chat {
     this.client.on('messageCreate', (m: any) => {
       const inThread = m.channel.isThread();
       if ((inThread ? m.channel.parentId : m.channelId) !== this.o.channel) return;
-      const i = this.incoming({ id: m.id, channel_id: m.channelId, author: m.author, content: m.content, timestamp: m.createdTimestamp ? new Date(m.createdTimestamp).toISOString() : undefined }, inThread);
+      const attachments: RawFile[] = [...m.attachments?.values() ?? []].map((a: any) => ({ url: a.url, filename: a.name, size: a.size, content_type: a.contentType ?? undefined }));
+      const i = this.incoming({ id: m.id, channel_id: m.channelId, author: m.author, content: m.content, timestamp: m.createdTimestamp ? new Date(m.createdTimestamp).toISOString() : undefined, attachments }, inThread);
       if (!i) return;
       if (this.held) this.held.push(i); else void this.deliver(i);
     });
