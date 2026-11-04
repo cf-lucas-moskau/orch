@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { potetoLine, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -608,7 +608,7 @@ function openPr([name, ...args]: string[]) {
   if (w.prHead) die(`${name} works on an existing PR branch (${w.prHead}); push updates it`);
   const p = projectOf(w);
   const base = args.includes('--base') ? args[args.indexOf('--base') + 1] : null;
-  const title = w.task.split('\n')[0].slice(0, 70);
+  const title = prTitle(w.task);
   const body = `${w.task.trim()}\n\nOpened by orch: worker ${name} (${w.kind ?? 'claude'}), gates passed.`;
   const url = gh(p.path, 'pr', 'create', '--head', w.branch, '--title', title, '--body', body, ...(base ? ['--base', base] : [])).trim();
   log(`open-pr ${name} (${by}): ${url}`);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isGarbledPrompt, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -236,4 +236,13 @@ test('a prompt counts as landed only after 6 s busy with an empty box and no raw
   assert.equal(promptVerdict(Array(10).fill(idle)), 'idle');
   assert.equal(promptVerdict([idle, { ...busy, status: 'done' }, busy]), 'landed');
   assert.equal(promptVerdict([busy, busy, { ...busy, draft: null }]), 'landed', 'no input box drawn while it works');
+});
+
+test('prTitle takes the plan line of a later round, strips bold and cuts at the sentence', () => {
+  const round = 'Idea I-7 was built and shipped before; this is round 2. Its dossier is below.\n\n**Old plan**\n\n## Round 2: the plan to build\n\n**Prices on hover, in the old game\'s look**\n\nWhat changes';
+  assert.equal(prTitle(round), "Prices on hover, in the old game's look");
+  assert.equal(prTitle('**Walk through expeditions with the arrow keys**\n\nWhat changes'), 'Walk through expeditions with the arrow keys');
+  assert.equal(prTitle('Performance fix: a lighter Missions window. 6. **A lighter Missions window.** Find'), 'Performance fix: a lighter Missions window');
+  const long = prTitle('word '.repeat(30));
+  assert.ok(long.length <= 70 && !long.endsWith(' '));
 });
