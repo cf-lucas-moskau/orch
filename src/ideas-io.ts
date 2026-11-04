@@ -2,7 +2,7 @@
 // Ideas live in ideas/<id>.json, settings in ideas/config.json, the kill switch is the file ideas/off.
 // The daemon and `orch idea` are separate processes: every read-modify-write of ideas/ runs under one lock (ideas/.lock),
 // never across an await, and every write replaces its file atomically.
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
@@ -99,9 +99,14 @@ import type { Download, InboxPick } from './ideas.ts';
 // Images the team posted for an idea, kept for orch and its workers. Files land under their final name only once
 // complete, so a half-written one is never listed.
 export const inboxDir = (root: string, id: string) => join(dir(root), 'inbox', id);
-const inboxFiles = (root: string, id: string) => {
-  try { return inboxOrder(readdirSync(inboxDir(root, id)).filter(f => /^\w+-\d+\.(png|jpg|gif|webp)$/.test(f))).map(f => join(inboxDir(root, id), f)); }
+const inboxNames = (root: string, id: string) => {
+  try { return inboxOrder(readdirSync(inboxDir(root, id)).filter(f => /^\w+-\d+\.(png|jpg|gif|webp)$/.test(f))); }
   catch { return []; }
+};
+// The images of the idea's current round: a closed round's leftovers are never handed to a new worker.
+const inboxFiles = (root: string, i: Idea) => {
+  const old = new Set((i.leftovers ?? []).flatMap(l => l.files));
+  return inboxNames(root, i.id).filter(f => !old.has(f)).map(f => join(inboxDir(root, i.id), f));
 };
 const REDIRECTS = 3;
 const DOWNLOAD_MS = 30_000;
@@ -160,6 +165,10 @@ function fetchDownload(d: Deps, id: string, dl: Download) {
   if (inflight.has(key)) return;
   const left = (what: string) => d.log(`idea bridge: attachment ${what} on message ${dl.msg} from ${dl.by} skipped`);
   const keep = async (p: InboxPick) => slot(async () => {
+    // A job a close dropped gives its slot straight back; a file an earlier run saved before a crash counts as is.
+    const now = readIf(d.root, id);
+    if (!owns(now, dl.msg)) { left(`${p.from} arrived after the close`); return; }
+    if (existsSync(join(inboxDir(d.root, id), p.name))) return p.name;
     const got = await download(d.fetch ?? fetch, p.url).catch(e => ({ refused: `download failed: ${e instanceof Error ? e.message : e}` }));
     if ('refused' in got) { left(`${p.from} ${got.refused}`); return; }
     if (!imageOk(p.ext, got.data)) { left(`${p.from} its bytes are not a ${p.ext}`); return; }
@@ -171,24 +180,24 @@ function fetchDownload(d: Deps, id: string, dl: Download) {
       });
     } catch (e) { left(`${p.from} not saved: ${e instanceof Error ? e.message : e}`); return; }
   });
+  // The line goes out only once the message's screenshots are recorded. A failed record leaves the download on the
+  // idea, and the next tick runs it again, so the line is neither lost nor sent twice.
   const job = (async () => {
-    let kept: string[] = [];
     try {
       const names = (await Promise.all(dl.picks.map(keep))).filter((n): n is string => !!n);
-      kept = locked(d.root, () => {
+      const kept = locked(d.root, () => {
         const i = readIf(d.root, id);
         if (!owns(i, dl.msg)) {
           if (names.length) d.log(`idea ${id}: ${names.length} image(s) from message ${dl.msg} arrived after the close, not kept`);
-          return [];
+          return undefined;
         }
         const downloads = i!.downloads!.filter(x => x.msg !== dl.msg);
         save(d.root, withScreenshots({ ...i!, downloads: downloads.length ? downloads : undefined }, dl.msg, names, dl.ts, dl.by));
         return names;
       });
+      if (kept && dl.line) feed(d.root, ideaLine(id, dl.line.kind, dl.by, dl.line.text, kept.length), (d.now ?? (() => new Date().toISOString()))());
     } catch (e) {
-      d.log(`idea ${id}: images from message ${dl.msg} failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      if (dl.line) feed(d.root, ideaLine(id, dl.line.kind, dl.by, dl.line.text, kept.length), (d.now ?? (() => new Date().toISOString()))());
+      d.log(`idea ${id}: images from message ${dl.msg} failed, retried on the next tick: ${e instanceof Error ? e.message : e}`);
     }
   })();
   inflight.set(key, job);
@@ -200,12 +209,26 @@ function downloadOf(d: Deps, m: Incoming, ts: string, line?: Download['line']): 
   skip.forEach(what => d.log(`idea bridge: attachment ${what} on message ${m.id} from ${m.author.name} skipped`));
   return take.length ? { msg: m.id, ts, by: m.author.name, picks: take, ...(line ? { line } : {}) } : undefined;
 }
-// A closed idea keeps its inbox while its worker still runs, since the worker's task names those files; tick drops it
-// once the worker is gone. Runs inside the lock that closes the idea.
+// Closing ends the round's inbox: its pending downloads go in the same write, and its files become leftovers, kept
+// for the round's worker if it still runs. sweepInbox deletes them once the close is saved.
 const closeInbox = (root: string, i: Idea): Idea => {
-  if (!running(root, i.worker)) dropInbox(root, i.id);
-  return { ...i, downloads: undefined };
+  const old = new Set((i.leftovers ?? []).flatMap(l => l.files));
+  const files = inboxNames(root, i.id).filter(f => !old.has(f));
+  const kept = files.length ? { leftovers: [...i.leftovers ?? [], { ...(running(root, i.worker) ? { worker: i.worker } : {}), files }] } : {};
+  return { ...i, downloads: undefined, ...kept };
 };
+// Deletes the leftovers whose worker is gone, whatever state the idea is in now; idempotent.
+function sweepInbox(root: string, id: string) {
+  locked(root, () => {
+    const i = readIf(root, id);
+    const gone = (i?.leftovers ?? []).filter(l => !running(root, l.worker));
+    if (!gone.length) return;
+    for (const f of gone.flatMap(l => l.files)) rmSync(join(inboxDir(root, id), f), { force: true });
+    const rest = i!.leftovers!.filter(l => !gone.includes(l));
+    save(root, { ...i!, leftovers: rest.length ? rest : undefined });
+    try { rmdirSync(inboxDir(root, id)); } catch {}
+  });
+}
 const dropInbox = (root: string, id: string) => rmSync(inboxDir(root, id), { recursive: true, force: true });
 
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
@@ -531,7 +554,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     });
     const name = building.worker!;
     mkdirSync(progressDir(d.root, id), { recursive: true });
-    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id), inboxFiles(d.root, id))]); }
+    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id), inboxFiles(d.root, building))]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
@@ -576,6 +599,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       fail(`not closed: ${id} is building with worker ${cur.worker}; clean it up first (orch cleanup ${cur.worker}) or close with --force`);
     const reason = text || 'done';
     await post('close', `Closing this idea: ${reason}`, i => closeInbox(d.root, entry({ ...i, closed: reason }, 'close', reason, now)));
+    sweepInbox(d.root, id);
     d.log(`idea ${id} closed: ${reason}`);
     return `${id} closed`;
   }
@@ -597,6 +621,7 @@ export async function tick(d: Deps & { chat: Chat }) {
         // Nobody answers a closed idea, so nothing stays flagged; a new message flags it again.
         return typeof next === 'string' ? x : closeInbox(d.root, entry({ ...next, closed: reason, needsOrch: undefined, needsAt: undefined }, 'close', `${reason}; nothing posted, a new message reopens it`, now));
       });
+      sweepInbox(d.root, i.id);
       d.log(`idea ${i.id} closed quietly: ${reason}`);
       continue;
     }
@@ -655,8 +680,10 @@ export async function tick(d: Deps & { chat: Chat }) {
     await postIn(d.root, d.chat, i, p.post.text, { files });
     update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
   }
-  // The inbox a forced close left for a running worker goes once that worker is gone.
-  for (const i of loadIdeas(d.root, d.log).filter(i => i.state === 'closed' && existsSync(inboxDir(d.root, i.id)) && !running(d.root, i.worker)))
-    locked(d.root, () => { const x = readIf(d.root, i.id); if (x?.state === 'closed' && !running(d.root, x.worker)) dropInbox(d.root, i.id); });
+  // Leftovers whose worker is gone, even if the idea reopened since; downloads whose record failed, again.
+  for (const i of loadIdeas(d.root, d.log)) {
+    if (i.leftovers?.length) sweepInbox(d.root, i.id);
+    if (i.state !== 'creating') for (const dl of i.downloads ?? []) fetchDownload(d, i.id, dl);
+  }
 }
 

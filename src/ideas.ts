@@ -27,6 +27,9 @@ export type Idea = {
   // downloads: team images still on their way into the inbox. On the idea, so a restarted bridge fetches them again
   // and a close drops them in the same write that closes it.
   downloads?: Download[];
+  // leftovers: inbox files of a closed round, kept only while worker (the round's, if it still ran at the close)
+  // runs. No later worker is given them, and the bridge deletes them once that worker is gone.
+  leftovers?: { worker?: string; files: string[] }[];
   // Keys (ts + text hash) of the progress notes already handled, posted or skipped, so a rewritten notes.jsonl
   // posts only notes that are new. Missing on an idea that started building before progress notes existed: the
   // first tick takes every note already there as handled.
