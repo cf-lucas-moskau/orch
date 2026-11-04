@@ -6,12 +6,13 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
 // sleep: the pause between thread renames in `idea relabel`; tests pass a fast one.
-export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string; sleep?: (ms: number) => Promise<void> };
+// fetch: how attachments are downloaded; tests pass a stub.
+export type Deps = { root: string; log: (msg: string) => void; run: (args: string[]) => void; chat?: Chat; now?: () => string; sleep?: (ms: number) => Promise<void>; fetch?: typeof fetch };
 const RENAME_GAP_MS = 2000;
 
 const dir = (root: string) => join(root, 'ideas');
@@ -93,6 +94,79 @@ export function mediaFile(root: string, id: string, name: string): { file: Attac
   } catch { return { refused: 'not found' }; }
   finally { if (fd !== undefined) closeSync(fd); }
 }
+// Images the team posted for an idea, kept for orch and its workers.
+export const inboxDir = (root: string, id: string) => join(dir(root), 'inbox', id);
+const inboxFiles = (root: string, id: string) => { try { return inboxOrder(readdirSync(inboxDir(root, id))).map(f => join(inboxDir(root, id), f)); } catch { return []; } };
+const REDIRECTS = 3;
+// One attachment's bytes, or why not. Every hop, redirects included, must be on Discord's CDN, and the body stops
+// at 8 MB. The bytes are only ever compared against magic numbers, never parsed.
+export async function download(get: typeof fetch, url: string): Promise<{ data: Buffer } | { refused: string }> {
+  for (let hop = 0, u = url; hop <= REDIRECTS; hop++) {
+    if (!inboxUrlOk(u)) return { refused: 'redirected off Discord\'s CDN' };
+    let res: Response;
+    try { res = await get(u, { redirect: 'manual', signal: AbortSignal.timeout(30_000) }); }
+    catch (e) { return { refused: `download failed: ${e instanceof Error ? e.message : e}` }; }
+    if (res.status >= 300 && res.status < 400) {
+      await res.body?.cancel();
+      const to = res.headers.get('location');
+      if (!to) return { refused: `HTTP ${res.status} without a location` };
+      u = new URL(to, u).href;
+      continue;
+    }
+    if (!res.ok) { await res.body?.cancel(); return { refused: `HTTP ${res.status}` }; }
+    const over = { refused: 'over 8 MB' };
+    if (Number(res.headers.get('content-length')) > MAX_MEDIA) { await res.body?.cancel(); return over; }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    try {
+      for await (const c of res.body ?? []) {
+        size += c.length;
+        if (size > MAX_MEDIA) return over;
+        chunks.push(Buffer.from(c));
+      }
+    } catch (e) { return { refused: `download failed: ${e instanceof Error ? e.message : e}` }; }
+    return { data: Buffer.concat(chunks) };
+  }
+  return { refused: 'too many redirects' };
+}
+type Image = { name: string; data: Buffer };
+async function fetchImages(d: Deps, m: Incoming): Promise<Image[]> {
+  const { take, skip } = inboxPicks(m.id, m.attachments ?? []);
+  const left = (what: string) => d.log(`idea bridge: attachment ${what} on message ${m.id} from ${m.author.name} skipped`);
+  skip.forEach(left);
+  const out: Image[] = [];
+  for (const p of take) {
+    const got = await download(d.fetch ?? fetch, p.url).catch(e => ({ refused: `download failed: ${e instanceof Error ? e.message : e}` }));
+    if ('refused' in got) left(`${p.from} ${got.refused}`);
+    else if (!imageOk(p.ext, got.data)) left(`${p.from} its bytes are not a ${p.ext}`);
+    else out.push({ name: p.name, data: got.data });
+  }
+  return out;
+}
+// Downloads run beside the message queue, so a slow image never holds up the next message. Each one records its
+// files on the message once they are in and returns how many it kept.
+const inflight = new Set<Promise<unknown>>();
+export async function settled() { while (inflight.size) await Promise.allSettled([...inflight]); }
+function background(d: Deps, m: Incoming, id: string, then: (kept: number) => void) {
+  const job = (async () => {
+    const images = await fetchImages(d, m);
+    const kept = locked(d.root, () => {
+      if (!existsSync(file(d.root, id))) return 0;
+      const i = read(d.root, id);
+      // A closed idea's inbox is gone; images that arrive after the close are not kept.
+      if (i.state === 'closed') { if (images.length) d.log(`idea ${id}: ${images.length} image(s) from message ${m.id} arrived after the close, not kept`); return 0; }
+      if (images.length) mkdirSync(inboxDir(d.root, id), { recursive: true });
+      for (const f of images) writeFileSync(join(inboxDir(d.root, id), f.name), f.data);
+      save(d.root, withScreenshots(i, m.id, images.map(f => f.name), m.ts ?? i.updated, m.author.name));
+      return images.length;
+    });
+    then(kept);
+  })().catch(e => d.log(`idea ${id}: images from message ${m.id} failed: ${e instanceof Error ? e.message : e}`));
+  inflight.add(job);
+  void job.finally(() => inflight.delete(job));
+}
+const dropInbox = (root: string, id: string) => rmSync(inboxDir(root, id), { recursive: true, force: true });
+
 const loadTold = (root: string): Told => { try { return JSON.parse(readFileSync(join(dir(root), 'told.json'), 'utf8')); } catch { return { day: '', keys: [] }; } };
 export const isOff = (root: string) => existsSync(join(dir(root), 'off'));
 
@@ -147,6 +221,7 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
   const now = (d.now ?? (() => new Date().toISOString()))();
   const config = loadConfig(d.root);
   const text = sanitize(m.text);
+  const ts = m.ts ?? now;
   // Decide and record under the lock; talk to Discord after it.
   const r = locked(d.root, () => {
     const told = loadTold(d.root);
@@ -154,25 +229,33 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     if (r.kind === 'decline' && r.answer) writeAtomic(join(dir(d.root), 'told.json'), JSON.stringify(tell(told, `${r.reason}:${m.author.id}`, now)) + '\n');
     if (r.kind === 'new') {
       const id = nextId(ideaFiles(d.root).map(f => f.slice(0, -5)));
-      save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text }], round: 1, dossier: [] });
+      // An id given back after a failed thread is clean for the next idea.
+      dropInbox(d.root, id);
+      save(d.root, { id, thread: '', message: m.id, author: m.author, text: r.text, state: 'creating', created: now, updated: now, messages: [{ ts: now, by: m.author.name, text: r.text, id: m.id }], round: 1, dossier: [] });
       return { ...r, id };
     }
     if (r.kind === 'answer' || r.kind === 'message' || r.kind === 'go' || r.kind === 'feedback') {
       const fresh = read(d.root, r.idea!.id);
       // Any allowed reply in the thread answers orch's open questions.
-      const cur: Idea = { ...answer(fresh, m.ts ?? now), messages: [...fresh.messages ?? [], { ts: m.ts ?? now, by: m.author.name, text, plan: visiblePlan(fresh, m.ts ?? now) }] };
+      const cur: Idea = { ...answer(fresh, ts), messages: [...fresh.messages ?? [], { ts, by: m.author.name, text, plan: visiblePlan(fresh, ts), id: m.id }] };
       const step = r.kind === 'go' ? 'go' : r.kind === 'feedback' ? 'reopen' : undefined;
       const next = step ? advance(cur, step, now) : cur;
       if (typeof next === 'string') { save(d.root, cur); return { kind: 'ignore' as const }; }
       if (r.kind === 'answer') save(d.root, next);
       // Talk in a reopened round before its plan is feedback too, every message of it.
-      else if (r.kind === 'message') save(d.root, { ...(reopenedTalk(next) ? entry(next, 'feedback', text, m.ts ?? now, m.author.name) : next), needsOrch: 'msg', needsAt: now });
-      else if (r.kind === 'go') save(d.root, { ...entry(next, 'go', `on plan v${next.planVersion}`, now, m.author.name), needsOrch: 'go', needsAt: now, goBy: m.author.id });
-      else save(d.root, { ...entry(next, 'feedback', text, m.ts ?? now, m.author.name), needsOrch: 'feedback', needsAt: now });
+      else if (r.kind === 'message') save(d.root, { ...(reopenedTalk(next) ? entry(next, 'feedback', text, ts, m.author.name, m.id) : next), needsOrch: 'msg', needsAt: now });
+      else if (r.kind === 'go') save(d.root, { ...entry(next, 'go', `on plan v${next.planVersion}`, now, m.author.name, m.id), needsOrch: 'go', needsAt: now, goBy: m.author.id });
+      else save(d.root, { ...entry(next, 'feedback', text, ts, m.author.name, m.id), needsOrch: 'feedback', needsAt: now });
       if (r.kind === 'feedback') return { ...r, round: roundOf(next) };
     }
     return r;
   });
+  // A message with attachments reaches the feed once its images are in, with their count; one without, right away.
+  const clock = d.now ?? (() => new Date().toISOString());
+  const announce = (id: string, line: (kept: number) => string) => {
+    if (!m.attachments?.length) return feed(d.root, line(0), now);
+    background(d, m, id, kept => feed(d.root, line(kept), clock()));
+  };
   const react = (emoji: string, id: string) => d.chat.react(m.channel, m.id, emoji)
     .catch(e => d.log(`idea ${id}: ${emoji} reaction failed: ${e instanceof Error ? e.message : e}`));
   if (r.kind === 'ignore') return;
@@ -185,32 +268,37 @@ export async function handle(d: Deps & { chat: Chat }, m: Incoming) {
     let thread: string;
     try { thread = await d.chat.createThread(m.id, threadName(r.id, r.text)); }
     catch (e) { locked(d.root, () => rmSync(file(d.root, r.id), { force: true })); throw e; }
-    opened(d, r.id, thread, now);
+    // Images are fetched only once the thread exists, so a failed thread leaves none behind.
+    const i = opened(d, r.id, thread, now, false);
+    announce(r.id, kept => ideaLine(r.id, 'new', i.author.name, i.text, kept));
     await react('👀', r.id);
     return;
   }
   const id = r.idea!.id;
   if (r.kind === 'answer') {
+    if (m.attachments?.length) background(d, m, id, () => {});
     await d.chat.reply(m.thread!, r.text);
     update(d.root, id, said('orch', r.text, now));
     d.log(`idea bridge answered ${m.author.name} in ${id}: ${r.text.slice(0, 80)}`);
     return;
   }
-  if (r.kind === 'message') return feed(d.root, ideaLine(id, 'msg', m.author.name, r.text), now);
+  if (r.kind === 'message') return announce(id, kept => ideaLine(id, 'msg', m.author.name, r.text, kept));
   if (r.kind === 'feedback') {
-    feed(d.root, ideaLine(id, 'feedback', m.author.name, r.text), now);
+    announce(id, kept => ideaLine(id, 'feedback', m.author.name, r.text, kept));
     d.log(`idea ${id}: feedback from ${m.author.name} reopens it as round ${r.round}`);
     return react('👀', id);
   }
-  feed(d.root, ideaLine(id, 'go', m.author.name, 'go'), now);
+  announce(id, kept => ideaLine(id, 'go', m.author.name, 'go', kept));
   d.log(`idea ${id}: go from ${m.author.name}`);
   await react('✅', id);
 }
 
-function opened(d: Deps, id: string, thread: string, now: string) {
+// line: whether the new-idea watcher line goes out now; the daemon sends it itself once the post's images are in.
+function opened(d: Deps, id: string, thread: string, now: string, line = true) {
   const i = update(d.root, id, i => ({ ...i, thread, state: 'talk', needsOrch: 'new', needsAt: now }));
-  feed(d.root, ideaLine(id, 'new', i.author.name, i.text), now);
+  if (line) feed(d.root, ideaLine(id, 'new', i.author.name, i.text, i.messages?.[0]?.screenshots?.length), now);
   d.log(`idea ${id} from ${i.author.name}: ${i.text.slice(0, 100)}`);
+  return i;
 }
 
 // On daemon start: an idea left in creating (the bridge died while opening its thread) gets the thread that was
@@ -400,7 +488,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     });
     const name = building.worker!;
     mkdirSync(progressDir(d.root, id), { recursive: true });
-    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id))]); }
+    try { d.run([config.repo, name, workerTask(building, progressDir(d.root, id), inboxFiles(d.root, id))]); }
     catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // run can fail after it made the worker (not ready, prompt stalled): the idea builds with it. The name was free
@@ -445,6 +533,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
       fail(`not closed: ${id} is building with worker ${cur.worker}; clean it up first (orch cleanup ${cur.worker}) or close with --force`);
     const reason = text || 'done';
     await post('close', `Closing this idea: ${reason}`, i => entry({ ...i, closed: reason }, 'close', reason, now));
+    locked(d.root, () => dropInbox(d.root, id));
     d.log(`idea ${id} closed: ${reason}`);
     return `${id} closed`;
   }
@@ -466,6 +555,7 @@ export async function tick(d: Deps & { chat: Chat }) {
         // Nobody answers a closed idea, so nothing stays flagged; a new message flags it again.
         return typeof next === 'string' ? x : entry({ ...next, closed: reason, needsOrch: undefined, needsAt: undefined }, 'close', `${reason}; nothing posted, a new message reopens it`, now);
       });
+      locked(d.root, () => { if (read(d.root, i.id).state === 'closed') dropInbox(d.root, i.id); });
       d.log(`idea ${i.id} closed quietly: ${reason}`);
       continue;
     }
