@@ -9,8 +9,8 @@ export type User = { id: string; name: string };
 // Every message in the idea's thread, in full: the team's (sanitized) and orch's own posts.
 // plan: the plan version on screen when a team message was posted.
 // media: the file a progress note posted with it.
-// screenshots: the images saved from a team message, file names under ideas/inbox/<id>/.
-export type Message = { ts: string; by: string; text: string; plan?: number; media?: string; screenshots?: string[] };
+// id: the chat's message id of a team message. screenshots: the images saved from it, file names under ideas/inbox/<id>/.
+export type Message = { ts: string; by: string; text: string; plan?: number; media?: string; id?: string; screenshots?: string[] };
 // needsOrch: the kind of the last team event orch has not answered yet, flagged at needsAt; an orch post sent after
 // that clears it. planVersion counts the plans posted, planAt is when the current one went up. builds: every worker
 // name this idea has used.
@@ -36,9 +36,9 @@ export type Idea = {
   goReminders?: { v: number; n: number };
 };
 // One step in an idea's dossier. by: who said it (go, feedback). Feedback text is the team's, untrusted.
-// screenshots: the images that came with the team message behind the entry; a message that makes no entry of its own
-// gets a screenshots entry.
-export type Entry = { ts: string; round: number; kind: 'plan' | 'go' | 'start' | 'ship' | 'record' | 'feedback' | 'close' | 'screenshots'; text: string; by?: string; screenshots?: string[] };
+// msg: the chat's id of the team message behind the entry. screenshots: the images that came with it; a message that
+// makes no entry of its own gets a screenshots entry.
+export type Entry = { ts: string; round: number; kind: 'plan' | 'go' | 'start' | 'ship' | 'record' | 'feedback' | 'close' | 'screenshots'; text: string; by?: string; msg?: string; screenshots?: string[] };
 export const STALE_DAYS = 14;
 // Where a building idea is, in words a player understands. orch sets it with `idea stage`.
 export const STAGES = { building: 'building the change', checking: 'running the tests and a code review', deploying: 'putting it live', playtesting: 'trying it out on the live game' } as const;
@@ -91,8 +91,8 @@ export function advance(idea: Idea, step: Step, now: string): Idea | string {
 }
 
 export const roundOf = (i: Idea) => i.round ?? 1;
-export const entry = (i: Idea, kind: Entry['kind'], text: string, ts: string, by?: string): Idea =>
-  ({ ...i, dossier: [...i.dossier ?? [], { ts, round: roundOf(i), kind, text: text.trim(), ...(by ? { by } : {}) }] });
+export const entry = (i: Idea, kind: Entry['kind'], text: string, ts: string, by?: string, msg?: string): Idea =>
+  ({ ...i, dossier: [...i.dossier ?? [], { ts, round: roundOf(i), kind, text: text.trim(), ...(by ? { by } : {}), ...(msg ? { msg } : {}) }] });
 
 export const PAUSED = 'The idea bridge is paused right now. Try again later.';
 const day = (iso: string) => new Date(iso).toLocaleDateString('sv-SE');
@@ -127,8 +127,10 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
   if (!allowed) return { kind: 'decline', reason: 'stranger', text: STRANGER, answer: !o.off && fresh('stranger'), idea };
   if (o.off) return { kind: 'decline', reason: 'paused', text: PAUSED, answer: fresh('paused'), idea };
   if (idea) {
+    // A reply with only images in it counts, when an image would be kept.
+    const said = !!text || inboxPicks(m.id, m.attachments ?? []).take.length > 0;
     // Threads never die: anything said after a ship or a close is feedback that opens the next round.
-    if (done(idea.state)) return text ? { kind: 'feedback', idea, text } : { kind: 'ignore' };
+    if (done(idea.state)) return said ? { kind: 'feedback', idea, text } : { kind: 'ignore' };
     // A go-shaped reply to an open question is an answer for orch, unless it is a valid go on the plan on screen.
     const asked = idea.questions?.some(q => isOpen(q) && q.askedAt < (m.ts ?? o.now));
     if (GO.test(text)) {
@@ -137,7 +139,7 @@ export function route(m: Incoming, o: { ideas: Idea[]; config: Config; off: bool
       if (idea.state === 'planned') return { kind: 'answer', text: 'A new plan went up after your go. Read it and reply **go** again.', idea };
       return { kind: 'answer', text: idea.state === 'talk' ? 'There is no plan to say go to yet.' : `Already past go: this idea is ${idea.state}.`, idea };
     }
-    return text ? { kind: 'message', idea, text } : { kind: 'ignore' };
+    return said ? { kind: 'message', idea, text } : { kind: 'ignore' };
   }
   if (!text) return { kind: 'ignore' };
   const today = o.ideas.filter(i => i.author.id === m.author.id && day(i.created) === day(o.now)).length;
@@ -250,8 +252,10 @@ export function withRelated(text: string, ideas: Pick<Idea, 'id' | 'thread'>[], 
 }
 
 // One line for orch's watcher. The text is untrusted; orch reads it as data.
-export const ideaLine = (id: string, kind: string, author: string, text: string, images = 0) =>
-  `IDEA ${id} ${kind} ${author.replace(/\s+/g, '_')}: ${text.replace(/\s+/g, ' ').trim().slice(0, 300)}${images ? ` [${images} image${images > 1 ? 's' : ''}]` : ''}`;
+export const ideaLine = (id: string, kind: string, author: string, text: string, images = 0) => {
+  const body = [text.replace(/\s+/g, ' ').trim().slice(0, 300), images ? `[${images} image${images > 1 ? 's' : ''}]` : ''].filter(Boolean).join(' ');
+  return `IDEA ${id} ${kind} ${author.replace(/\s+/g, '_')}: ${body || '(no text)'}`;
+};
 
 // What orch has not answered yet, as watcher lines: the last team message of each flagged idea.
 export function pendingLines(ideas: Idea[]): string[] {
@@ -404,13 +408,23 @@ export function inboxPicks(msg: string, files: Upload[]): { take: InboxPick[]; s
   }
   return { take, skip };
 }
-// The screenshots of the team message at ts go on the dossier entry it made (one past before), else on an entry of
-// their own.
-export function withScreenshots(i: Idea, before: number, names: string[], ts: string, by: string): Idea {
+// The screenshots of team message msg go on its record and on the dossier entry it made, else on an entry of their own.
+export function withScreenshots(i: Idea, msg: string, names: string[], ts: string, by: string): Idea {
   if (!names.length) return i;
   const d = i.dossier ?? [];
-  if (d.length > before) return { ...i, dossier: [...d.slice(0, -1), { ...d.at(-1)!, screenshots: names }] };
-  return { ...i, dossier: [...d, { ts, round: roundOf(i), kind: 'screenshots', text: '', by, screenshots: names }] };
+  const messages = (i.messages ?? []).map(x => x.id === msg ? { ...x, screenshots: names } : x);
+  const at = d.findIndex(e => e.msg === msg);
+  const dossier = at < 0 ? [...d, { ts, round: roundOf(i), kind: 'screenshots' as const, text: '', by, msg, screenshots: names }]
+    : d.map((e, n) => n === at ? { ...e, screenshots: names } : e);
+  return { ...i, messages, dossier };
+}
+// Inbox files in posting order: by message id (longer ids are newer), then by n.
+export function inboxOrder(names: string[]): string[] {
+  const key = (f: string) => { const m = /^(\w+)-(\d+)\./.exec(f); return m ? [m[1], Number(m[2])] as const : [f, 0] as const; };
+  return [...names].sort((a, b) => {
+    const [x, n] = key(a), [y, k] = key(b);
+    return x.length - y.length || (x < y ? -1 : x > y ? 1 : n - k);
+  });
 }
 
 export const mention = (id: string) => `<@${id}>`;
