@@ -24,6 +24,9 @@ export type Idea = {
   created: string; updated: string; plan?: string; goBy?: string; worker?: string; closed?: string; messages?: Message[];
   needsOrch?: Pending; needsAt?: string; planVersion?: number; planAt?: string; builds?: string[];
   stage?: Stage; startedAt?: string; questions?: Question[];
+  // downloads: team images still on their way into the inbox. On the idea, so a restarted bridge fetches them again
+  // and a close drops them in the same write that closes it.
+  downloads?: Download[];
   // Keys (ts + text hash) of the progress notes already handled, posted or skipped, so a rewritten notes.jsonl
   // posts only notes that are new. Missing on an idea that started building before progress notes existed: the
   // first tick takes every note already there as handled.
@@ -35,6 +38,8 @@ export type Idea = {
   // goReminders: how many reminders went out for plan version v (dueGoReminder).
   goReminders?: { v: number; n: number };
 };
+// One team message's images to fetch. line: the watcher line's kind and text, fed once the images are in.
+export type Download = { msg: string; ts: string; by: string; picks: InboxPick[]; line?: { kind: string; text: string } };
 // One step in an idea's dossier. by: who said it (go, feedback). Feedback text is the team's, untrusted.
 // msg: the chat's id of the team message behind the entry. screenshots: the images that came with it; a message that
 // makes no entry of its own gets a screenshots entry.

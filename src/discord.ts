@@ -42,7 +42,7 @@ const why = (e: unknown) => e instanceof Error ? e.message : String(e);
 export class RearchiveFailed extends Error {}
 
 // Readers never see a half-written file.
-export function writeAtomic(file: string, text: string) {
+export function writeAtomic(file: string, text: string | Buffer) {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   writeFileSync(tmp, text);

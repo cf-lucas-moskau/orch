@@ -27,7 +27,8 @@ if (process.argv.includes('--once')) {
   // One tick at a time: a slow one makes the next wait instead of running beside it.
   const tickOnce = serial(() => tick(deps));
   setInterval(() => { if (!isOff(root)) tickOnce().catch(e => log(`idea bridge: tick failed: ${e instanceof Error ? e.message : e}`)); }, 60_000);
-  // Images still downloading get a few seconds to land before the bridge goes.
+  // Images still downloading get a few seconds to land before the bridge goes; the rest stay on their idea and are
+  // fetched on the next start.
   const down = async () => { await chat.stop(); await Promise.race([settled(), new Promise(r => setTimeout(r, 10_000))]); process.exit(0); };
   process.on('SIGTERM', down);
   process.on('SIGINT', down);

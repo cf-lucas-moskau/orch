@@ -1779,3 +1779,143 @@ test('review 4 (6): closing an idea removes its inbox, by hand and when it goes 
   assert.equal(loadIdeas(w.root)[1].state, 'closed');
   assert.ok(!existsSync(inboxDir(w.root, 'I-2')));
 });
+
+import { readdirSync } from 'node:fs';
+import { SLOTS } from '../src/ideas-io.ts';
+
+// A fetch that holds every request until release(); open counts the requests in flight, most the peak.
+function gatedFetch() {
+  const s = { open: 0, most: 0, asked: [] as string[] };
+  let release!: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  const f = (async (url: string) => {
+    s.asked.push(url); s.open++; s.most = Math.max(s.most, s.open);
+    await gate; s.open--;
+    return new Response(PNG);
+  }) as unknown as typeof fetch;
+  return { f, s, release };
+}
+const shots = (n: number, tag = 'a'): Upload[] => Array.from({ length: n }, (_, k) => ({ url: `${CDN}/${tag}${k}.png`, filename: `${tag}${k}.png`, size: 10 }));
+
+test('review 5 (1): downloads across messages are capped, a message\'s own images go in parallel', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  const { f, s, release } = gatedFetch();
+  w.d.fetch = f;
+  w.chat.post('ann', 'first', 't-m1', LATER(1), shots(2, 'a'));
+  w.chat.post('ann', 'second', 't-m1', LATER(2), shots(5, 'b'));
+  await w.chat.poll();
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(s.asked.length, SLOTS, `only ${SLOTS} downloads run at once`);
+  assert.deepEqual(s.asked.slice(0, 2), [`${CDN}/a0.png`, `${CDN}/a1.png`], 'both images of the first message started together');
+  release();
+  await settled();
+  assert.equal(s.most, SLOTS);
+  assert.equal(s.asked.length, 7);
+  assert.deepEqual(w.feed().slice(1), ['IDEA I-1 msg ann: first [2 images]', 'IDEA I-1 msg ann: second [5 images]']);
+});
+
+test('review 5 (2): close --force keeps the inbox while the worker builds, tick drops it once the worker is gone', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({ [`${CDN}/a0.png`]: [200, PNG] }).f;
+  await w.post('idea', '--as', 'ann');
+  w.chat.post('ann', 'see', 't-m1', LATER(1), shots(1));
+  await w.chat.poll(); await settled();
+  const f = join(w.root, 'ideas', 'I-1.json');
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), state: 'building', worker: 'idea-1' }));
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'running' }]));
+  await idea(['close', 'I-1', '--force'], w.d);
+  assert.equal(loadIdeas(w.root)[0].state, 'closed');
+  assert.ok(existsSync(join(inboxDir(w.root, 'I-1'), 'm2-1.png')), 'the running worker still has its images');
+  await tick(w.d);
+  assert.ok(existsSync(inboxDir(w.root, 'I-1')), 'kept while the worker runs');
+  writeFileSync(join(w.root, 'workers.json'), JSON.stringify([{ name: 'idea-1', status: 'closed' }]));
+  await tick(w.d);
+  assert.ok(!existsSync(inboxDir(w.root, 'I-1')), 'gone with the worker');
+});
+
+test('review 5 (3): a go whose images fail to save still reaches the watcher', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({ [`${CDN}/a0.png`]: [200, PNG] }).f;
+  await w.post('idea', '--as', 'ann');
+  await idea(['plan', 'I-1', 'Bats drop 2x loot.'], w.d);
+  mkdirSync(join(w.root, 'ideas', 'inbox'), { recursive: true });
+  writeFileSync(inboxDir(w.root, 'I-1'), 'a file where the folder goes');
+  w.chat.post('ann', 'go', 't-m1', LATER(1), shots(1));
+  await w.chat.poll(); await settled();
+  assert.equal(w.feed().at(-1), 'IDEA I-1 go ann: go');
+  assert.ok(w.logs.some(l => l.startsWith('idea bridge: attachment "a0.png" not saved: ')), w.logs.join('\n'));
+  const i = loadIdeas(w.root)[0];
+  assert.equal(i.state, 'approved');
+  assert.equal(i.downloads, undefined, 'the download is done with');
+});
+
+test('review 5 (4): a download killed with the bridge runs again on the next start and its line goes out', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  const { f, release } = gatedFetch();
+  w.d.fetch = f;
+  w.chat.post('ann', 'see this', 't-m1', LATER(1), shots(2));
+  await w.chat.poll();
+  const left = readFileSync(join(w.root, 'ideas', 'I-1.json'), 'utf8');
+  assert.deepEqual(JSON.parse(left).downloads.map((x: any) => [x.msg, x.picks.length, x.line]), [['m2', 2, { kind: 'msg', text: 'see this' }]], 'recorded with the message');
+  release(); await settled();
+  // A fresh bridge on the store the stopped one left behind.
+  const v = world();
+  writeFileSync(join(v.root, 'ideas', 'I-1.json'), left);
+  v.d.fetch = fakeFetch({ [`${CDN}/a0.png`]: [200, PNG], [`${CDN}/a1.png`]: [200, PNG] }).f;
+  await reconcile(v.d); await settled();
+  assert.deepEqual(v.feed(), ['IDEA I-1 msg ann: see this [2 images]']);
+  const i = loadIdeas(v.root)[0];
+  assert.deepEqual([i.messages!.at(-1)!.screenshots, i.downloads], [['m2-1.png', 'm2-2.png'], undefined]);
+});
+
+test('review 5 (5): an idea recovered by reconcile gets the images of its post', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({ [`${CDN}/a0.png`]: [200, PNG] }).f;
+  // The bridge died right after the thread opened: the idea stays creating, its post's images recorded.
+  await w.chat.createThread('m1', 'Bats');
+  const f = join(w.root, 'ideas', 'I-1.json');
+  writeFileSync(f, JSON.stringify({ id: 'I-1', thread: '', message: 'm1', author: { id: 'ann', name: 'ann' }, text: 'Bats', state: 'creating', created: NOW, updated: NOW,
+    messages: [{ ts: NOW, by: 'ann', text: 'Bats', id: 'm1' }], round: 1, dossier: [], downloads: [{ msg: 'm1', ts: NOW, by: 'ann', picks: inboxPicks('m1', shots(1)).take, line: { kind: 'new', text: 'Bats' } }] }));
+  await reconcile(w.d); await settled();
+  assert.deepEqual(w.feed(), ['IDEA I-1 new ann: Bats [1 image]']);
+  const i = loadIdeas(w.root)[0];
+  assert.deepEqual([i.state, i.thread, i.messages![0].screenshots], ['talk', 't-m1', ['m1-1.png']]);
+});
+
+test('review 5 (6): a half-written inbox file is never handed to a worker', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({ [`${CDN}/a0.png`]: [200, PNG] }).f;
+  await w.post('idea', '--as', 'ann');
+  w.chat.post('ann', 'see', 't-m1', LATER(1), shots(1));
+  await w.chat.poll(); await settled();
+  writeFileSync(join(inboxDir(w.root, 'I-1'), 'm3-1.png.123.abc.tmp'), PNG.subarray(0, 4));
+  assert.deepEqual(readdirSync(inboxDir(w.root, 'I-1')).sort(), ['m2-1.png', 'm3-1.png.123.abc.tmp']);
+  await idea(['plan', 'I-1', 'Plan.'], w.d);
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+  await idea(['start', 'I-1'], w.d);
+  const task = w.runs[0][2];
+  assert.ok(task.includes(`- ${join(inboxDir(w.root, 'I-1'), 'm2-1.png')}\n`));
+  assert.ok(!task.includes('.tmp'), 'the partial file is not listed');
+});
+
+test('review 5 (7): an image still downloading at the close never lands in the reopened round', async () => {
+  const w = world();
+  await w.post('idea', '--as', 'ann');
+  const { f, release } = gatedFetch();
+  w.d.fetch = f;
+  w.chat.post('ann', 'old shot', 't-m1', LATER(1), shots(1));
+  await w.chat.poll();
+  await idea(['close', 'I-1'], w.d);
+  assert.equal(loadIdeas(w.root)[0].downloads, undefined, 'the close drops the download');
+  w.d.fetch = fakeFetch({}).f;
+  w.chat.post('bob', 'it broke', 't-m1', LATER(2));
+  await w.chat.poll();
+  assert.equal(loadIdeas(w.root)[0].state, 'talk');
+  release(); await settled();
+  assert.ok(!existsSync(inboxDir(w.root, 'I-1')), 'no file from the closed round');
+  const i = loadIdeas(w.root)[0];
+  assert.ok(!i.dossier!.some(e => e.screenshots), 'no screenshots entry in the new round');
+  assert.ok(w.logs.includes('idea bridge: attachment "a0.png" arrived after the close on message m2 from ann skipped'), w.logs.join('\n'));
+});
