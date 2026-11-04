@@ -175,11 +175,16 @@ export function startBlocker(idea: Idea, ideas: Idea[], config: Config, off: boo
 
 // A park counts only on a building idea and only while its decision is open; any other park is stale and gets cleared.
 export const isParked = (i: Idea, open: Set<string>) => i.state === 'building' && !!i.parked && open.has(i.parked);
+export const DECISION_ID = /^D-\d+$/;
+// A decision file's Status, '' when it has none. Only an explicit `- Status: open` keeps a build parked, so a file
+// without a Status line never holds a park forever.
+export const decisionStatus = (text: string) => /^- Status:\s*(\w+)/m.exec(text)?.[1] ?? '';
 // status: the decision file's Status, undefined when there is no such file.
 export function parkBlocker(i: Idea, decision: string, status: string | undefined): string | null {
   if (i.state !== 'building') return `${i.id} is ${i.state}; only a building idea can be parked`;
-  if (!/^D-\d+$/.test(decision)) return `${decision} is not a decision id (D-NN)`;
+  if (!DECISION_ID.test(decision)) return `${decision} is not a decision id (D-NN)`;
   if (status === undefined) return `no decisions/${decision}.md`;
+  if (status === '') return `${decision} has no Status line, so it is not open`;
   if (status !== 'open') return `${decision} is ${status}, not open`;
   return null;
 }

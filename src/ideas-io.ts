@@ -4,10 +4,9 @@
 // never across an await, and every write replaces its file atomically.
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, sep } from 'node:path';
-import { parseDecision } from './state.ts';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, DECISION_ID, decisionStatus, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Told,
 } from './ideas.ts';
 
@@ -68,24 +67,25 @@ export function migrateAll(root: string, log: (msg: string) => void) {
     }
   });
 }
-// The Status of every decision in decisions/, by id.
-function decisions(root: string): Map<string, string> {
-  const d = join(root, 'decisions');
-  if (!existsSync(d)) return new Map();
-  return new Map(readdirSync(d).filter(f => /^D-\d+\.md$/.test(f)).map(f => {
-    const x = parseDecision(f.slice(0, -3), readFileSync(join(d, f), 'utf8'));
-    return [x.id, x.status];
-  }));
+// One decision file's Status: undefined when there is no such file (or it went away while read), '' without a Status line.
+function statusOf(root: string, id: string): string | undefined {
+  if (!DECISION_ID.test(id)) return undefined;
+  try { return decisionStatus(readFileSync(join(root, 'decisions', `${id}.md`), 'utf8')); } catch { return undefined; }
 }
-const openDecisions = (root: string) => new Set([...decisions(root)].filter(([, s]) => s === 'open').map(([id]) => id));
+// The decisions the parked ideas wait on that are still open. Only their files are read, none when nothing is parked.
+const openDecisions = (ideas: Idea[], root: string) =>
+  new Set([...new Set(ideas.flatMap(i => i.parked ? [i.parked] : []))].filter(id => statusOf(root, id) === 'open'));
 // A park whose decision is no longer open, or whose idea stopped building, is cleared. Every `orch idea` and every
 // bridge tick runs it.
 export function unparkSettled(root: string, log: (msg: string) => void) {
-  const open = openDecisions(root);
+  const ideas = loadIdeas(root, log);
+  if (!ideas.some(i => i.parked)) return;
+  const open = openDecisions(ideas, root);
   const stale = (i: Idea) => !!i.parked && !isParked(i, open);
-  for (const i of loadIdeas(root, log).filter(stale)) {
-    update(root, i.id, x => stale(x) ? { ...x, parked: undefined } : x);
-    log(`idea ${i.id} unparked: ${i.state === 'building' ? `${i.parked} is no longer open` : `it is ${i.state}`}`);
+  for (const i of ideas.filter(stale)) {
+    let cleared: Idea | undefined;
+    update(root, i.id, x => stale(x) ? (cleared = x, { ...x, parked: undefined }) : x);
+    if (cleared) log(`idea ${i.id} unparked: ${cleared.state === 'building' ? `${cleared.parked} is no longer open` : `it is ${cleared.state}`}`);
   }
 }
 const reopenedTalk = (i: Idea) => roundOf(i) > 1 && !(i.dossier ?? []).some(e => e.round === roundOf(i) && e.kind === 'plan');
@@ -566,7 +566,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const building = locked(d.root, () => {
       const fresh = loadIdeas(d.root, d.log);
       const me = fresh.find(i => i.id === id)!;
-      const blocker = startBlocker(me, fresh, config, isOff(d.root), new Set(workers(d.root).filter(w => w.status === 'running').map(w => w.name)), openDecisions(d.root));
+      const blocker = startBlocker(me, fresh, config, isOff(d.root), new Set(workers(d.root).filter(w => w.status === 'running').map(w => w.name)), openDecisions(fresh, d.root));
       if (blocker) fail(`not started: ${blocker}`);
       // A fresh name every build: a rebuild after ship never lands on a worker or branch that exists.
       const name = workerName(id, [...workers(d.root).map(w => w.name), ...me.builds ?? []]);
@@ -605,18 +605,19 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   }
   if (sub === 'park') {
     const decision = rest[0] ?? fail(USAGE);
-    const status = decisions(d.root).get(decision);
+    // The decision is read under the lock, so a file removed meanwhile cannot park the idea.
     update(d.root, id, i => {
-      const blocker = parkBlocker(i, decision, status);
+      const blocker = parkBlocker(i, decision, statusOf(d.root, decision));
       return blocker ? fail(`not parked: ${blocker}`) : { ...i, parked: decision };
     });
     d.log(`idea ${id} parked on ${decision}; its build slot is free until ${decision} is decided`);
     return `${id} parked on ${decision}`;
   }
   if (sub === 'unpark') {
-    if (!cur.parked) return `${id} is not parked`;
-    update(d.root, id, i => ({ ...i, parked: undefined }));
-    d.log(`idea ${id} unparked`);
+    let was: string | undefined;
+    update(d.root, id, i => (was = i.parked, i.parked ? { ...i, parked: undefined } : i));
+    if (!was) return `${id} is not parked`;
+    d.log(`idea ${id} unparked from ${was}`);
     return `${id} unparked`;
   }
   if (sub === 'ship') {
