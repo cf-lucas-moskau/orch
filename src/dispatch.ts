@@ -303,3 +303,14 @@ export function newOverlaps(os: Overlap[], seen: OverlapSeen, scanned: (repo: st
   }
   return { lines, seen: next };
 }
+
+// A PR title from a worker's task: the plan's first line (a later idea round's task opens with its dossier, the plan
+// follows its "## Round N" heading), without markdown bold, cut at the first sentence end and at a word within 70 chars.
+export function prTitle(task: string): string {
+  const round = task.match(/\n## Round \d+: the plan to build\n([\s\S]*)$/);
+  const line = ((round ? round[1] : task).split('\n').find(l => l.trim()) ?? '').replace(/\*\*/g, '').trim();
+  const sentence = line.replace(/^(.+?[.!?])\s.*$/, '$1').replace(/\.$/, '');
+  if (sentence.length <= 70) return sentence;
+  const cut = sentence.slice(0, 70);
+  return cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : 70).trim();
+}
