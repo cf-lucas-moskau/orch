@@ -945,7 +945,7 @@ test('DiscordChat sends the buffers it was given, pings only the asked user and 
   const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib, onError: m => errors.push(m) });
   const big = Buffer.concat([Buffer.from('\0\0\0\x20ftypisom', 'latin1'), Buffer.alloc(8 * 1024 * 1024)]);
   const posted = await chat.reply('t1', 'Boat', { files: [{ name: 'boat.png', data: PNG }, { name: 'big.mp4', data: big }, { name: 'x.png', data: Buffer.from('#!/bin/sh') }] });
-  assert.deepEqual(posted, { ts: '2026-10-30T10:00:05.123Z' }, 'the time Discord gives the post');
+  assert.deepEqual(posted, { ts: '2026-10-30T10:00:05.123Z', ids: ['thread-1'] }, 'the time and message id Discord gives the post');
   await chat.reply('t1', '<@42> Red or blue?', { ping: '42' });
   assert.deepEqual(calls, [
     ['POST', '/channels/t1/messages', { content: 'Boat', allowed_mentions: { parse: [] }, attachments: [{ id: 0, filename: 'boat.png' }] }],

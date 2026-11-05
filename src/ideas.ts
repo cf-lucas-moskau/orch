@@ -63,11 +63,17 @@ export const MAX_MEDIA = 8 * 1024 * 1024;
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
   repo: string; liveUrl: string;
+  // Channel ids of team-general and implementers-discussions, found by name and written here on first use.
+  team?: string; impl?: string;
 };
 // thread is set when the message was posted inside a thread, otherwise it is a top-level post in the channel.
 // ts is when it was posted, as Discord says.
 // attachments: files on the message as Discord describes them, untrusted.
-export type Incoming = { id: string; channel: string; thread?: string; author: User; text: string; ts?: string; attachments?: Upload[] };
+// mentions: user ids the message mentions. replyTo: the author of the message it replies to.
+export type Incoming = {
+  id: string; channel: string; thread?: string; author: User & { bot?: boolean }; text: string; ts?: string; attachments?: Upload[];
+  mentions?: string[]; replyTo?: string;
+};
 export type Upload = { url: string; filename: string; size: number; contentType?: string };
 export type Route =
   | { kind: 'answer'; text: string; idea?: Idea }
@@ -340,7 +346,7 @@ const minsSince = (from: string | undefined, now: string) => from ? (Date.parse(
 // Plain words with a slash (left/right, and/or) stay.
 const PATH_WITH_FILE = /[\w.-]*(\/[\w.-]+)*\/[\w-][\w.-]*\.(tsx?|jsx?|mjs|cjs|json|md|png|jpe?g|gif|mp4|webm|svg|css|html?|ya?ml|toml|sh|py|rs|go|env|lock|txt|log|sql|plist|pem|key)\b/gi;
 // Outgoing text a worker wrote: no links, mentions, paths or anything that looks like a token.
-export function scrub(text: string): string {
+export function scrub(text: string, max = 500): string {
   return text
     .replace(/<(@[!&]?|#)\d+>/g, '')
     .replace(/@(everyone|here)\b/g, '')
@@ -348,13 +354,17 @@ export function scrub(text: string): string {
     .replace(/(^|[\s(])(~|\.{1,2})?\/[^\s)]+/g, '$1')
     .replace(/(^|[\s(])[A-Za-z]:\\\S+/g, '$1')
     .replace(PATH_WITH_FILE, '')
-    .replace(/\b(sk|pk|ghp|gho|ghs|xox[abp]|AKIA)[-_A-Za-z0-9]{8,}/g, '')
-    .replace(/\b(?=[A-Za-z0-9_\-.]*\d)(?=[A-Za-z0-9_\-.]*[A-Za-z])[A-Za-z0-9_\-.]{24,}\b/g, '')
+    .replace(TOKENS, '')
+    .replace(LONG_TOKENS, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/ +([.,;:!?])/g, '$1')
     .trim()
-    .slice(0, 500);
+    .slice(0, max);
 }
+const TOKENS = /\b(sk|pk|ghp|gho|ghs|xox[abp]|AKIA)[-_A-Za-z0-9]{8,}/g;
+const LONG_TOKENS = /\b(?=[A-Za-z0-9_\-.]*\d)(?=[A-Za-z0-9_\-.]*[A-Za-z])[A-Za-z0-9_\-.]{24,}\b/g;
+// Anything that looks like a token or key, for text kept on disk.
+export const stripTokens = (text: string) => text.replace(TOKENS, '[token removed]').replace(LONG_TOKENS, '[token removed]');
 
 export type Note = { key: string; ts: string; text: string; media?: string };
 const MEDIA = /^[\w-][\w.-]*\.(png|jpe?g|gif|mp4|webm)$/i;

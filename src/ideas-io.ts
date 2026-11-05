@@ -295,10 +295,10 @@ export function locked<T>(root: string, f: () => T): T {
 const update = (root: string, id: string, f: (i: Idea) => Idea): Idea =>
   locked(root, () => { const i = f(read(root, id)); save(root, i); return i; });
 
-// The watcher tails the feed, so a feed line is how an idea message reaches orch.
-function feed(root: string, line: string, now: string) {
+// The watcher tails the feed, so a feed line is how an idea message reaches orch. event: Idea, or Team for team-general.
+export function feed(root: string, line: string, now: string, event: 'Idea' | 'Team' = 'Idea') {
   mkdirSync(join(root, 'feed'), { recursive: true });
-  const e = { ts: now, sid: 'idea-bridge', event: 'Idea', cwd: root, prompt: '', msg: line };
+  const e = { ts: now, sid: 'idea-bridge', event, cwd: root, prompt: '', msg: line };
   appendFileSync(join(root, 'feed', `${new Date(now).toLocaleDateString('sv-SE')}.jsonl`), JSON.stringify(e) + '\n');
 }
 
@@ -443,20 +443,23 @@ const USAGE = `usage: orch idea list | off | on | relabel
        orch idea record <id> <file|text>   (dossier only, nothing is posted)
        files are read only from ideas/drafts/`;
 
-// A single argument naming a file under ideas/drafts/ (relative, no ..) is that file's text; anything else is the text
-// itself, so a mistyped path can never post the config, secrets/ or a file outside orch.
-export function textOf(root: string, args: string[]): string {
-  const a = args.length === 1 ? args[0] : '';
+// The text of a file under ideas/drafts/ named by a relative path without .., or with vision, of ideas/vision.md;
+// null for any other argument.
+export function draftText(root: string, a: string, vision = false): string | null {
   const rel = a && !isAbsolute(a) ? normalize(a) : '';
-  const drafts = join(dir(root), 'drafts');
-  if (rel.startsWith(join('ideas', 'drafts') + sep) && !a.split(/[\\/]/).includes('..')) {
-    const f = join(root, rel);
-    try {
-      if (statSync(f).isFile() && realpathSync(f).startsWith(realpathSync(drafts) + sep)) return readFileSync(f, 'utf8').trim();
-    } catch {}
-  }
-  return args.join(' ').trim();
+  if (!rel || a.split(/[\\/]/).includes('..')) return null;
+  const f = join(root, rel);
+  try {
+    if (!statSync(f).isFile()) return null;
+    const real = realpathSync(f);
+    if (rel.startsWith(join('ideas', 'drafts') + sep) && real.startsWith(realpathSync(join(dir(root), 'drafts')) + sep)) return readFileSync(f, 'utf8').trim();
+    if (vision && rel === join('ideas', 'vision.md') && real === join(realpathSync(dir(root)), 'vision.md')) return readFileSync(f, 'utf8').trim();
+  } catch {}
+  return null;
 }
+// A single argument naming a file under ideas/drafts/ is that file's text; anything else is the text itself, so a
+// mistyped path can never post the config, secrets/ or a file outside orch.
+export const textOf = (root: string, args: string[]): string => (args.length === 1 ? draftText(root, args[0]) : null) ?? args.join(' ').trim();
 
 export async function idea(args: string[], d: Deps): Promise<string> {
   const [sub, id, ...rest] = args;

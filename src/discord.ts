@@ -22,17 +22,30 @@ export interface Chat {
   // Resolves to the time the first message was posted, as the chat says.
   reply(target: string, text: string, o?: ReplyOptions): Promise<Posted>;
   react(target: string, message: string, emoji: string): Promise<void>;
+  // The bot's own user id.
+  me(): Promise<string>;
+  // A text channel's id by its name, in the ideas channel's server.
+  findChannel(name: string): Promise<string | null>;
+  // Also hand top-level posts in this channel to the handler, live and on catch-up.
+  watch(channel: string): void;
+  // The last n messages of a channel, oldest first, bots included.
+  history(channel: string, n: number): Promise<Incoming[]>;
+  // Throws PinRefused when the bot may not pin there.
+  pin(channel: string, message: string): Promise<void>;
+  remove(channel: string, message: string): Promise<void>;
 }
 
 // files: media already read and checked by the caller; the adapter never reads a path.
 export type Attachment = { name: string; data: Buffer };
 export type ReplyOptions = { files?: Attachment[]; ping?: string };
-export type Posted = { ts?: string };
+// ids: every message the post went out as, in order.
+export type Posted = { ts?: string; ids: string[] };
 export type Outgoing =
   | { kind: 'thread'; message: string; thread: string; name: string }
   | { kind: 'rename'; thread: string; name: string }
   | { kind: 'reply'; target: string; text: string; files?: string[]; ping?: string }
-  | { kind: 'react'; target: string; message: string; emoji: string };
+  | { kind: 'react'; target: string; message: string; emoji: string }
+  | { kind: 'pin' | 'delete'; target: string; message: string };
 
 export type OnError = (msg: string) => void;
 const toConsole: OnError = msg => console.error(new Date().toISOString(), msg);
@@ -40,6 +53,8 @@ const why = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 // The thread got its new name but stayed unarchived.
 export class RearchiveFailed extends Error {}
+// Discord refused a pin for missing permissions.
+export class PinRefused extends Error {}
 
 // Readers never see a half-written file.
 export function writeAtomic(file: string, text: string | Buffer) {
@@ -65,7 +80,12 @@ export class MockChat implements Chat {
     this.dir = join(root, 'ideas', 'mock');
     mkdirSync(this.dir, { recursive: true });
   }
-  private out(o: Outgoing) { const ts = this.now(); appendFileSync(join(this.dir, 'outbox.jsonl'), JSON.stringify({ ts, ...o }) + '\n'); return ts; }
+  // A post's id is its line number in the outbox.
+  private out(o: Outgoing) {
+    const ts = this.now(), file = join(this.dir, 'outbox.jsonl'), id = `o${lines(file).length + 1}`;
+    appendFileSync(file, JSON.stringify({ ts, ...o }) + '\n');
+    return { ts, id };
+  }
   onMessage(handler: (m: Incoming) => Promise<void>) { this.handler = handler; }
   // Handles inbox lines not seen yet; the count seen survives restarts. A line that fails is reported and skipped.
   async poll() {
@@ -103,19 +123,37 @@ export class MockChat implements Chat {
   async renameThread(thread: string, name: string) { this.out({ kind: 'rename', thread, name }); }
   async reply(target: string, text: string, o: ReplyOptions = {}): Promise<Posted> {
     const parts = split(text);
-    const ts = parts.map((t, n) => this.out({
+    const sent = parts.map((t, n) => this.out({
       kind: 'reply', target, text: t,
       ...(o.files?.length && n === parts.length - 1 ? { files: o.files.map(f => f.name) } : {}),
       ...(o.ping ? { ping: o.ping } : {}),
     }));
-    return { ts: ts[0] };
+    return { ts: sent[0]?.ts, ids: sent.map(p => p.id) };
   }
   async react(target: string, message: string, emoji: string) { this.out({ kind: 'react', target, message, emoji }); }
+  async me() { return 'orch'; }
+  // Mock channel ids are their names.
+  async findChannel(name: string) { return name; }
+  watch() {}
+  async history(channel: string, n: number): Promise<Incoming[]> {
+    const theirs: Incoming[] = lines(join(this.dir, 'inbox.jsonl')).map(l => JSON.parse(l)).filter((m: Incoming) => m.channel === channel && !m.thread);
+    const ours: Incoming[] = this.outbox().flatMap((o, i) => o.kind === 'reply' && o.target === channel
+      ? [{ id: `o${i + 1}`, channel, author: { id: 'orch', name: 'orch', bot: true }, text: o.text, ts: o.ts }] : []);
+    return [...theirs, ...ours].sort((a, b) => (a.ts ?? '').localeCompare(b.ts ?? '')).slice(-n);
+  }
+  async pin(target: string, message: string) { this.out({ kind: 'pin', target, message }); }
+  async remove(target: string, message: string) { this.out({ kind: 'delete', target, message }); }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
   // `orch idea fake`: post as someone, at the top level or inside an idea's thread. Mock user ids are their names.
-  post(as: string, text: string, thread?: string, ts = new Date().toISOString(), attachments: Upload[] = []): Incoming {
+  // channel: a top-level post in another channel. replyTo: the user whose message this one replies to.
+  // <@name> in the text mentions name.
+  post(as: string, text: string, thread?: string, ts = new Date().toISOString(), attachments: Upload[] = [], o: { channel?: string; replyTo?: string } = {}): Incoming {
     const file = join(this.dir, 'inbox.jsonl');
-    const m: Incoming = { id: `m${lines(file).length + 1}`, channel: thread ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text, ts, ...(attachments.length ? { attachments } : {}) };
+    const mentions = [...text.matchAll(/<@!?([\w-]+)>/g)].map(x => x[1]);
+    const m: Incoming = {
+      id: `m${lines(file).length + 1}`, channel: thread ?? o.channel ?? this.channel, ...(thread ? { thread } : {}), author: { id: as, name: as }, text, ts,
+      ...(attachments.length ? { attachments } : {}), ...(mentions.length ? { mentions } : {}), ...(o.replyTo ? { replyTo: o.replyTo } : {}),
+    };
     appendFileSync(file, JSON.stringify(m) + '\n');
     return m;
   }
@@ -131,9 +169,17 @@ const route = {
   threads: (c: string, m: string) => `/channels/${c}/messages/${m}/threads`,
   reaction: (c: string, m: string, emoji: string) => `/channels/${c}/messages/${m}/reactions/${encodeURIComponent(emoji)}/@me`,
   activeThreads: (g: string) => `/guilds/${g}/threads/active`,
+  guildChannels: (g: string) => `/guilds/${g}/channels`,
+  pin: (c: string, m: string) => `/channels/${c}/messages/pins/${m}`,
+  me: '/users/@me',
 };
 type RawFile = { url: string; filename: string; size: number; content_type?: string };
-type Raw = { id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string; timestamp?: string; attachments?: RawFile[] };
+type Raw = {
+  id: string; channel_id: string; author: { id: string; username: string; bot?: boolean }; content: string; timestamp?: string; attachments?: RawFile[];
+  mentions?: { id: string }[]; referenced_message?: { author?: { id: string } } | null;
+};
+// Text and announcement channels.
+const TEXT_CHANNELS = [0, 5];
 const byId = (a: { id: string }, b: { id: string }) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1);
 
 export type DiscordOptions = { token: string; channel: string; cursorFile: string; onError?: OnError; lib?: any; retryMs?: number };
@@ -150,6 +196,9 @@ export class DiscordChat implements Chat {
   private held: Incoming[] | null = [];
   private stalled = new Set<string>();
   private retry?: NodeJS.Timeout;
+  // Channels besides the ideas channel whose top-level posts go to the handler (team-general).
+  private listen = new Set<string>();
+  private self?: string;
   constructor(o: DiscordOptions) { this.o = { onError: toConsole, ...o }; }
   // o.lib stands in for the discord.js module in tests.
   private async lib(): Promise<any> {
@@ -198,12 +247,15 @@ export class DiscordChat implements Chat {
     finally { const held = this.held ?? []; this.held = null; for (const m of held.sort(byId)) void this.deliver(m); }
   });
 
-  private incoming(r: Raw, thread: boolean): Incoming | null {
-    if (r.author.bot) return null;
+  private incoming(r: Raw, thread: boolean, bots = false): Incoming | null {
+    if (r.author.bot && !bots) return null;
     const files: Upload[] = (r.attachments ?? []).map(a => ({ url: a.url, filename: a.filename, size: a.size, ...(a.content_type ? { contentType: a.content_type } : {}) }));
+    const mentions = (r.mentions ?? []).map(u => u.id), replyTo = r.referenced_message?.author?.id;
     return {
-      id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}), author: { id: r.author.id, name: r.author.username }, text: r.content,
+      id: r.id, channel: r.channel_id, ...(thread ? { thread: r.channel_id } : {}),
+      author: { id: r.author.id, name: r.author.username, ...(r.author.bot ? { bot: true } : {}) }, text: r.content,
       ...(r.timestamp ? { ts: new Date(r.timestamp).toISOString() } : {}), ...(files.length ? { attachments: files } : {}),
+      ...(mentions.length ? { mentions } : {}), ...(replyTo ? { replyTo } : {}),
     };
   }
 
@@ -219,13 +271,22 @@ export class DiscordChat implements Chat {
       { id: this.o.channel, thread: false, after: cursor[this.o.channel] },
       ...(active.threads ?? []).filter((t: any) => t.parent_id === this.o.channel).map((t: any) => ({ id: t.id, thread: true, after: cursor[t.id] ?? t.id })),
     ];
-    for (const t of targets) {
-      for (let after = t.after; ;) {
-        const page: Raw[] = (await rest.get(route.messages(t.id), { query: new URLSearchParams({ after, limit: '100' }) })).sort(byId);
-        for (const r of page) { const m = this.incoming(r, t.thread); if (m) await this.deliver(m); }
-        if (page.length < 100 || this.stalled.has(t.id)) break;
-        after = page.at(-1)!.id;
-      }
+    for (const t of targets) await this.pages(t.id, t.thread, t.after);
+    // The other channels go last, each on its own: one the bot cannot read never holds up the idea threads.
+    for (const c of this.listen) {
+      try {
+        if (!this.cursor()[c]) this.move(c, (await rest.get(route.channel(c))).last_message_id ?? c);
+        await this.pages(c, false, this.cursor()[c]);
+      } catch (e) { this.o.onError(`discord catch-up of channel ${c} skipped: ${why(e)}`); }
+    }
+  }
+  private async pages(id: string, thread: boolean, after: string) {
+    const rest = await this.api();
+    for (; ;) {
+      const page: Raw[] = (await rest.get(route.messages(id), { query: new URLSearchParams({ after, limit: '100' }) })).sort(byId);
+      for (const r of page) { const m = this.incoming(r, thread); if (m) await this.deliver(m); }
+      if (page.length < 100 || this.stalled.has(id)) break;
+      after = page.at(-1)!.id;
     }
   }
 
@@ -237,9 +298,14 @@ export class DiscordChat implements Chat {
     this.client.on('shardError', (e: unknown) => this.o.onError(`discord shard error: ${why(e)}`));
     this.client.on('messageCreate', (m: any) => {
       const inThread = m.channel.isThread();
-      if ((inThread ? m.channel.parentId : m.channelId) !== this.o.channel) return;
+      if (inThread ? m.channel.parentId !== this.o.channel : m.channelId !== this.o.channel && !this.listen.has(m.channelId)) return;
       const attachments: RawFile[] = [...m.attachments?.values() ?? []].map((a: any) => ({ url: a.url, filename: a.name, size: a.size, content_type: a.contentType ?? undefined }));
-      const i = this.incoming({ id: m.id, channel_id: m.channelId, author: m.author, content: m.content, timestamp: m.createdTimestamp ? new Date(m.createdTimestamp).toISOString() : undefined, attachments }, inThread);
+      const mentions = [...m.mentions?.users?.keys() ?? []].map((id: string) => ({ id }));
+      const replied = m.mentions?.repliedUser?.id;
+      const i = this.incoming({
+        id: m.id, channel_id: m.channelId, author: m.author, content: m.content, timestamp: m.createdTimestamp ? new Date(m.createdTimestamp).toISOString() : undefined, attachments,
+        mentions, referenced_message: replied ? { author: { id: replied } } : null,
+      }, inThread);
       if (!i) return;
       if (this.held) this.held.push(i); else void this.deliver(i);
     });
@@ -287,6 +353,7 @@ export class DiscordChat implements Chat {
     const allowed_mentions = o.ping ? { parse: [], users: [o.ping] } : NO_PINGS;
     const parts = split(text);
     let ts: string | undefined;
+    const ids: string[] = [];
     for (const [n, content] of parts.entries()) {
       const last = n === parts.length - 1 && files.length > 0;
       const sent = await (await this.api()).post(route.messages(target), {
@@ -294,12 +361,40 @@ export class DiscordChat implements Chat {
         ...(last ? { files } : {}),
       });
       if (n === 0 && typeof sent?.timestamp === 'string') ts = new Date(sent.timestamp).toISOString();
+      if (sent?.id) ids.push(sent.id);
     }
-    return { ts };
+    return { ts, ids };
   }
   async react(target: string, message: string, emoji: string) {
     await (await this.api()).put(route.reaction(target, message, emoji));
   }
+  async me() { return this.self ??= (await (await this.api()).get(route.me)).id as string; }
+  async findChannel(name: string) {
+    const rest = await this.api();
+    const { guild_id } = await rest.get(route.channel(this.o.channel));
+    const all: { id: string; name: string; type: number }[] = await rest.get(route.guildChannels(guild_id));
+    return all.find(c => c.name === name && TEXT_CHANNELS.includes(c.type))?.id ?? null;
+  }
+  watch(channel: string) { this.listen.add(channel); }
+  // Pages back from the newest message, 100 at a time.
+  async history(channel: string, n: number): Promise<Incoming[]> {
+    const rest = await this.api();
+    const got: Raw[] = [];
+    for (let before: string | undefined; got.length < n;) {
+      const query = new URLSearchParams({ limit: String(Math.min(100, n - got.length)), ...(before ? { before } : {}) });
+      const page: Raw[] = (await rest.get(route.messages(channel), { query })).sort(byId);
+      got.unshift(...page);
+      if (page.length < Number(query.get('limit'))) break;
+      before = page[0].id;
+    }
+    return got.flatMap(r => this.incoming(r, false, true) ?? []);
+  }
+  // 50013 is Discord's Missing Permissions; 50001, Missing Access, when the bot cannot see the channel at all.
+  async pin(channel: string, message: string) {
+    try { await (await this.api()).put(route.pin(channel, message)); }
+    catch (e: any) { if (e?.status === 403 || e?.code === 50013 || e?.code === 50001) throw new PinRefused(why(e)); throw e; }
+  }
+  async remove(channel: string, message: string) { await (await this.api()).delete(route.message(channel, message)); }
 }
 
 export function chatFor(root: string, config: Config, onError?: OnError): Chat {

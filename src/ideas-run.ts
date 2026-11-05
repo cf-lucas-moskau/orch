@@ -6,13 +6,18 @@ import { join } from 'node:path';
 import { chatFor, MockChat } from './discord.ts';
 import { handle, isOff, loadConfig, migrateAll, reconcile, settled, tick } from './ideas-io.ts';
 import { serial } from './ideas.ts';
+import { channelId, teamMessage } from './team-io.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const log = (msg: string) => appendFileSync(join(root, 'log.md'), `- ${new Date().toLocaleString('sv-SE').slice(0, 16)} ${msg}\n`);
 const config = loadConfig(root);
 const chat = chatFor(root, config, msg => log(`idea bridge: ${msg}`));
 const deps = { root, log, run: () => { throw new Error('the bridge never dispatches'); }, chat };
-chat.onMessage(serial(m => handle(deps, m)));
+// team-general's top-level posts go to their own handler; without the channel the idea bridge runs on alone.
+let team: { id: string; me: string } | undefined;
+try { team = { id: await channelId(root, chat, 'team'), me: await chat.me() }; chat.watch(team.id); }
+catch (e) { log(`idea bridge: team-general not watched: ${e instanceof Error ? e.message : e}`); }
+chat.onMessage(serial(async m => team && m.channel === team.id && !m.thread ? teamMessage(deps, m, team.me) : handle(deps, m)));
 migrateAll(root, log);
 await reconcile(deps);
 
