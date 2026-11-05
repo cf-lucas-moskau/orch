@@ -1,0 +1,9 @@
+hw.memsize: 34359738368
+vm.loadavg: { 10.78 10.77 11.92 }
+kern.boottime: { sec = 1784480757, usec = 789829 } Sun Jul 19 19:05:57 2026
+hw.ncpu: 12
+vm.swapusage: total = 13312.00M  used = 11889.06M  free = 1422.94M  (encrypted)
+kern.memorystatus_vm_pressure_level: 1
+hw.perflevel0.logicalcpu: 8
+hw.perflevel1.logicalcpu: 4
+machdep.cpu.brand_string: Apple M2 Pro

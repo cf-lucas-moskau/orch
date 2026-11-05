@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Files, Tab, View } from '../types'
+import type { Files, Health, Tab, View } from '../types'
 import {
-  STAGES, actions, ago, buildDeck, clip, edge, flowFromCall, hhmm, parseDecision, parseFeed, stageBar, statusLine,
+  STAGES, actions, ago, buildDeck, clip, edge, flowFromCall, healthAlert, healthRows, hhmm, parseBatt, parseCelsius, parseDecision,
+  parseDf, parseDockerDf, parseDu, parseFeed, parseSysctl, parseTherm, parseVmStat, stageBar, statusLine,
   type Deck, type FeedEvent, type Flow, type Node,
 } from './core'
 
@@ -17,6 +18,7 @@ const files = atom({ plugin: 'orch-deck', key: 'files' } as const, DEFAULT_FILES
 const view = atom({ plugin: 'orch-deck', key: 'view' } as const, DEFAULT_VIEW)
 const live = atom({ plugin: 'orch-deck', key: 'live' } as const, [] as Flow[])
 const tick = atom({ plugin: 'orch-deck', key: 'tick' } as const, 0)
+const health = atom({ plugin: 'orch-deck', key: 'health' } as const, { fast: null, slow: null } as Health)
 
 // The plugin sits in <orch>/mod; the ledger is its parent.
 const orchRoot = ($: EngineInterface) => $.plugin.root.replace(/\/\.claude-plugin\/?$/, '').replace(/\/mod\/?$/, '')
@@ -85,12 +87,46 @@ async function pollFiles($: EngineInterface) {
     lastFiles = key
     await update($, files, () => next)
   }
-  $.ui.status(statusLine(await deckOf($)))
+  const [h, now] = await Promise.all([read($, health), $.clock.now()])
+  $.ui.status(statusLine(await deckOf($), healthAlert(healthRows(h, now))))
   const day = today(await $.clock.now())
   if (day !== streamDay) {
     stream?.return?.()
     startFeed($, day)
   }
+}
+
+// ---------------------------------------------------------------- machine health
+
+const out = async ($: EngineInterface, argv: string[], timeoutMs = 2000) => {
+  try {
+    const r = await $.process.run(argv, { timeoutMs })
+    return r.exitCode === 0 ? r.stdout : null
+  } catch { return null }
+}
+
+const SYSCTL = ['hw.memsize', 'vm.loadavg', 'kern.boottime', 'hw.ncpu', 'vm.swapusage', 'kern.memorystatus_vm_pressure_level', 'hw.perflevel0.logicalcpu', 'hw.perflevel1.logicalcpu']
+async function pollFast($: EngineInterface) {
+  const [df, vm, sys, batt, therm] = await Promise.all([
+    out($, ['df', '-k', '/', '/System/Volumes/Data']), out($, ['vm_stat']), out($, ['sysctl', ...SYSCTL]),
+    out($, ['pmset', '-g', 'batt']), out($, ['pmset', '-g', 'therm']),
+  ])
+  if (!df || !vm || !sys) return
+  await update($, health, h => ({ ...h, fast: { disks: parseDf(df), memUsedB: parseVmStat(vm), sys: parseSysctl(sys), power: parseBatt(batt ?? ''), therm: parseTherm(therm ?? '') } }))
+}
+
+// powermetrics needs root, so temperature only shows when one of these no-sudo tools is installed.
+const TEMP_TOOLS = [['osx-cpu-temp'], ['smctemp', '-c'], ['istats', 'cpu', 'temp', '--value-only']]
+async function pollSlow($: EngineInterface) {
+  const home = await $.env.get('HOME')
+  const [dock, du, ...temps] = await Promise.all([
+    $.process.run(['docker', 'system', 'df', '--format', '{{json .}}'], { timeoutMs: 20_000 }).catch(() => null),
+    out($, ['du', '-sk', `${home}/.herdr/worktrees`], 120_000),
+    ...TEMP_TOOLS.map(t => out($, t)),
+  ])
+  const docker = !dock ? 'docker not installed' : dock.exitCode !== 0 ? 'docker not running' : parseDockerDf(dock.stdout)
+  const tempC = temps.map(t => (t ? parseCelsius(t) : null)).find(c => c !== null) ?? null
+  await update($, health, h => ({ ...h, slow: { docker, worktreesB: du ? parseDu(du) : null, tempC } }))
 }
 
 // ---------------------------------------------------------------- acting
@@ -136,6 +172,10 @@ export const register: Register = (on) => {
       const last = fl.at(-1)
       if (last && now - Date.parse(last.ts) < 21_000) await update($, tick, t => t + 1)
     })().catch(() => undefined))
+    void pollFast($)
+    void pollSlow($)
+    $.clock.every(30_000, () => void pollFast($))
+    $.clock.every(5 * 60_000, () => void pollSlow($))
     void $.ui.open({ id: PANE, title: 'orch deck', columns: 72, rows: 10 }).catch(() => undefined)
     return started
   })
@@ -168,7 +208,10 @@ export const register: Register = (on) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
     const Input = 'Input' in els ? els.Input : null
-    const [d, v, t, now] = await Promise.all([deckOf($), read($, view), read($, tick), $.clock.now()])
+    const [d, v, t, now, h] = await Promise.all([deckOf($), read($, view), read($, tick), $.clock.now(), read($, health)])
+    const hRows = healthRows(h, now)
+    const alert = healthAlert(hRows)
+    const levelColor = (l: string) => (l === 'crit' ? 'error' : l === 'warn' ? 'warning' : 'success')
     const W = Math.max(48, e.props.bodyColumns)
     const T = (children: string, props: Record<string, unknown> = {}) => Text({ ...props, children })
     const row = (...children: RenderChildren[]) => Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 1, children })
@@ -181,7 +224,7 @@ export const register: Register = (on) => {
     const statusColor = (s: Node['status']) => (s === 'blocked' || s === 'question' ? 'warning' : s === 'working' ? 'suggestion' : s === 'done' ? 'success' : 'inactive')
     const kindColor = (n: Node) => (n.kind === 'codex' ? 'permission' : 'claude')
 
-    const tabs: [Tab, string, string][] = [['map', 'm', 'Map'], ['bus', 'b', 'Bus'], ['workers', 'w', 'Workers'], ['decisions', 'd', `Decisions${d.decisions.length ? ` ${d.decisions.length}` : ''}`], ['flows', 'f', 'Flows']]
+    const tabs: [Tab, string, string][] = [['map', 'm', 'Map'], ['bus', 'b', 'Bus'], ['workers', 'w', 'Workers'], ['decisions', 'd', `Decisions${d.decisions.length ? ` ${d.decisions.length}` : ''}`], ['flows', 'f', 'Flows'], ['health', 'h', alert ? 'Health !' : 'Health']]
     const header = row(
       T('orch deck', { bold: true, color: 'claude' }),
       ...tabs.map(([id, key, label]) => Button({ key: `tab-${id}`, plain: true, hotkey: key, label: v.tab === id ? `[${label}]` : label, dimColor: v.tab !== id, onPress: () => void setView($, { tab: id, readout: null }) })),
@@ -218,6 +261,7 @@ export const register: Register = (on) => {
       body.push(Box({ flexDirection: 'row', children: [T('you ', { dimColor: true }), T('──▶ ', { color: 'inactive' }), T('orch ', { bold: true, color: 'claude' }), T(flowNow ? clip(`[${flowNow.flow}] ${flowNow.detail}`, W - 18) : '', { dimColor: true, wrap: 'truncate-end' })] }))
       list.forEach((n, i) => body.push(nodeRow(n, i, i === list.length - 1 && !d.idle)))
       if (d.idle) body.push(T(`  └──────▶ ${d.idle} idle session${d.idle === 1 ? '' : 's'}`, { color: 'inactive' }))
+      if (alert) body.push(T(clip(`⚠ ${alert.text}`, W - 2), { color: levelColor(alert.level), wrap: 'truncate-end' }))
       if (d.decisions.length) body.push(T(' '), ...decisionRows(false))
       body.push(T(' '), T('bus', { dimColor: true }), ...busRows(6))
     } else if (v.tab === 'bus') {
@@ -237,6 +281,10 @@ export const register: Register = (on) => {
       }
     } else if (v.tab === 'decisions') {
       body.push(...(d.decisions.length ? decisionRows(true) : [T('No open decisions.', { dimColor: true })]))
+    } else if (v.tab === 'health') {
+      const labelW = Math.max(...hRows.map(r => r.label.length))
+      for (const r of hRows) body.push(row(T(r.level === 'ok' ? '●' : '▲', { color: levelColor(r.level) }), T(r.label.padEnd(labelW), { bold: true }), T(r.value, { color: r.level === 'ok' ? undefined : levelColor(r.level), wrap: 'wrap' })))
+      body.push(T(' '), T('every 30 s; docker, worktrees and temperature every 5 min', { dimColor: true }))
     } else {
       body.push(T('routing: Claude by default · Codex for "with Codex" or (codex) · pair for (both) or risky work', { dimColor: true, wrap: 'wrap' }), T(' '))
       for (const f of [...d.flows].reverse().slice(0, 25)) body.push(row(T(f.ts.slice(11) || f.ts, { dimColor: true }), T(f.flow.padEnd(9), { color: 'suggestion' }), T(clip(f.detail, W - 18), { wrap: 'truncate-end' })))
