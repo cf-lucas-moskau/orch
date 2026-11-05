@@ -95,6 +95,7 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /leave your changes uncommitted; orch runs the gates and commits/);
   assert.match(b, /in-scope implementation and investigation calls yourself/);
   assert.match(b, /bound to 127\.0\.0\.1/);
+  assert.match(b, /^Review: don't run a code review yourself .*orch reviews your work after the gates/m);
   assert.match(b, /removed when you are done, with their volumes \(`docker run --rm`, or `docker rm -f -v <name>`/);
   assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'pr7', branch: 'orch/pr7' }, false).includes('Other workers:'), 'no merge line for PR or stacked workers');
   assert.match(b, /^Other workers: before the final test run, merge origin\/<default> into your branch \(`git fetch origin` then `git merge --autostash --no-edit origin\/<default>`; your changes stay uncommitted; never rebase\) and rerun the tests\. .*mention any such overlap in your report\.$/m);
