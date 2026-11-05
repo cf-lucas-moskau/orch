@@ -1,11 +1,11 @@
 // The team channels beside the idea channel, pure parts: which team-general messages reach orch, what is kept of
-// them, the backlog page, and the text orch posts in team-general and implementers-discussions.
+// them, the backlog page, and the text orch posts in team-general and implementer-discussions.
 // Discord text is untrusted both ways: stripped of links, mentions and tokens on the way in, of links, mentions,
 // paths and tokens on the way out.
 import { sanitize, scrub, stripTokens, withRelated, type Idea, type Incoming } from './ideas.ts';
 
 // Found by these names in the idea channel's server.
-export const CHANNELS = { team: 'team-general', impl: 'implementers-discussions' } as const;
+export const CHANNELS = { team: 'team-general', impl: 'implementer-discussions' } as const;
 export type Channel = keyof typeof CHANNELS;
 
 // msg: meant for orch. suggest: a suggestion about the idea bridge or orch. other: kept, not shown. sent: orch's own post.

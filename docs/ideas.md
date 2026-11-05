@@ -28,7 +28,7 @@ Everything orch posts in a thread (`say`, `ask`, `plan`, `ship`, `close`, questi
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
 
-## team-general and implementers-discussions
+## team-general and implementer-discussions
 
 Two more channels in the same server, found by name on first use; their ids are then written to `ideas/config.json` as `team` and `impl`. The bridge watches top-level posts in team-general (not its threads) and keeps every one in `ideas/team/<date>.jsonl`, stripped of links, mentions and anything token-like. Only two kinds reach orch, as `TEAM <kind> <author>: <text>` watcher lines:
 
@@ -44,8 +44,8 @@ All of these run as `npm run -s orch -- <team|impl> <sub>`. Everything posted lo
 | `team backlog [n]` | One-off catch-up: the last n messages (default 200, at most 1000), oldest first, written to `ideas/team/backlog.md` with author, time, text and attachment names. Every message is quoted line by line. |
 | `team say <text\|file>` | Post in team-general. Files only from `ideas/drafts/`. |
 | `team fake "<text>" --as <user> [--reply-to <user>]` | Mock only: post in team-general as someone; `<@orch>` mentions the bot, `--reply-to orch` replies to it. |
-| `impl say <text\|file>` | Post in implementers-discussions. |
-| `impl raise <id> <text\|file>` | Post in implementers-discussions led by the idea's id, with the `Related:` line linking its thread (and any other idea named). |
+| `impl say <text\|file>` | Post in implementer-discussions. |
+| `impl raise <id> <text\|file>` | Post in implementer-discussions led by the idea's id, with the `Related:` line linking its thread (and any other idea named). |
 | `impl pin <file>` | Post `ideas/vision.md` (written by people; orch only reads it) or a file under `ideas/drafts/` and pin every message it went out as. Without the Pin Messages permission the post is deleted again and the command says what to grant. |
 
 ## Threads never die
@@ -75,7 +75,7 @@ Every new idea, thread message, go, feedback, question timeout and unanswered nu
   "adapter": "mock",
   "channel": "ideas",
   "team": "<team-general id, filled in>",
-  "impl": "<implementers-discussions id, filled in>",
+  "impl": "<implementer-discussions id, filled in>",
   "allowlist": ["ann", "bob"],
   "perDay": 3,
   "building": 1,
@@ -111,7 +111,7 @@ For a running bridge, `npm run -s ideas` polls the mock inbox every second.
    ```
    https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=2252109051432000
    ```
-   It needs View Channels and Read Message History in team-general, Send Messages in team-general and implementers-discussions, and Pin Messages in implementers-discussions for `impl pin`. A bot invited with the older URL gets Pin Messages from its role in Server Settings, Roles. Discord split pinning out of Manage Messages into its own Pin Messages permission; Manage Messages alone no longer pins.
+   It needs View Channels and Read Message History in team-general, Send Messages in team-general and implementer-discussions, and Pin Messages in implementer-discussions for `impl pin`. A bot invited with the older URL gets Pin Messages from its role in Server Settings, Roles. Discord split pinning out of Manage Messages into its own Pin Messages permission; Manage Messages alone no longer pins.
 4. Get the ids. In Discord, Settings, Advanced, switch on Developer Mode. Right-click the ideas channel and Copy Channel ID; right-click each team member and Copy User ID.
 5. Write the config:
    ```json

@@ -122,13 +122,13 @@ test('team say, impl say and impl raise post scrubbed text in their channels', a
   await idea(['fake', 'Bats drop more loot', '--as', 'ann'], w.d);
   await w.chat.poll();
   assert.equal(await team(['say', 'Morning! Bridge notes at https://x.example', '<@42>'], w.d), 'posted in team-general');
-  assert.equal(await impl(['say', 'Who owns src/server/loot.ts?'], w.d), 'posted in implementers-discussions');
-  assert.equal(await impl(['raise', 'I-1', 'needs a drop table change'], w.d), 'raised I-1 in implementers-discussions');
+  assert.equal(await impl(['say', 'Who owns src/server/loot.ts?'], w.d), 'posted in implementer-discussions');
+  assert.equal(await impl(['raise', 'I-1', 'needs a drop table change'], w.d), 'raised I-1 in implementer-discussions');
   const replies = w.sent().filter(o => o.kind === 'reply' && o.target !== 't-m1').map(o => [(o as any).target, (o as any).text]);
   assert.deepEqual(replies, [
     ['team-general', 'Morning! Bridge notes at'],
-    ['implementers-discussions', 'Who owns?'],
-    ['implementers-discussions', '**I-1** needs a drop table change\n\nRelated: I-1 <#t-m1>'],
+    ['implementer-discussions', 'Who owns?'],
+    ['implementer-discussions', '**I-1** needs a drop table change\n\nRelated: I-1 <#t-m1>'],
   ]);
   assert.equal(w.stored().at(-1).kind, 'sent', "orch's own team-general post is kept too");
   await assert.rejects(impl(['raise', 'I-9', 'x'], w.d), /no idea I-9/);
@@ -142,7 +142,7 @@ test('team say, impl say and impl raise post scrubbed text in their channels', a
 test('impl pin posts the vision and pins every part; without the permission it takes the post back and says so', async () => {
   const w = world();
   writeFileSync(join(w.root, 'ideas', 'vision.md'), `# Vision\n\n${'Evrloot stays small and handmade. '.repeat(80)}`);
-  assert.equal(await impl(['pin', 'ideas/vision.md'], w.d), 'posted ideas/vision.md in implementers-discussions and pinned it');
+  assert.equal(await impl(['pin', 'ideas/vision.md'], w.d), 'posted ideas/vision.md in implementer-discussions and pinned it');
   const posts = w.sent();
   assert.deepEqual(posts.map(o => o.kind), ['reply', 'reply', 'pin', 'pin']);
   assert.deepEqual(posts.slice(2).map(o => (o as any).message), ['o2', 'o1'], 'last part pinned first, so the first part tops the pin list');
@@ -151,7 +151,7 @@ test('impl pin posts the vision and pins every part; without the permission it t
   await assert.rejects(impl(['pin', 'ideas/../ideas/vision.md'], w.d), /pin takes/);
 
   w.chat.refuse = true;
-  await assert.rejects(impl(['pin', 'ideas/vision.md'], w.d), /may not pin messages in implementers-discussions: give its role the Pin Messages permission.*The post was taken back/);
+  await assert.rejects(impl(['pin', 'ideas/vision.md'], w.d), /may not pin messages in implementer-discussions: give its role the Pin Messages permission.*The post was taken back/);
   assert.deepEqual(w.sent().slice(4).map(o => `${o.kind} ${(o as any).message ?? ''}`.trim()), ['reply', 'reply', 'delete o5', 'delete o6']);
 });
 
@@ -182,7 +182,7 @@ test('the live adapter finds the channels by name and writes their ids once', as
   writeFileSync(join(root, 'ideas', 'config.json'), JSON.stringify({ adapter: 'discord', channel: '100', allowlist: ['u1'], team: 'team-general' }));
   const { calls, lib } = discordStub({
     '/channels/100': { guild_id: 'g' },
-    '/guilds/g/channels': [{ id: '7', name: 'team-general', type: 2 }, { id: '200', name: 'team-general', type: 0 }, { id: '201', name: 'implementers-discussions', type: 0 }],
+    '/guilds/g/channels': [{ id: '7', name: 'team-general', type: 2 }, { id: '200', name: 'team-general', type: 0 }, { id: '201', name: 'implementer-discussions', type: 0 }],
   });
   const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib, onError: () => {} });
   assert.equal(await channelId(root, chat, 'team'), '200', 'a mock name left over is looked up again; voice channels do not count');
