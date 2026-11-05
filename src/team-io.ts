@@ -1,4 +1,4 @@
-// IO glue for team-general and implementers-discussions: finding their ids, the bridge's team-general handler and
+// IO glue for team-general and implementer-discussions: finding their ids, the bridge's team-general handler and
 // `orch team` / `orch impl`. team-general is kept in ideas/team/<date>.jsonl; only messages for orch and suggestions
 // about the bridge reach the watcher.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';

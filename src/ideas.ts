@@ -63,7 +63,7 @@ export const MAX_MEDIA = 8 * 1024 * 1024;
 export type Config = {
   adapter: 'mock' | 'discord'; channel: string; allowlist: string[]; perDay: number; building: number;
   repo: string; liveUrl: string;
-  // Channel ids of team-general and implementers-discussions, found by name and written here on first use.
+  // Channel ids of team-general and implementer-discussions, found by name and written here on first use.
   team?: string; impl?: string;
 };
 // thread is set when the message was posted inside a thread, otherwise it is a top-level post in the channel.

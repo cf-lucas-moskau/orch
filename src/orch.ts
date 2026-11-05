@@ -826,7 +826,7 @@ async function idea(args: string[]) {
   try { console.log(await ideaCmd(args, { root, log, run: runWorker })); } catch (e: any) { die(e.message); }
 }
 
-// team-general and implementers-discussions, beside the idea channel.
+// team-general and implementer-discussions, beside the idea channel.
 async function team(args: string[]) { try { console.log(await teamCmd(args, { root, log, run: () => die('team never dispatches') })); } catch (e: any) { die(e.message); } }
 async function impl(args: string[]) { try { console.log(await implCmd(args, { root, log, run: () => die('impl never dispatches') })); } catch (e: any) { die(e.message); } }
 
