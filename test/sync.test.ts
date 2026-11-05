@@ -11,6 +11,8 @@ import { join } from 'node:path';
 // `herdr` is fake: it creates real worktrees, and no agent ever starts, so `run` stops after saving the worker.
 const orchTs = join(import.meta.dirname, '..', 'src', 'orch.ts');
 const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+// Every local.md a test writes starts here, so no test depends on this machine's free disk.
+const HERMETIC_LOCAL = 'Disk floor: 0 GB\n';
 const ORCH_COMMIT = 'Written by claude worker w, committed by orch after the gates passed.';
 
 function world(autonomy = '- push: on\n- merge: on\n') {
@@ -51,7 +53,7 @@ esac
   sh(repo, `printf 'a\\n' > shared.txt && printf 'x\\n' > other.txt && printf '#!/bin/sh\\ntest ! -e broken\\n' > gate.sh && chmod +x gate.sh
     git add -A && git commit -qm init && git push -q origin main && git remote set-head origin -a >/dev/null && git worktree add -q -b orch/w ${wt} main`);
   writeFileSync(join(orch, 'projects.md'), `| Repo | Path | Gates | Notes |\n|---|---|---|---|\n| demo | ${repo} | \`./gate.sh\` | |\n`);
-  writeFileSync(join(orch, 'local.md'), `## Autonomy\n${autonomy}`);
+  writeFileSync(join(orch, 'local.md'), `${HERMETIC_LOCAL}## Autonomy\n${autonomy}`);
   const worker = (extra = {}) => writeFileSync(join(orch, 'workers.json'), JSON.stringify([{
     name: 'w', kind: 'claude', base: sh(repo, 'git rev-parse main'), repo: 'demo', repoPath: repo, task: 't', branch: 'orch/w', worktree: wt,
     workspace: 'x', pane: 'x', sid: '', started: '2026-11-01 09:00', status: 'running', ...extra,
@@ -335,7 +337,7 @@ test('a repo whose fetch fails is skipped with an error line, and the other repo
 test('run: --from main is the default branch however spelled, a child gets its parent, and a failed fetch falls back with a warning', () => {
   const w = world();
   try {
-    writeFileSync(join(w.base, 'orch', 'local.md'), 'Concurrency cap: 9\n');
+    writeFileSync(join(w.base, 'orch', 'local.md'), `${HERMETIC_LOCAL}Concurrency cap: 9\n`);
     const main = w.sh(w.repo, 'git rev-parse main');
     let r = w.orch('run', 'demo', 'same', 'task', '--from', 'main');
     assert.match(r.out, /worker same is not ready/);
