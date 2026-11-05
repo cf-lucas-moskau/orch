@@ -185,6 +185,8 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Decisions: make in-scope implementation and investigation calls yourself and name them in your report. Stop and ask only for outward-facing or irreversible actions or a change of scope.`,
     // Anonymous Postgres volumes left by workers filled 20 GB of Docker in the week of 2026-10-26.
     `Local previews: your own throwaway database and app on free ports bound to 127.0.0.1, removed when you are done, with their volumes (\`docker run --rm\`, or \`docker rm -f -v <name>\`, \`docker compose down -v\`). Stop processes by PID, never by name pattern; other workers run on the same machine.`,
+    // Workers looped on their own Claude+Codex reviews (I-4 seven rounds, I-59) while orch reviews every commit anyway (2026-11-05).
+    `Review: don't run a code review yourself (no bimodel, Codex or reviewer subagents, whatever a playbook says); orch reviews your work after the gates and sends back what to fix. Check your own work with tests and by using it, then report.`,
     // Lucas found a flaw in almost every screenshot workers presented as proof (2026-10-24).
     `Screenshots: before you report or show one, open it and review it critically as a player would. List every flaw you see (misplaced UI, clipping, a character standing where it can't, seams, wrong labels) and fix it or name it. Never present a screenshot as proof without that review.`,
     // Auto mode stops on rm with globs or variables (b3, ew2 on 2026-10-26); nobody is there to approve it.
