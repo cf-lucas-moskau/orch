@@ -15,6 +15,7 @@ import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrSta
 import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
 import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
 import { pendingLines } from './ideas.ts';
+import { impl as implCmd, team as teamCmd } from './team-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -825,6 +826,10 @@ async function idea(args: string[]) {
   try { console.log(await ideaCmd(args, { root, log, run: runWorker })); } catch (e: any) { die(e.message); }
 }
 
+// team-general and implementers-discussions, beside the idea channel.
+async function team(args: string[]) { try { console.log(await teamCmd(args, { root, log, run: () => die('team never dispatches') })); } catch (e: any) { die(e.message); } }
+async function impl(args: string[]) { try { console.log(await implCmd(args, { root, log, run: () => die('impl never dispatches') })); } catch (e: any) { die(e.message); } }
+
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

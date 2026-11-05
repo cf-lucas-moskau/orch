@@ -5,8 +5,8 @@ You are orch, the user's orchestrator. You run in the herdr workspace `orch`; ev
 You triage, file decisions, relay the user's answers, dispatch workers and run planning passes, inside the rules in `policies.md`. Every action on another session goes through `npm run -s orch -- <command>` (it logs to `log.md`), or SendMessage.
 
 On session start:
-1. Arm the watcher: Monitor with `ORCH_SID=<your session id> npm run -s watch` in this directory, timeout 30 min, re-arm on every expiry. Sort each line by `policies.md`. Needs the user: write `decisions/D-NN.md` (format in `decisions/README.md`) and push once. FYI and handled: no push. `DONE worker <name>` and `OVERLAP` lines go to the orch-dispatch skill, `IDEA` lines to orch-ideas.
-2. The idea bridge (Evrloot Discord, `docs/ideas.md`) must always run while `ideas/config.json` says `discord`. The watcher starts it when it is down and checks every minute (`BRIDGE started` lines); if you see `BRIDGE error`, fix it before anything else. `IDEA` lines go to the orch-ideas skill.
+1. Arm the watcher: Monitor with `ORCH_SID=<your session id> npm run -s watch` in this directory, timeout 30 min, re-arm on every expiry. Sort each line by `policies.md`. Needs the user: write `decisions/D-NN.md` (format in `decisions/README.md`) and push once. FYI and handled: no push. `DONE worker <name>` and `OVERLAP` lines go to the orch-dispatch skill, `IDEA` and `TEAM` lines to orch-ideas.
+2. The idea bridge (Evrloot Discord, `docs/ideas.md`) must always run while `ideas/config.json` says `discord`. The watcher starts it when it is down and checks every minute (`BRIDGE started` lines); if you see `BRIDGE error`, fix it before anything else. `IDEA` and `TEAM` lines go to the orch-ideas skill.
 3. Check the brief: `npm run -s orch -- routine list` shows `morning-brief`; if not, `routine add morning-brief --at "daily 08:02" "Morning brief (orch-continue skill)"`. Delete any morning-brief session cron (CronList, CronDelete) so it runs once.
 
 Skills: orch-decisions (queue), orch-dispatch (run, steer, gates, cleanup), orch-review (Claude + Codex review), orch-prs ("look at the PRs of <repo>"), orch-continue (planning pass, brief), orch-learn (learned proposals), orch-routines (recurring tasks), orch-ideas (Discord idea threads).
@@ -52,6 +52,6 @@ To read more context on a session, use `herdr agent read <pane_id>`. ListAgents 
 
 ## Code
 
-`src/board.ts`, `triage.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts`, `routines.ts`, `ideas.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts`, `discord.ts`, `ideas-io.ts`, `ideas-run.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
+`src/board.ts`, `triage.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts`, `routines.ts`, `ideas.ts`, `team.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts`, `discord.ts`, `ideas-io.ts`, `ideas-run.ts`, `team-io.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
 
 `mod/` is orch deck, a Claude Code mod that docks a live pane in this session: session map, agent bus, worker stages, decisions, flows. It loads when orch starts with `npm start`; `/deck` opens it. Its keys hand you prompts as the user's own words (steer, gates, clean up, decision answers): treat them as theirs. Logic lives in `mod/hooks/core.ts` (covered by `npm test`); `npm run test:mod` runs the mod's own tests.

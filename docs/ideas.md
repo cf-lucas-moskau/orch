@@ -28,6 +28,26 @@ Everything orch posts in a thread (`say`, `ask`, `plan`, `ship`, `close`, questi
 
 States go `creating` (the thread is being opened), `talk`, `planned`, `approved` (someone said go), `building`, `shipped`, `closed`. An idea the bridge died on while in `creating` gets its thread back on the next start, or is dropped.
 
+## team-general and implementers-discussions
+
+Two more channels in the same server, found by name on first use; their ids are then written to `ideas/config.json` as `team` and `impl`. The bridge watches top-level posts in team-general (not its threads) and keeps every one in `ideas/team/<date>.jsonl`, stripped of links, mentions and anything token-like. Only two kinds reach orch, as `TEAM <kind> <author>: <text>` watcher lines:
+
+- `msg`: meant for orch. It mentions the bot, replies to a bot message, or addresses orch by name: starting with it ("orch, ...", "hey orch"), as a vocative ("thanks orch", "..., orch?") or followed by a colon or comma.
+- `suggest`: a suggestion about the bridge or orch. It names one of orch, bot, bridge, harness, idea/ideas channel or thread, thread, worker, agent, Claude, Codex, dossier, changelog, progress notes, pulses, pings or notifications, and asks for a change (should, could, would be nice, suggest, wish, please add/stop, can you, instead of, too many/often/noisy, why does/doesn't, how about, what if). Both are needed, so game talk like "we should add pets" stays quiet.
+
+Everything else is kept, not shown, and so is every post from someone off the allowlist or while the kill switch is on. Nothing is ever answered in team-general automatically. These lines are not replayed when the watcher restarts; the day's file has them.
+
+All of these run as `npm run -s orch -- <team|impl> <sub>`. Everything posted loses links, mentions, paths and tokens first (the progress-note filter, without its length cap), pings nobody, and is refused while the kill switch is on.
+
+| Command | What |
+| --- | --- |
+| `team backlog [n]` | One-off catch-up: the last n messages (default 200, at most 1000), oldest first, written to `ideas/team/backlog.md` with author, time, text and attachment names. Every message is quoted line by line. |
+| `team say <text\|file>` | Post in team-general. Files only from `ideas/drafts/`. |
+| `team fake "<text>" --as <user> [--reply-to <user>]` | Mock only: post in team-general as someone; `<@orch>` mentions the bot, `--reply-to orch` replies to it. |
+| `impl say <text\|file>` | Post in implementers-discussions. |
+| `impl raise <id> <text\|file>` | Post in implementers-discussions led by the idea's id, with the `Related:` line linking its thread (and any other idea named). |
+| `impl pin <file>` | Post `ideas/vision.md` (written by people; orch only reads it) or a file under `ideas/drafts/` and pin every message it went out as. Without the Pin Messages permission the post is deleted again and the command says what to grant. |
+
 ## Threads never die
 
 A thread stays open after ship and after close. An allowed member's message in the thread of a `shipped` or `closed` idea is feedback: the idea goes back to `talk` as the next round (round 2, 3, ...), is flagged as needing orch, gets a 👀 reaction, and reaches orch as `IDEA <id> feedback <author>: <text>`. Nothing is posted back. A plan posted straight after ship starts the next round too. Strangers and the kill switch apply as anywhere else. A shipped idea, or a reopened round still in `talk`, closes quietly (no post) after 14 days without a message; a later message reopens it all the same. `list` shows the round and marks a round that has not shipped yet as `reopened`; the morning brief lists feedback waiting on its own.
@@ -54,6 +74,8 @@ Every new idea, thread message, go, feedback, question timeout and unanswered nu
 {
   "adapter": "mock",
   "channel": "ideas",
+  "team": "<team-general id, filled in>",
+  "impl": "<implementers-discussions id, filled in>",
   "allowlist": ["ann", "bob"],
   "perDay": 3,
   "building": 1,
@@ -85,10 +107,11 @@ For a running bridge, `npm run -s ideas` polls the mock inbox every second.
    ```bash
    mkdir -p secrets && pbpaste > secrets/discord-token && chmod 600 secrets/discord-token
    ```
-3. Invite the bot to the server. Copy the Application ID from General Information and open this URL with it (the permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, Read Message History, Attach Files):
+3. Invite the bot to the server. Copy the Application ID from General Information and open this URL with it (the permissions are View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Add Reactions, Read Message History, Attach Files, Pin Messages):
    ```
-   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=309237746752
+   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=2252109051432000
    ```
+   It needs View Channels and Read Message History in team-general, Send Messages in team-general and implementers-discussions, and Pin Messages in implementers-discussions for `impl pin`. A bot invited with the older URL gets Pin Messages from its role in Server Settings, Roles. Discord split pinning out of Manage Messages into its own Pin Messages permission; Manage Messages alone no longer pins.
 4. Get the ids. In Discord, Settings, Advanced, switch on Developer Mode. Right-click the ideas channel and Copy Channel ID; right-click each team member and Copy User ID.
 5. Write the config:
    ```json
