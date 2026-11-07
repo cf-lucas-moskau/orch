@@ -793,12 +793,13 @@ test('media passes by extension and magic bytes only', () => {
   assert.equal(mediaOk('boat.svg', Buffer.from('<svg')), false);
 });
 
-test('a building idea posts the newest new note after 2 quiet minutes, else the pulse after 5', () => {
+test('a building idea posts its new notes oldest first, one per quiet 2 minutes, else the pulse after 5', () => {
   const T = (m: number) => new Date(Date.parse(NOW) + m * 60_000).toISOString();
   const b: Idea = { ...base, state: 'building', stage: 'building', startedAt: NOW, notesSeen: [], messages: [{ ts: NOW, by: 'orch', text: 'Building it now.' }] };
   const n = (text: string, media?: string) => ({ key: noteKey(NOW, text), ts: NOW, text, ...(media ? { media } : {}) });
   assert.equal(progress(b, [n('one')], T(1)), null, 'orch posted a minute ago');
-  assert.deepEqual(progress(b, [n('one'), n('two', 'two.png')], T(2)), { post: { text: 'two', media: 'two.png' }, seen: [n('one').key, n('two').key] });
+  assert.deepEqual(progress(b, [n('one'), n('two', 'two.png')], T(2)), { post: { text: 'one' }, seen: [n('one').key] }, 'the oldest goes first');
+  assert.deepEqual(progress({ ...b, notesSeen: [n('one').key] }, [n('one'), n('two', 'two.png')], T(2)), { post: { text: 'two', media: 'two.png' }, seen: [n('one').key, n('two').key] }, 'then the next, none skipped');
   const both = { ...b, notesSeen: [n('one').key, n('two').key] };
   assert.equal(progress(both, [n('one'), n('two')], T(4)), null, 'no new note, pulse not due');
   assert.deepEqual(progress(both, [n('two'), n('one')], T(5)), { post: { text: 'Still on it: building the change (5 min in).' } }, 'reordered notes are not new');
@@ -843,10 +844,14 @@ test('end to end on mocks: progress notes post once, with their media, and over-
   w.setNow(LATER(1)); await tick(w.d);
   assert.equal(w.replies().at(-1), 'Building it now. I will post here when it is live.', 'not within 2 minutes of the start post');
   w.setNow(LATER(2)); await tick(w.d);
+  assert.equal(w.replies().at(-1), 'First sketch.', 'the oldest note goes first');
+  w.setNow(LATER(3)); await tick(w.d);
+  assert.equal(w.replies().at(-1), 'First sketch.', 'the next waits 2 quiet minutes');
+  w.setNow(LATER(4)); await tick(w.d);
   const out = w.chat.outbox().at(-1) as any;
-  assert.deepEqual([out.text, out.files], ['The boat sways on the waves, see', ['boat.png']]);
+  assert.deepEqual([out.text, out.files], ['The boat sways on the waves, see', ['boat.png']], 'then the next, none skipped');
   w.setNow(LATER(5)); await tick(w.d);
-  assert.equal(w.chat.outbox().filter(o => o.kind === 'reply').length, 3, 'nothing posts twice and the pulse waits 5 minutes after the note');
+  assert.equal(w.chat.outbox().filter(o => o.kind === 'reply').length, 4, 'nothing posts twice and the pulse waits 5 minutes after the note');
   writeFileSync(join(folder, 'big.mp4'), Buffer.concat([Buffer.from('\0\0\0\x20ftypisom', 'latin1'), Buffer.alloc(8 * 1024 * 1024)]));
   note({ ts: LATER(6), text: 'A clip of the race.', media: 'big.mp4' });
   w.setNow(LATER(7)); await tick(w.d);
@@ -861,11 +866,32 @@ test('end to end on mocks: progress notes post once, with their media, and over-
   w.setNow(LATER(9)); await tick(w.d);
   w.setNow(LATER(11)); await tick(w.d);
   assert.deepEqual(w.replies().filter(r => r === 'Sails fixed.'), ['Sails fixed.'], 'a rewritten notes.jsonl posts its new note once');
-  assert.ok(!w.replies().includes('First sketch.'), 'a note already handled never posts');
+  assert.equal(w.replies().filter(r => r === 'First sketch.').length, 1, 'a note already handled never posts again');
   w.setNow(LATER(17)); await tick(w.d);
   w.setNow(LATER(12)); await tick(w.d);
   assert.equal(w.replies().at(-1), 'Still on it: building the change (17 min in).');
   assert.equal(loadIdeas(w.root)[0].messages!.find(m => m.media)?.media, 'boat.png');
+});
+
+test('say and ask post every waiting note first, oldest first, so a question never lands above its work', async () => {
+  const w = world();
+  await building(w);
+  const folder = progressDir(w.root, 'I-1');
+  const note = (o: object) => appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify(o) + '\n');
+  writeFileSync(join(folder, 'a.png'), PNG);
+  note({ ts: LATER(1), text: 'Concept A.', media: 'a.png' });
+  note({ ts: LATER(1), text: 'Concept B.' });
+  note({ ts: LATER(1), text: 'Concept C.' });
+  w.setNow(LATER(1));
+  await idea(['ask', 'I-1', 'Which', 'one?', '--recommend', 'A'], w.d);
+  const r = w.replies();
+  assert.deepEqual(r.slice(-4).map(x => x.split('\n')[0]), ['Concept A.', 'Concept B.', 'Concept C.', '<@1> Which one?'].map(x => x.replace('<@1>', r.at(-1)!.split(' ')[0])));
+  assert.deepEqual((w.chat.outbox().find(o => (o as any).text === 'Concept A.') as any).files, ['a.png']);
+  w.setNow(LATER(9)); await tick(w.d);
+  assert.equal(w.replies().filter(x => x.startsWith('Concept')).length, 3, 'the tick posts none of them again');
+  note({ ts: LATER(10), text: 'Concept D.' });
+  await idea(['say', 'I-1', 'Picked A.'], w.d);
+  assert.deepEqual(w.replies().slice(-2), ['Concept D.', 'Picked A.']);
 });
 
 test('notes that existed before the bridge ran this code count as posted', async () => {

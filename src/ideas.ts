@@ -225,7 +225,7 @@ Scope: only the Evrloot game in this repo (gameplay, UI, art, text, quality of l
 
 Performance: the game is getting heavier with every feature, so leave it no slower than you found it. Before your report, run the repo's quick performance check on your stack for the screens you touched (load time, JS heap after using the feature and leaving it again, frame times while it runs; see the repo's CLAUDE.md for the command) on main and on your branch, and put both numbers in your report. A clear regression is a blocker you fix or name, not a footnote.
 
-Progress notes: the team follows this build in their Discord thread. Each time a visible piece is sketched or tested, append one JSON line to ${progress}/notes.jsonl: {"ts": "<ISO time>", "text": "<one or two sentences>", "media": "<optional file name>"}. Put the media file (png, jpg, gif, mp4 or webm, under 8 MB: a screenshot or a short screen recording) in that same folder and give only its file name. Open every screenshot or recording before you add it and review it critically as a player would; leave out anything with visible flaws you have not fixed or named. Write for players in plain words: what they will see, not how it is built. No file paths, URLs, code or branch names, worker or machine names, and never secrets or tokens. The bridge posts the newest note at most every ${NOTE_GAP_MIN} minutes.`;
+Progress notes: the team follows this build in their Discord thread. Each time a visible piece is sketched or tested, append one JSON line to ${progress}/notes.jsonl: {"ts": "<ISO time>", "text": "<one or two sentences>", "media": "<optional file name>"}. Put the media file (png, jpg, gif, mp4 or webm, under 8 MB: a screenshot or a short screen recording) in that same folder and give only its file name. Open every screenshot or recording before you add it and review it critically as a player would; leave out anything with visible flaws you have not fixed or named. Write for players in plain words: what they will see, not how it is built. No file paths, URLs, code or branch names, worker or machine names, and never secrets or tokens. The bridge posts every note in the order you wrote them, one at most every ${NOTE_GAP_MIN} minutes.`;
 }
 
 // The plan version someone posting at ts had on screen: the current one once it was up, else the one before.
@@ -397,8 +397,10 @@ export function mediaOk(name: string, head: Buffer): boolean {
   return MEDIA.test(name) && !!MAGIC[ext]?.(head);
 }
 
-// What the bridge posts in a building idea's thread this minute: the newest new note once orch has been quiet for
-// NOTE_GAP_MIN, else the stage pulse after PULSE_MIN without notes. seen is the new notesSeen when it changes; on an
+// What the bridge posts in a building idea's thread this minute: the oldest new note once orch has been quiet for
+// NOTE_GAP_MIN, else the stage pulse after PULSE_MIN without notes. Notes go out one at a time in the order they were
+// written, never skipped: a worker that writes several at once (three concepts, each with a clip) gets every one
+// posted (I-73, 2026-11-06, where only the newest would have gone). seen is the new notesSeen when it changes; on an
 // idea from before progress notes it takes every note there without a post, so notes posted by hand never go again.
 export type Progress = { post?: { text: string; media?: string }; seen?: string[] };
 export function progress(i: Idea, notes: Note[], now: string): Progress | null {
@@ -407,8 +409,8 @@ export function progress(i: Idea, notes: Note[], now: string): Progress | null {
   const fresh = notes.filter(n => !i.notesSeen!.includes(n.key));
   if (fresh.length) {
     if (minsSince(lastOrch(i), now) < NOTE_GAP_MIN) return null;
-    const n = fresh.at(-1)!;
-    return { post: { text: n.text, ...(n.media ? { media: n.media } : {}) }, seen: [...i.notesSeen, ...fresh.map(f => f.key)] };
+    const n = fresh[0]!;
+    return { post: { text: n.text, ...(n.media ? { media: n.media } : {}) }, seen: [...i.notesSeen, n.key] };
   }
   const text = pulse(i, now);
   return text ? { post: { text } } : null;
