@@ -415,27 +415,44 @@ async function rename(d: Deps, chat: Chat, what: string, thread: string, from: s
   return 'renamed';
 }
 
-// `idea title` and `impl title`: one bot message in the thread says the keywords, edited when they change (posted
-// again when it is gone), then the thread is renamed. Keywords go first: a post unarchives an archived thread, and
-// the rename archives it again. keep: stores the title as soon as the keywords message exists, so a rerun after a
-// failed rename edits that message instead of posting a second one.
-export async function retitle(d: Deps, chat: Chat, what: string, thread: { id: string; name: string }, want: { title: string; keywords: string[]; name: string }, had: Title | undefined, keep: (t: Title) => void): Promise<string> {
+// `idea title` and `impl title`: one bot message in the thread says the keywords, edited when they change and posted
+// again when it is gone, then the thread is renamed. An archived thread is unarchived once at the start (Discord
+// refuses edits in it, and a post would unarchive it anyway) and archived again at the end, whatever failed.
+// keep: called with the message id as soon as the message exists, so a rerun after a failed rename edits it instead
+// of posting a second one; title and keywords are kept only once the rename is done.
+export async function retitle(d: Deps, chat: Chat, what: string, thread: { id: string; name: string; archived?: boolean }, want: { title: string; keywords: string[]; name: string }, had: Title | undefined, keep: (t: Title) => void): Promise<string> {
   if (isOff(d.root)) fail('the idea bridge is off (ideas/off); orch posts nothing in Discord while it is');
+  const why = (e: unknown) => e instanceof Error ? e.message : String(e);
   const text = keywordsPost(want.keywords);
-  let msg = had?.msg;
-  if (!msg || keywordsPost(had!.keywords) !== text) {
-    if (!(msg && await chat.edit(thread.id, msg, text))) msg = (await chat.reply(thread.id, text)).ids[0];
-    d.log(`${what}: ${text}`);
-  }
-  keep({ title: want.title, keywords: want.keywords, ...(msg ? { msg } : {}) });
   const done = `titled "${want.name}", ${text}`;
-  if (thread.name === want.name) return done;
-  try { return await rename(d, chat, what, thread.id, thread.name, want.name) === 'renamed' ? done : `${done}; renamed but left unarchived`; }
-  catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
-    d.log(`${what} rename failed: ${why}`);
-    return fail(`keywords posted, rename to "${want.name}" failed: ${why}`);
+  let msg = had?.msg && await chat.hasMessage(thread.id, had.msg) ? had.msg : undefined;
+  const same = !!msg && !!had?.keywords && keywordsPost(had.keywords) === text;
+  if (same && thread.name === want.name) return done;
+  if (thread.archived) await chat.setArchived(thread.id, false);
+  let failed: unknown;
+  let renamed: 'renamed' | 'unarchived' = 'renamed';
+  try {
+    if (!same) {
+      if (!(msg && await chat.edit(thread.id, msg, text))) msg = (await chat.reply(thread.id, text)).ids[0];
+      d.log(`${what}: ${text}`);
+      keep({ ...had, ...(msg ? { msg } : {}) });
+    }
+    if (thread.name !== want.name) {
+      try { renamed = await rename(d, chat, what, thread.id, thread.name, want.name); }
+      catch (e) { d.log(`${what} rename failed: ${why(e)}`); throw new Error(`keywords posted, rename to "${want.name}" failed: ${why(e)}`); }
+    }
+    keep({ title: want.title, keywords: want.keywords, ...(msg ? { msg } : {}) });
+  } catch (e) { failed = e; }
+  if (thread.archived) {
+    try { await chat.setArchived(thread.id, true); }
+    catch (e) {
+      d.log(`${what}: re-archive failed: ${why(e)}`);
+      if (failed) throw new Error(`${why(failed)}; re-archive failed too: ${why(e)}`);
+      return `${done}; left unarchived`;
+    }
   }
+  if (failed) throw failed;
+  return renamed === 'renamed' ? done : `${done}; renamed but left unarchived`;
 }
 
 // `idea relabel`: every idea thread named the old way gets its id in front, one rename at a time.
@@ -570,7 +587,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     if (!cur.thread) fail(`${id} has no thread yet`);
     const c = chat();
     const t = await c.getThread(cur.thread) ?? fail(`${id}'s thread is gone`);
-    return retitle(d, c, `idea ${id} title`, { id: cur.thread, name: t.name }, want, cur.title, title => update(d.root, id, i => ({ ...i, title })));
+    return retitle(d, c, `idea ${id} title`, { id: cur.thread, ...t }, want, cur.title, title => update(d.root, id, i => ({ ...i, title })));
   }
   if (sub === 'record') {
     const text = textOf(d.root, rest);

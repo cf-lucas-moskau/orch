@@ -264,13 +264,14 @@ export const labelled = (id: string, name: string) => name.startsWith(label(id))
 export const labelName = (id: string, name: string) => labelled(id, name) ? name : (label(id) + name.trim()).slice(0, NAME_MAX).trim();
 export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
 
-// A thread's short title and the search keywords orch posted in it. msg: the bot message that says them.
-export type Title = { title: string; keywords: string[]; msg?: string };
+// A thread's short title and the search keywords orch posted in it, both set once the thread carries the title.
+// msg: the bot message that says the keywords, kept as soon as it is posted.
+export type Title = { title?: string; keywords?: string[]; msg?: string };
 export const TITLE_WORDS = 8;
 export const keywordsPost = (keywords: string[]) => `Keywords: ${keywords.join(', ')}`;
 // `<title words> --keywords a,b,c`, scrubbed like any post. The error when it cannot be used. id: the idea's, put in
 // front of the name; impl threads have none.
-export function parseTitle(args: string[], id?: string): Omit<Title, 'msg'> & { name: string } | string {
+export function parseTitle(args: string[], id?: string): { title: string; keywords: string[]; name: string } | string {
   const at = args.indexOf('--keywords');
   const title = scrub(args.slice(0, at < 0 ? undefined : at).join(' ').replace(/\s+/g, ' '), Infinity);
   const seen = new Set<string>();

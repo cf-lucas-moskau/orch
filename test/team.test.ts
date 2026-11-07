@@ -158,6 +158,12 @@ test('end to end on mocks: impl title names an implementer-discussions thread an
   await assert.rejects(impl(['title', 't-m1', 'Bats', '--keywords', 'bats'], w.d), /t-m1 is not a thread in implementer-discussions/, 'idea threads go through idea title');
   await assert.rejects(impl(['title', 'implementer-discussions', 'Rename', 'the', 'channel', '--keywords', 'x'], w.d), /no thread implementer-discussions/);
   await assert.rejects(impl(['title', thread, 'one two three four five six seven eight nine', '--keywords', 'x'], w.d), /at most 8 words/);
+
+  const n = w.sent().length;
+  writeFileSync(join(w.root, 'ideas', 'impl-threads.json'), '{ broken');
+  await assert.rejects(impl(['title', thread, 'Raid loot', '--keywords', 'raids'], w.d), /ideas\/impl-threads.json does not parse, fix or remove it/);
+  assert.equal(w.sent().length, n, 'nothing posted');
+  assert.equal(readFileSync(join(w.root, 'ideas', 'impl-threads.json'), 'utf8'), '{ broken', 'not written over');
 });
 
 test('impl pin posts the vision and pins every part; without the permission it takes the post back and says so', async () => {

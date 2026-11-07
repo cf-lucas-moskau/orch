@@ -46,6 +46,16 @@ const IMPL_USAGE = `usage: orch impl say <text|file> | raise <idea id> <text|fil
        orch impl title <thread id> <title, at most 8 words> --keywords a,b,c
        pin takes ideas/vision.md or a file under ideas/drafts/; say and raise read files only from ideas/drafts/`;
 
+// `impl title`'s store, by thread id; read under the ideas/ lock. A file that does not parse stops the command
+// rather than being written over.
+const implTitlesFile = (root: string) => join(root, 'ideas', 'impl-threads.json');
+function implTitles(root: string): Record<string, Title> {
+  const f = implTitlesFile(root);
+  if (!existsSync(f)) return {};
+  try { return JSON.parse(readFileSync(f, 'utf8')); }
+  catch (e) { return fail(`ideas/impl-threads.json does not parse, fix or remove it: ${e instanceof Error ? e.message : e}`); }
+}
+
 const chatOf = (d: Deps) => d.chat ?? chatFor(d.root, loadConfig(d.root), d.log);
 const now = (d: Deps) => (d.now ?? (() => new Date().toISOString()))();
 // The kill switch silences orch in every channel.
@@ -112,10 +122,8 @@ export async function impl(args: string[], d: Deps): Promise<string> {
     if (!thread || typeof want === 'string') return fail(`${typeof want === 'string' ? `${want}\n` : ''}${IMPL_USAGE}`);
     const t = await chat.getThread(thread) ?? fail(`no thread ${thread}`);
     if (t.parent !== await channelId(d.root, chat, 'impl')) fail(`${thread} is not a thread in ${CHANNELS.impl}`);
-    const f = join(d.root, 'ideas', 'impl-threads.json');
-    const titles = (): Record<string, Title> => existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {};
-    return retitle(d, chat, `impl ${thread} title`, { id: thread, name: t.name }, want, titles()[thread],
-      title => locked(d.root, () => writeAtomic(f, JSON.stringify({ ...titles(), [thread]: title }, null, 2) + '\n')));
+    return retitle(d, chat, `impl ${thread} title`, { id: thread, ...t }, want, locked(d.root, () => implTitles(d.root))[thread],
+      title => locked(d.root, () => writeAtomic(implTitlesFile(d.root), JSON.stringify({ ...implTitles(d.root), [thread]: title }, null, 2) + '\n')));
   }
   if (sub === 'pin') {
     if (rest.length !== 1) fail(IMPL_USAGE);
