@@ -139,6 +139,27 @@ test('team say, impl say and impl raise post scrubbed text in their channels', a
   await assert.rejects(impl(['say', 'hi'], w.d), /the idea bridge is off/);
 });
 
+test('end to end on mocks: impl title names an implementer-discussions thread and keeps one keywords message', async () => {
+  const w = world();
+  const thread = w.chat.openThread('implementer-discussions', 'm9', 'so about the raid loot split we talked about');
+  assert.equal(await impl(['title', thread, 'Raid', 'loot', 'split', '--keywords', 'raids,', 'loot'], w.d), 'titled "Raid loot split", Keywords: raids, loot');
+  assert.equal(await impl(['title', thread, 'Raid loot split for bandits', '--keywords', 'raids,', 'loot,', 'bandits'], w.d), 'titled "Raid loot split for bandits", Keywords: raids, loot, bandits');
+  assert.deepEqual(w.sent().slice(1).map(o => ({ ...o, ts: 0 })), [
+    { ts: 0, kind: 'reply', target: thread, text: 'Keywords: raids, loot' },
+    { ts: 0, kind: 'rename', thread, name: 'Raid loot split' },
+    { ts: 0, kind: 'edit', target: thread, message: 'o2', text: 'Keywords: raids, loot, bandits' },
+    { ts: 0, kind: 'rename', thread, name: 'Raid loot split for bandits' },
+  ]);
+  assert.deepEqual(JSON.parse(readFileSync(join(w.root, 'ideas', 'impl-threads.json'), 'utf8')), { [thread]: { title: 'Raid loot split for bandits', keywords: ['raids', 'loot', 'bandits'], msg: 'o2' } });
+  assert.ok(w.logs.includes(`impl ${thread} title: "so about the raid loot split we talked about" -> "Raid loot split"`));
+
+  await idea(['fake', 'Bats drop more loot', '--as', 'ann'], w.d);
+  await w.chat.poll();
+  await assert.rejects(impl(['title', 't-m1', 'Bats', '--keywords', 'bats'], w.d), /t-m1 is not a thread in implementer-discussions/, 'idea threads go through idea title');
+  await assert.rejects(impl(['title', 'implementer-discussions', 'Rename', 'the', 'channel', '--keywords', 'x'], w.d), /no thread implementer-discussions/);
+  await assert.rejects(impl(['title', thread, 'one two three four five six seven eight nine', '--keywords', 'x'], w.d), /at most 8 words/);
+});
+
 test('impl pin posts the vision and pins every part; without the permission it takes the post back and says so', async () => {
   const w = world();
   writeFileSync(join(w.root, 'ideas', 'vision.md'), `# Vision\n\n${'Evrloot stays small and handmade. '.repeat(80)}`);

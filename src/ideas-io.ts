@@ -6,8 +6,8 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, DECISION_ID, decisionStatus, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, labelled, labelName, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
-  type Config, type Idea, type Incoming, type Question, type Step, type Told,
+  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, DECISION_ID, decisionStatus, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, keywordsPost, labelled, labelName, parseTitle, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  type Config, type Idea, type Incoming, type Question, type Step, type Title, type Told,
 } from './ideas.ts';
 
 // sleep: the pause between thread renames in `idea relabel`; tests pass a fast one.
@@ -403,6 +403,41 @@ export async function reconcile(d: Deps & { chat: Chat }) {
 // Everything orch posts in an idea's thread ends with links to the other ideas it names.
 const postIn = (root: string, chat: Chat, i: Idea, text: string, o?: ReplyOptions) => chat.reply(i.thread, withRelated(text, loadIdeas(root), i.id), o);
 
+// A rename whose re-archive failed is logged and counted as left unarchived; any other failure throws.
+async function rename(d: Deps, chat: Chat, what: string, thread: string, from: string, to: string): Promise<'renamed' | 'unarchived'> {
+  try { await chat.renameThread(thread, to); }
+  catch (e) {
+    if (!(e instanceof RearchiveFailed)) throw e;
+    d.log(`${what}: "${from}" -> "${to}", renamed, re-archive failed: ${e.message}`);
+    return 'unarchived';
+  }
+  d.log(`${what}: "${from}" -> "${to}"`);
+  return 'renamed';
+}
+
+// `idea title` and `impl title`: one bot message in the thread says the keywords, edited when they change (posted
+// again when it is gone), then the thread is renamed. Keywords go first: a post unarchives an archived thread, and
+// the rename archives it again. keep: stores the title as soon as the keywords message exists, so a rerun after a
+// failed rename edits that message instead of posting a second one.
+export async function retitle(d: Deps, chat: Chat, what: string, thread: { id: string; name: string }, want: { title: string; keywords: string[]; name: string }, had: Title | undefined, keep: (t: Title) => void): Promise<string> {
+  if (isOff(d.root)) fail('the idea bridge is off (ideas/off); orch posts nothing in Discord while it is');
+  const text = keywordsPost(want.keywords);
+  let msg = had?.msg;
+  if (!msg || keywordsPost(had!.keywords) !== text) {
+    if (!(msg && await chat.edit(thread.id, msg, text))) msg = (await chat.reply(thread.id, text)).ids[0];
+    d.log(`${what}: ${text}`);
+  }
+  keep({ title: want.title, keywords: want.keywords, ...(msg ? { msg } : {}) });
+  const done = `titled "${want.name}", ${text}`;
+  if (thread.name === want.name) return done;
+  try { return await rename(d, chat, what, thread.id, thread.name, want.name) === 'renamed' ? done : `${done}; renamed but left unarchived`; }
+  catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    d.log(`${what} rename failed: ${why}`);
+    return fail(`keywords posted, rename to "${want.name}" failed: ${why}`);
+  }
+}
+
 // `idea relabel`: every idea thread named the old way gets its id in front, one rename at a time.
 async function relabel(d: Deps, chat: Chat): Promise<string> {
   const sleep = d.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
@@ -415,16 +450,7 @@ async function relabel(d: Deps, chat: Chat): Promise<string> {
       if (labelled(i.id, t.name)) { counts.labelled++; continue; }
       if (tried) await sleep(RENAME_GAP_MS);
       tried = true;
-      const name = labelName(i.id, t.name);
-      try { await chat.renameThread(i.thread, name); }
-      catch (e) {
-        if (!(e instanceof RearchiveFailed)) throw e;
-        d.log(`idea ${i.id} relabel: "${t.name}" -> "${name}", renamed, re-archive failed: ${e.message}`);
-        counts.unarchived++;
-        continue;
-      }
-      d.log(`idea ${i.id} relabel: "${t.name}" -> "${name}"`);
-      counts.renamed++;
+      counts[await rename(d, chat, `idea ${i.id} relabel`, i.thread, t.name, labelName(i.id, t.name))]++;
     } catch (e) {
       d.log(`idea ${i.id} relabel failed: ${e instanceof Error ? e.message : e}`);
       counts.failed++;
@@ -441,6 +467,7 @@ const USAGE = `usage: orch idea list | off | on | relabel
        orch idea say <id> <text|file> | ask <id> <question file|text> [--recommend <text>] [--wait] | plan <id> <file|text> | start <id> | stage <id> <building|checking|deploying|playtesting> | ship <id> <changelog file|text> | close <id> [reason] [--force]
        orch idea park <id> <D-NN> | unpark <id>   (a building idea parked on an open decision holds no build slot)
        orch idea record <id> <file|text>   (dossier only, nothing is posted)
+       orch idea title <id> <title, at most 8 words> --keywords a,b,c   (thread named "<id> · <title>", keywords posted once and edited after)
        files are read only from ideas/drafts/`;
 
 // The text of a file under ideas/drafts/ named by a relative path without .., or with vision, of ideas/vision.md;
@@ -473,7 +500,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     // reopened: a round after the first that has not shipped yet.
     const round = (i: Idea) => roundOf(i) < 2 ? '' : ` round ${roundOf(i)}${['shipped', 'closed'].includes(i.state) ? '' : ', reopened'}`;
     return [`bridge ${isOff(d.root) ? 'off' : 'on'}, adapter ${config.adapter}`,
-      ...all.map(i => `${i.id} [${i.state}${round(i)}${i.worker ? ` ${i.worker}` : ''}${i.parked ? `, parked on ${i.parked}` : ''}] ${i.author.name}: ${i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
+      ...all.map(i => `${i.id} [${i.state}${round(i)}${i.worker ? ` ${i.worker}` : ''}${i.parked ? `, parked on ${i.parked}` : ''}] ${i.author.name}: ${i.title?.title ?? i.text.split('\n')[0].slice(0, 80)}${i.needsOrch ? ` (needs orch: ${i.needsOrch})` : ''}`)].join('\n');
   }
   if (sub === 'off' || sub === 'on') {
     mkdirSync(dir(d.root), { recursive: true });
@@ -536,6 +563,14 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     });
     d.log(`idea ${id} ask${wait ? ' (wait)' : ''}: ${question.slice(0, 120)}`);
     return `asked ${cur.author.name} in ${id}${recommend && !wait ? `; going with the recommendation in 10 minutes without an answer` : ''}`;
+  }
+  if (sub === 'title') {
+    const want = parseTitle(rest, id);
+    if (typeof want === 'string') return fail(`${want}\n${USAGE}`);
+    if (!cur.thread) fail(`${id} has no thread yet`);
+    const c = chat();
+    const t = await c.getThread(cur.thread) ?? fail(`${id}'s thread is gone`);
+    return retitle(d, c, `idea ${id} title`, { id: cur.thread, name: t.name }, want, cur.title, title => update(d.root, id, i => ({ ...i, title })));
   }
   if (sub === 'record') {
     const text = textOf(d.root, rest);

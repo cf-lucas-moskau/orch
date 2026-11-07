@@ -11,7 +11,7 @@ import { dossierFile, download, handle, idea, inboxDir, settled, loadConfig, loa
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
   bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk, isParked, parkBlocker, decisionStatus,
-  imageOk, inboxOrder, inboxPicks, inboxUrlOk, type Upload,
+  imageOk, inboxOrder, inboxPicks, inboxUrlOk, keywordsPost, parseTitle, type Upload,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -1547,7 +1547,78 @@ test('relabel keeps going past a failed rename', async () => {
   assert.equal(await idea(['relabel'], w.d), 'relabel: 1 renamed, 0 renamed but left unarchived, 0 already labelled, 1 failed');
   assert.deepEqual(slept, [2000], 'the failed rename counts as an attempt, so the next one waits');
   assert.ok(w.logs.includes('idea I-1 relabel failed: Missing Permissions'));
-  assert.deepEqual(await w.chat.getThread('t-m2'), { name: 'I-2 · old name' });
+  assert.deepEqual(await w.chat.getThread('t-m2'), { name: 'I-2 · old name', parent: 'ideas' });
+});
+
+test('a title is at most 8 words, needs keywords, and is scrubbed like any post', () => {
+  assert.deepEqual(parseTitle(['Bats', 'drop', 'more', 'loot', '--keywords', 'bats,', 'loot,', 'Caves', ',', 'LOOT']), { title: 'Bats drop more loot', keywords: ['bats', 'loot', 'Caves'], name: 'Bats drop more loot' });
+  assert.deepEqual(parseTitle(['Raid', 'loot', '<@42>', 'https://x.example', '--keywords', 'raid,@everyone', 'loot'], 'I-31'), { title: 'Raid loot', keywords: ['raid', 'loot'], name: 'I-31 · Raid loot' });
+  assert.equal(parseTitle('one two three four five six seven eight nine --keywords a'.split(' ')), 'a title is at most 8 words, this one has 9');
+  assert.equal(typeof parseTitle('one two three four five six seven eight --keywords a'.split(' ')), 'object', 'eight words are fine');
+  assert.equal(parseTitle(['Bats']), 'keywords are needed: --keywords a,b,c');
+  assert.equal(parseTitle(['--keywords', 'a']), 'a title is needed');
+  assert.match(parseTitle([...Array(8)].map(() => 'x'.repeat(13)).concat('--keywords', 'a'), 'I-1') as string, /^the thread name is at most 100 characters/);
+  assert.equal(keywordsPost(['bats', 'loot']), 'Keywords: bats, loot');
+});
+
+test('end to end on mocks: idea title renames the thread, posts the keywords once and edits them after', async () => {
+  const w = world();
+  await w.post('so I was thinking, what if bats in the north cave dropped more loot at night', '--as', 'ann');
+  const out = () => w.chat.outbox().slice(2).map(o => ({ ...o, ts: 0 }));
+  assert.equal(await idea(['title', 'I-1', 'Bats', 'drop', 'loot', 'at', 'night', '--keywords', 'bats,', 'loot,', 'night'], w.d),
+    'titled "I-1 · Bats drop loot at night", Keywords: bats, loot, night');
+  assert.deepEqual(out(), [
+    { ts: 0, kind: 'reply', target: 't-m1', text: 'Keywords: bats, loot, night' },
+    { ts: 0, kind: 'rename', thread: 't-m1', name: 'I-1 · Bats drop loot at night' },
+  ]);
+  assert.deepEqual(loadIdeas(w.root)[0].title, { title: 'Bats drop loot at night', keywords: ['bats', 'loot', 'night'], msg: 'o3' });
+  assert.match(await idea(['list'], w.d), /^I-1 \[talk\] ann: Bats drop loot at night \(needs orch: new\)$/m, 'list shows the title, and a title answers nothing');
+
+  await idea(['title', 'I-1', 'Bats drop loot at night', '--keywords', 'bats,loot,night'], w.d);
+  assert.equal(out().length, 2, 'the same title again changes nothing');
+
+  assert.equal(await idea(['title', 'I-1', 'Night bats drop loot', '--keywords', 'bats,', 'loot,', 'cave'], w.d),
+    'titled "I-1 · Night bats drop loot", Keywords: bats, loot, cave');
+  assert.deepEqual(out().slice(2), [
+    { ts: 0, kind: 'edit', target: 't-m1', message: 'o3', text: 'Keywords: bats, loot, cave' },
+    { ts: 0, kind: 'rename', thread: 't-m1', name: 'I-1 · Night bats drop loot' },
+  ]);
+
+  await w.chat.remove('t-m1', 'o3');
+  await idea(['title', 'I-1', 'Night bats drop loot', '--keywords', 'bats,', 'caves'], w.d);
+  assert.deepEqual(out().slice(5), [{ ts: 0, kind: 'reply', target: 't-m1', text: 'Keywords: bats, caves' }], 'a deleted keywords message is posted again; the name already fits');
+  assert.equal(loadIdeas(w.root)[0].title?.msg, 'o8');
+  assert.deepEqual(await w.chat.getThread('t-m1'), { name: 'I-1 · Night bats drop loot', parent: 'ideas' });
+
+  await assert.rejects(idea(['title', 'I-1', 'one two three four five six seven eight nine', '--keywords', 'a'], w.d), /at most 8 words, this one has 9/);
+  await idea(['off'], w.d);
+  await assert.rejects(idea(['title', 'I-1', 'Bats', '--keywords', 'a'], w.d), /the idea bridge is off/);
+  assert.equal(out().length, 6, 'nothing posted for a refused title');
+});
+
+test('idea title: a failed rename is logged and refused, the keywords stay, and a rerun edits rather than reposts', async () => {
+  const w = world();
+  await w.post('Bats drop more loot', '--as', 'ann');
+  const rename = w.chat.renameThread.bind(w.chat);
+  w.chat.renameThread = async () => { throw new Error('Missing Permissions'); };
+  await assert.rejects(idea(['title', 'I-1', 'Bat loot', '--keywords', 'bats'], w.d), /keywords posted, rename to "I-1 · Bat loot" failed: Missing Permissions/);
+  assert.ok(w.logs.includes('idea I-1 title rename failed: Missing Permissions'));
+  w.chat.renameThread = async () => { throw new RearchiveFailed('Missing Access'); };
+  assert.equal(await idea(['title', 'I-1', 'Bat loot', '--keywords', 'bats'], w.d), 'titled "I-1 · Bat loot", Keywords: bats; renamed but left unarchived');
+  assert.ok(w.logs.includes('idea I-1 title: "I-1 · Bats drop more loot" -> "I-1 · Bat loot", renamed, re-archive failed: Missing Access'));
+  w.chat.renameThread = rename;
+  assert.equal(w.chat.outbox().filter(o => o.kind === 'reply').length, 1, 'one keywords message across the retries');
+});
+
+test('DiscordChat edits a message without pings and reports a deleted one as gone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-ideas-discord-'));
+  const { calls, lib } = discordStub({ '/channels/200': { id: '200', name: 'Bats', parent_id: '100' } });
+  const chat = new DiscordChat({ token: 't', channel: '100', cursorFile: join(root, 'c.json'), lib });
+  assert.deepEqual(await chat.getThread('200'), { name: 'Bats', parent: '100' });
+  assert.equal(await chat.edit('200', 'm1', 'Keywords: a'), true);
+  assert.deepEqual(calls.at(-1), ['PATCH', '/channels/200/messages/m1', { content: 'Keywords: a', allowed_mentions: { parse: [] } }]);
+  lib.REST.prototype.patch = async () => { throw Object.assign(new Error('Unknown Message'), { status: 404, code: 10008 }); };
+  assert.equal(await chat.edit('200', 'm2', 'Keywords: a'), false);
 });
 
 test('DiscordChat reads thread names and renames archived threads without leaving them open', async () => {

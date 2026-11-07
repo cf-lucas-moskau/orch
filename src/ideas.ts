@@ -43,6 +43,8 @@ export type Idea = {
   // parked: the decision (D-NN) a building idea waits on. While that decision is open the idea holds no build slot;
   // once its Status is anything else the park is cleared (isParked, `orch idea park`).
   parked?: string;
+  // title: the thread's short title and search keywords (`orch idea title`).
+  title?: Title;
 };
 // One team message's images to fetch. line: the watcher line's kind and text, fed once the images are in.
 export type Download = { msg: string; ts: string; by: string; picks: InboxPick[]; line?: { kind: string; text: string } };
@@ -261,6 +263,28 @@ const label = (id: string) => `${id} · `;
 export const labelled = (id: string, name: string) => name.startsWith(label(id));
 export const labelName = (id: string, name: string) => labelled(id, name) ? name : (label(id) + name.trim()).slice(0, NAME_MAX).trim();
 export const threadName = (id: string, text: string) => labelName(id, text.split('\n')[0].slice(0, 90).trim() || 'idea');
+
+// A thread's short title and the search keywords orch posted in it. msg: the bot message that says them.
+export type Title = { title: string; keywords: string[]; msg?: string };
+export const TITLE_WORDS = 8;
+export const keywordsPost = (keywords: string[]) => `Keywords: ${keywords.join(', ')}`;
+// `<title words> --keywords a,b,c`, scrubbed like any post. The error when it cannot be used. id: the idea's, put in
+// front of the name; impl threads have none.
+export function parseTitle(args: string[], id?: string): Omit<Title, 'msg'> & { name: string } | string {
+  const at = args.indexOf('--keywords');
+  const title = scrub(args.slice(0, at < 0 ? undefined : at).join(' ').replace(/\s+/g, ' '), Infinity);
+  const seen = new Set<string>();
+  const keywords = scrub((at < 0 ? [] : args.slice(at + 1)).join(' '), Infinity).split(',')
+    .map(k => k.replace(/\s+/g, ' ').trim()).filter(k => k && !seen.has(k.toLowerCase()) && seen.add(k.toLowerCase()));
+  const words = title.split(' ').filter(Boolean).length;
+  if (!title) return 'a title is needed';
+  if (words > TITLE_WORDS) return `a title is at most ${TITLE_WORDS} words, this one has ${words}`;
+  if (!keywords.length) return 'keywords are needed: --keywords a,b,c';
+  const name = id ? label(id) + title : title;
+  if (name.length > NAME_MAX) return `the thread name is at most ${NAME_MAX} characters, "${name}" has ${name.length}`;
+  if (keywordsPost(keywords).length > 500) return 'the keywords are over 500 characters';
+  return { title, keywords, name };
+}
 
 // The idea ids a text names, in order of first mention: I- and digits with no letter or digit right before or after.
 // One pass over the text, no regex.
