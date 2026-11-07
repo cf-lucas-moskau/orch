@@ -522,6 +522,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     const question = textOf(d.root, words);
     if (!question || recommend === '') throw new Error(USAGE);
     check('say');
+    await flushNotes(d.root, chat(), d.log, id, now);
     const text = askPost(cur.author.id, question, recommend, wait);
     const sentAt = clock();
     // Replies carry Discord's timestamps, so the question's time is its post's, as Discord says.
@@ -547,6 +548,7 @@ export async function idea(args: string[], d: Deps): Promise<string> {
   const text = textOf(d.root, rest.filter(a => a !== '--force'));
   if (sub === 'say') {
     if (!text) throw new Error(USAGE);
+    await flushNotes(d.root, chat(), d.log, id, now);
     await post('say', text);
     d.log(`idea ${id} say: ${text.slice(0, 120)}`);
     return `posted in ${id}`;
@@ -714,15 +716,7 @@ export async function tick(d: Deps & { chat: Chat }) {
     if (!p) continue;
     const seen = p.seen ? { notesSeen: p.seen } : {};
     if (!p.post) { update(d.root, i.id, x => ({ ...x, ...seen })); continue; }
-    let files: Attachment[] = [];
-    if (p.post.media) {
-      const m = mediaFile(d.root, i.id, p.post.media);
-      if ('file' in m) files = [m.file];
-      else d.log(`idea ${i.id}: note media ${p.post.media} left out, ${m.refused}; posting the text alone`);
-    }
-    // Recorded once the post is out: a failed post leaves the note new, and the next tick tries again.
-    await postIn(d.root, d.chat, i, p.post.text, { files });
-    update(d.root, i.id, x => ({ ...said('orch', p.post!.text, now, files.length ? p.post!.media : undefined)(x), ...seen }));
+    await postNote(d.root, d.chat, d.log, i, p.post, seen, now);
   }
   // Leftovers whose worker is gone, even if the idea reopened since; downloads whose record failed, again.
   for (const i of loadIdeas(d.root, d.log)) {
@@ -731,3 +725,31 @@ export async function tick(d: Deps & { chat: Chat }) {
   }
 }
 
+
+// One progress note into its idea's thread, media checked as always. Recorded once the post is out: a failed post
+// leaves the note new, and the next tick (or the next flush) tries again.
+async function postNote(root: string, chat: Chat, log: (s: string) => void, i: Idea, post: { text: string; media?: string }, seen: { notesSeen?: string[] }, now: string): Promise<void> {
+  let files: Attachment[] = [];
+  if (post.media) {
+    const m = mediaFile(root, i.id, post.media);
+    if ('file' in m) files = [m.file];
+    else log(`idea ${i.id}: note media ${post.media} left out, ${m.refused}; posting the text alone`);
+  }
+  await postIn(root, chat, i, post.text, { files });
+  update(root, i.id, x => ({ ...said('orch', post.text, now, files.length ? post.media : undefined)(x), ...seen }));
+}
+
+// Every progress note a building idea has not posted yet, oldest first, before orch says, asks or plans there:
+// a question must never land above the work it asks about (I-73, 2026-11-06: the concepts never went out because
+// the ask came first and kept the thread busy).
+async function flushNotes(root: string, chat: Chat, log: (s: string) => void, id: string, now: string): Promise<number> {
+  let n = 0;
+  for (;;) {
+    const i = loadIdeas(root, log).find(x => x.id === id);
+    if (!i || i.state !== 'building' || !Array.isArray(i.notesSeen)) return n;
+    const next = readNotes(root, id).find(x => !i.notesSeen!.includes(x.key));
+    if (!next) return n;
+    await postNote(root, chat, log, i, { text: next.text, ...(next.media ? { media: next.media } : {}) }, { notesSeen: [...i.notesSeen, next.key] }, now);
+    n++;
+  }
+}
