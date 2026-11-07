@@ -191,6 +191,8 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Screenshots: before you report or show one, open it and review it critically as a player would. List every flaw you see (misplaced UI, clipping, a character standing where it can't, seams, wrong labels) and fix it or name it. Never present a screenshot as proof without that review.`,
     // Auto mode stops on rm with globs or variables (b3, ew2 on 2026-10-26); nobody is there to approve it.
     `Deleting files: never rm with a glob or an unquoted variable; it stops on a permission prompt nobody answers. Write literal paths, or use find <dir> -mindepth 1 -delete, or write to a fresh folder instead.`,
+    // idea-66-2 sat blocked twice on the "Dangerous rm" check after writing files with shell heredocs (2026-11-06).
+    `Editing files: use the Edit and Write tools, never shell heredocs, cat > file or python/sed scripts that write files; those trip a permission prompt nobody answers and the session sits blocked.`,
     // Parallel workers on one repo collide at merge time; merging the default branch in before the last test run catches it
     // while it is cheap. A merge, never a rebase: history is not rewritten, so a normal push updates the PR (no force push).
     ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --autostash --no-edit origin/<default>\`; your changes stay uncommitted; never rebase) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
