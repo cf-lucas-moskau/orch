@@ -40,6 +40,7 @@ Everything except the READMEs is local to this machine and not in git.
 | `decisions/` | One file per needs-the-user decision. |
 | `workers.json` | Workers orch dispatched: name, repo, branch, worktree, pane, session id, status. |
 | `overlap.json` | Worker pairs the watcher already reported as changing the same files (`orch overlap --new`). |
+| `watch-seen.json` | Each worker's last finish or block the watcher handled from herdr, so a re-arm does not report it again. |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |
 | `routines/` | Recurring tasks and their `state.json`; format in `routines/README.md`. |
 | `notes/` | Notes from `/orch note` and ingest. |
@@ -52,6 +53,6 @@ To read more context on a session, use `herdr agent read <pane_id>`. ListAgents 
 
 ## Code
 
-`src/board.ts`, `triage.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts`, `routines.ts`, `ideas.ts`, `team.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts`, `discord.ts`, `ideas-io.ts`, `ideas-run.ts`, `team-io.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
+`src/board.ts`, `triage.ts`, `herdr-watch.ts`, `dispatch.ts`, `plan.ts`, `brief.ts`, `reflect.ts`, `review.ts`, `prs.ts`, `routines.ts`, `ideas.ts`, `team.ts` are pure and tested; `src/cli.ts`, `watch.ts`, `orch.ts`, `reflect-run.ts`, `setup.ts`, `discord.ts`, `ideas-io.ts`, `ideas-run.ts`, `team-io.ts` are IO glue; `hooks/orch-feed.sh` is the hook every Claude and Codex session runs (`npm run setup` installs it). Run `npm test` after any change.
 
 `mod/` is orch deck, a Claude Code mod that docks a live pane in this session: session map, agent bus, worker stages, decisions, flows. It loads when orch starts with `npm start`; `/deck` opens it. Its keys hand you prompts as the user's own words (steer, gates, clean up, decision answers): treat them as theirs. Logic lives in `mod/hooks/core.ts` (covered by `npm test`); `npm run test:mod` runs the mod's own tests.

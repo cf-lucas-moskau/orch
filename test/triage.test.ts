@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, herdrReport, markFeed, screenTail, type Seen } from '../src/triage.ts';
+import { classify, screenTail } from '../src/triage.ts';
 import type { FeedEvent } from '../src/board.ts';
 
 const ev = (event: string, msg: string, tail?: string): FeedEvent => ({ ts: '', sid: 's', event, cwd: '', prompt: '', msg, tail });
@@ -30,23 +30,6 @@ test('a final report after a subagent message is done', () => {
 
 test('other events are noise', () => {
   assert.equal(classify(ev('SessionStart', '')), 'skip');
-});
-
-test('herdr reports a worker settling only when the feed said nothing', () => {
-  const seen: Seen = new Map();
-  assert.equal(herdrReport(seen, 'worker a', 'done', 1000), 'done', 'hooks missed it: herdr reports');
-  assert.equal(herdrReport(seen, 'worker a', 'done', 2000), null, 'once per transition');
-  assert.equal(herdrReport(seen, 'worker a', 'idle', 40_000), 'done', 'idle after the window is a new finish');
-  assert.equal(herdrReport(seen, 'worker a', 'working', 90_000), null);
-  assert.equal(herdrReport(seen, 'worker a', 'unknown', 90_000), null);
-
-  markFeed(seen, 'worker b', { event: 'Stop' }, 100_000);
-  assert.equal(herdrReport(seen, 'worker b', 'done', 105_000), null, 'the feed reported it, interim stops and questions included');
-  assert.equal(herdrReport(seen, 'worker b', 'blocked', 106_000), 'blocked', 'a Stop says nothing about a block');
-  markFeed(seen, 'worker b', { event: 'Notification' }, 200_000);
-  assert.equal(herdrReport(seen, 'worker b', 'blocked', 201_000), null);
-  markFeed(seen, 'worker b', { event: 'UserPromptSubmit' }, 300_000);
-  assert.equal(herdrReport(seen, 'worker b', 'done', 301_000), 'done');
 });
 
 test('screenTail keeps the last words and drops the input box and status bar', () => {

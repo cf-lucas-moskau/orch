@@ -86,20 +86,30 @@ function serverVersion(): string | undefined {
   try { return JSON.parse(r.stdout.split('\n')[0]).result?.version; } catch { return undefined; }
 }
 let capsMemo: HerdrCaps | undefined;
-// ORCH_HERDR_VERSION pretends another server version, to try either path.
-const caps = () => capsMemo ??= herdrCaps(process.env.ORCH_HERDR_VERSION || serverVersion());
+// ORCH_HERDR_VERSION pretends another server version, to try either path. A fallback says so once per run.
+const caps = () => {
+  if (capsMemo) return capsMemo;
+  const version = process.env.ORCH_HERDR_VERSION || serverVersion();
+  capsMemo = herdrCaps(version);
+  if (!capsMemo.cleanInput) console.error(`herdr server ${version ?? '(version unreadable)'} is before 0.9.4: watching the screen for prompts`);
+  return capsMemo;
+};
 
 // Submits a prompt and confirms the session picked it up, without waiting out a long turn. Returns the agent's
 // status, or the reason it did not land.
 function trySubmit(target: string, text: string): { status: string } | { failed: string } {
   if (!caps().cleanInput) return trySubmitWatched(target, text);
+  const before = herdr('agent', 'get', target).result?.agent?.state_change_seq;
   const r = promptOutcome(herdr('agent', 'prompt', target, text, '--wait', '--timeout', '10000'));
   if ('failed' in r) return r;
   let status = 'landed' in r ? r.landed : '';
-  // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter.
+  // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter. A quick turn
+  // may already be done by the time herdr looks; done only counts as a new state, not the one before the prompt.
   if ('stalled' in r) {
     herdr('agent', 'send-keys', target, 'enter');
-    const w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--timeout', '10000');
+    let w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '10000');
+    if (w.result?.agent?.agent_status === 'done' && w.result.agent.state_change_seq === before)
+      w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--timeout', '10000');
     if (w.error) return { failed: 'the agent never picked it up (no activity after the prompt and one more Enter)' };
     status = w.result?.agent?.agent_status ?? 'working';
   }
@@ -154,6 +164,15 @@ function waitReady(name: string) {
   const w = herdr('agent', 'wait', name, '--until', 'idle', '--until', 'done', '--timeout', '30000');
   if (w.error?.code === 'timeout' && herdr('agent', 'get', name).result?.agent?.agent_status === 'blocked')
     return { error: { code: 'agent_blocked', message: 'blocked after trust' } };
+  if (w.error) return w;
+  // The input box can lag idle by a moment, most of all right after the trust dialog: wait for two equal screens.
+  let last = '';
+  for (let i = 0; i < 6; i++) {
+    const screen = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+    if (screen && screen === last) break;
+    last = screen;
+    spawnSync('sleep', ['1']);
+  }
   return w;
 }
 

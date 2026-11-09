@@ -5,7 +5,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { classify, herdrReport, markFeed, screenTail, type Seen } from './triage.ts';
+import { classify, screenTail } from './triage.ts';
+import { feedEvent, follow as followWorker, newWatch, type HerdrReply, type Watch } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 
@@ -33,7 +34,12 @@ function follow(d: string) {
     // Codex panes have no session id in herdr, so a worker is also found by its worktree.
     const w = json('workers.json', []).find((x: any) => x.status === 'running' && x.worktree === e.cwd);
     const s = names()[e.sid] ?? (w ? { name: `worker ${w.name}`, pane: w.pane } : { name: e.sid.slice(0, 8), pane: '?' });
-    if (s.name.startsWith('worker ')) markFeed(seen, s.name, e, Date.now());
+    if (s.name.startsWith('worker ')) {
+      const n = s.name.slice('worker '.length);
+      const r = feedEvent(watchOf(n), e);
+      saveWatch(n, r.w);
+      if (!r.print) return;
+    }
     const kind = classify(e);
     if (kind === 'skip') return;
     const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
@@ -48,51 +54,59 @@ function follow(d: string) {
 }
 
 // herdr's own view of each running worker, for the blocks and finishes the hook feed misses (a hook that failed,
-// Codex, whose turn hooks herdr 0.9.5 dropped). Per worker: wait until it works, wait until it settles, report.
-// Starting with "until working" keeps a worker that already sat idle from being reported on every re-arm.
-const seen: Seen = new Map();
-const waiting = new Map<string, ChildProcess>();
-// Bounded, so a wait the watcher left behind when it died ends on its own; a timeout just starts the next cycle.
-function herdrWait(pane: string, args: string[], then: (r: any) => void) {
-  const c = spawn('herdr', ['agent', 'wait', pane, ...args, '--timeout', String(30 * 60_000)]);
-  let out = '';
-  c.stdout.on('data', d => { out += d; });
-  c.on('error', () => then({ error: { code: 'spawn' } }));
-  c.on('close', () => { try { then(JSON.parse(out)); } catch { then({ error: { code: 'unparsed' } }); } });
-  return c;
+// Codex, whose turn hooks herdr 0.9.5 dropped). watch-seen.json keeps each worker's last handled state across
+// re-arms; without it (the first run) the states at start count as handled.
+const seenFile = 'watch-seen.json';
+const watches = new Map<string, Watch>();
+let seeding = !existsSync(join(root, seenFile));
+const handled = json(seenFile, {}) as Record<string, string>;
+const watchOf = (name: string) => watches.get(name) ?? newWatch(handled[name]);
+function saveWatch(name: string, w: Watch) {
+  watches.set(name, w);
+  if (w.handled === handled[name]) return;
+  if (w.handled) handled[name] = w.handled;
+  writeFileSync(join(root, seenFile), JSON.stringify(handled, null, 2) + '\n');
 }
-function watchWorker(w: { name: string; pane: string; sid?: string }) {
-  const name = `worker ${w.name}`;
-  const stop = () => waiting.delete(w.name);
-  const gone = (r: any) => !waiting.has(w.name) || (r.error && r.error.code !== 'timeout');
-  const cycle = () => waiting.set(w.name, herdrWait(w.pane, ['--until', 'working'], r => {
-    if (gone(r)) return stop();
-    if (r.error) return cycle();
-    waiting.set(w.name, herdrWait(w.pane, [], r => {
-      if (gone(r)) return stop();
-      if (r.error) return cycle();
-      const status = r.result?.agent?.agent_status ?? '';
-      // The feed's Stop hook fires with herdr's state change; give it a few seconds to arrive first.
-      setTimeout(() => {
-        const kind = herdrReport(seen, name, status, Date.now());
-        if (kind) {
-          const screen = spawnSync('herdr', ['agent', 'read', w.pane, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
-          console.log(`${kind.toUpperCase()} ${name} [${w.pane}] ${(w.sid || '-').slice(0, 8)}: (herdr: ${status}) ${screenTail(screen)}`);
-        }
-        if (waiting.has(w.name)) cycle();
-      }, 5000);
-    }));
-  }));
-  cycle();
+// Each follower's live herdr processes, killed when its worker stops running or the watcher exits.
+const followers = new Map<string, Set<ChildProcess>>();
+// Bounded, so a wait the watcher left behind when it died ends on its own; a timeout just starts the next round.
+function herdrCall(name: string, args: string[]): Promise<HerdrReply> {
+  return new Promise(resolve => {
+    const c = spawn('herdr', args);
+    const mine = followers.get(name);
+    mine?.add(c);
+    let out = '';
+    c.stdout.on('data', d => { out += d; });
+    c.on('error', () => resolve({ error: { code: 'spawn' } }));
+    c.on('close', () => { mine?.delete(c); try { resolve(JSON.parse(out)); } catch { resolve({ error: { code: 'unparsed' } }); } });
+  });
+}
+function watchWorker(w: { name: string; pane: string; sid?: string }, seed: boolean) {
+  const procs = new Set<ChildProcess>();
+  followers.set(w.name, procs);
+  followWorker({
+    get: () => herdrCall(w.name, ['agent', 'get', w.pane]),
+    wait: until => herdrCall(w.name, ['agent', 'wait', w.pane, ...until.flatMap(u => ['--until', u]), '--timeout', String(30 * 60_000)]),
+    sleep: ms => new Promise(r => setTimeout(r, ms)),
+    later: (ms, f) => { setTimeout(f, ms); },
+    watch: () => watchOf(w.name),
+    save: x => saveWatch(w.name, x),
+    emit: (kind, a) => {
+      const screen = spawnSync('herdr', ['agent', 'read', w.pane, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+      console.log(`${kind.toUpperCase()} worker ${w.name} [${w.pane}] ${(w.sid || '-').slice(0, 8)}: (herdr: ${a.agent_status}) ${screenTail(screen)}`);
+    },
+  }, () => followers.get(w.name) === procs, seed).finally(() => { if (followers.get(w.name) === procs) followers.delete(w.name); });
 }
 function syncWorkers() {
   const running = json('workers.json', []).filter((w: any) => w.status === 'running' && w.pane);
-  for (const w of running) if (!waiting.has(w.name)) watchWorker(w);
-  for (const [n, c] of waiting) if (!running.some((w: any) => w.name === n)) { waiting.delete(n); c.kill(); }
+  for (const w of running) if (!followers.has(w.name)) watchWorker(w, seeding);
+  seeding = false;
+  for (const [n, procs] of followers) if (!running.some((w: any) => w.name === n)) { followers.delete(n); for (const c of procs) c.kill(); }
 }
 syncWorkers();
 setInterval(syncWorkers, 30_000);
-for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(sig, () => { for (const c of waiting.values()) c.kill(); process.exit(0); });
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
+  process.on(sig, () => { for (const procs of followers.values()) for (const c of procs) c.kill(); process.exit(0); });
 
 // Ideas still waiting on orch, so nothing posted while orch was down is missed.
 try { for (const l of pendingLines(loadIdeas(root))) console.log(l); }
