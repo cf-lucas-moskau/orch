@@ -46,6 +46,7 @@ main { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; height: c
 #bar .btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 #bar button { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 #bar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+#bar button:disabled { opacity: .4; cursor: not-allowed; }
 #bar button.primary kbd { background: transparent; color: inherit; border-color: rgba(255,255,255,.6); }
 #bar textarea { width: 100%; font: inherit; font-size: 15px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); resize: vertical; min-height: 60px; }
 #bar .confirm { font-size: 14px; }
@@ -67,7 +68,7 @@ main { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; height: c
 <div id="bar"></div>
 <script>
 const LABEL = { decision: 'decision', blocked: 'blocked', question: 'worker asks', idea: 'idea ask', merge: 'merge', deploy: 'deploy' };
-let items = [], sel = 0, mode = null, draft = '', status = { text: '', cls: '' }, busy = false, selKey = null;
+let pinned = null, items = [], sel = 0, mode = null, draft = '', status = { text: '', cls: '' }, busy = false, selKey = null;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const base = p => p.split('/').pop();
@@ -83,8 +84,9 @@ async function load() {
     const d = await r.json();
     items = d.items;
     const i = items.findIndex(x => x.key === selKey);
-    sel = i >= 0 ? i : Math.min(sel, Math.max(0, items.length - 1));
-    selKey = cur()?.key ?? null;
+    // While an answer is open the selection stays on the pinned item, even when it moved or left; nothing reselects.
+    if (pinned) sel = i;
+    else { sel = i >= 0 ? i : Math.min(sel, Math.max(0, items.length - 1)); selKey = cur()?.key ?? null; }
     const open = items.filter(x => !x.sent).length;
     $('meta').textContent = `${open} waiting${items.length > open ? `, ${items.length - open} sent` : ''} · updated ${when(d.at).slice(11)}`;
     renderList(); if (!mode) renderDetail(); renderBar();
@@ -127,9 +129,22 @@ function renderDetail() {
   $('detail').scrollTop = 0;
 }
 
+// What became of the pinned item since its answer was opened; the server refuses the send in both cases.
+function staleNote() {
+  if (!pinned) return '';
+  const live = items.find(y => y.key === pinned.key);
+  return !live ? 'This item left the queue since you opened it. Nothing will be sent; press Esc.'
+    : live.rev !== pinned.rev ? 'This item changed since you opened it. Press Esc and look again.' : '';
+}
+
 function renderBar() {
-  const x = cur();
-  const st = status.text ? `<span class="status ${status.cls}">${esc(status.text)}</span>` : '';
+  paintBar();
+  $('bar').querySelector('[data-act="send"]')?.toggleAttribute('disabled', !!staleNote());
+}
+function paintBar() {
+  const x = pinned ?? cur();
+  const stale = staleNote();
+  const st = stale ? `<span class="status err">${esc(stale)}</span>` : status.text ? `<span class="status ${status.cls}">${esc(status.text)}</span>` : '';
   if (!x) { $('bar').innerHTML = `<div class="btns">${st}</div>`; return; }
   if (mode === 'accept') {
     $('bar').innerHTML = `<div class="confirm">Send to orch: <b>${esc(x.answers.accept)}</b></div>
@@ -161,27 +176,38 @@ function move(d) {
   $('list').querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
 }
 function start(m) {
-  const x = cur(); if (!x || busy) return;
+  const x = cur(); if (!x || busy || x.sent) return;
+  // The answer is bound to this item as it was when opened: its key and its revision.
+  pinned = x; selKey = x.key;
   mode = m; status = { text: '', cls: '' };
   draft = m === 'reject' ? x.answers.reject : m === 'edit' ? x.answers.edit : '';
   renderBar();
 }
-function cancel() { mode = null; draft = ''; renderBar(); renderDetail(); }
+function cancel() {
+  mode = null; draft = ''; pinned = null;
+  const i = items.findIndex(x => x.key === selKey);
+  sel = i >= 0 ? i : Math.min(Math.max(sel, 0), Math.max(0, items.length - 1)); selKey = cur()?.key ?? null;
+  renderList(); renderBar(); renderDetail();
+}
 
 async function send() {
-  const x = cur(); if (!x || busy) return;
+  const x = pinned; if (!x || busy || staleNote()) return;
   const text = mode === 'accept' ? x.answers.accept : draft.trim();
   busy = true; status = { text: 'sending to orch…', cls: '' }; renderBar();
+  let ok = false;
   try {
-    const r = await fetch('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json', 'x-orch': 'queue' }, body: JSON.stringify({ key: x.key, text }) });
+    const r = await fetch('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json', 'x-orch': 'queue' }, body: JSON.stringify({ key: x.key, rev: x.rev, text }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
-    mode = null; draft = ''; status = { text: `sent: ${text}`, cls: 'ok' };
-    const next = items.findIndex((y, i) => i > sel && !y.sent);
-    if (next >= 0) { sel = next; selKey = items[next].key; }
+    ok = true; status = { text: `sent: ${text}`, cls: 'ok' };
   } catch (e) { status = { text: `not sent: ${e.message}`, cls: 'err' }; }
   busy = false;
-  await load(); renderDetail(); renderBar();
+  if (ok) {
+    cancel();
+    const next = items.findIndex((y, i) => i > sel && !y.sent && y.key !== x.key);
+    if (next >= 0) { sel = next; selKey = items[next].key; }
+  }
+  await load(); renderList(); renderDetail(); renderBar();
 }
 
 $('list').addEventListener('click', e => { const b = e.target.closest('.row'); if (b && !mode) { sel = +b.dataset.i; selKey = cur().key; status = { text: '', cls: '' }; renderList(); renderDetail(); renderBar(); if (matchMedia('(max-width: 760px)').matches) $('detail').scrollIntoView({ behavior: 'smooth' }); } });

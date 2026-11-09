@@ -119,7 +119,9 @@ async function ensureQueue() {
       catch { return ''; }
     };
     const msg = up ? '' : r.status !== 0 ? `could not start: ${r.stderr.trim()}` : `did not come up on port ${queuePort}: ${tail()}`;
-    if (up) console.log(`QUEUE started on http://127.0.0.1:${queuePort} (it was down)`);
+    // The page prints a one-time tailnet login link on start; orch relays it to the user's phone.
+    const login = () => { try { return [...readFileSync(log, 'utf8').matchAll(/^queue login link \(one use\): (\S+)$/gm)].at(-1)?.[1] ?? ''; } catch { return ''; } };
+    if (up) console.log(`QUEUE started on http://127.0.0.1:${queuePort} (it was down)${login() ? `; tailnet login link (one use): ${login()}` : ''}`);
     else if (msg !== queueError) console.log(`QUEUE error: ${msg}`);
     queueError = msg;
   } finally { queueBusy = false; }
