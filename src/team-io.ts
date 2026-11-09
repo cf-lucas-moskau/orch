@@ -4,8 +4,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chatFor, MockChat, PinRefused, writeAtomic, type Chat } from './discord.ts';
-import { draftText, feed, isOff, loadConfig, loadIdeas, textOf, type Deps } from './ideas-io.ts';
-import type { Incoming } from './ideas.ts';
+import { draftText, feed, isOff, loadConfig, loadIdeas, locked, retitle, textOf, type Deps } from './ideas-io.ts';
+import { parseTitle, type Incoming, type Title } from './ideas.ts';
 import { backlogPage, CHANNELS, classify, outward, raisePost, teamLine, teamRecord, type Channel, type TeamRecord } from './team.ts';
 
 const teamDir = (root: string) => join(root, 'ideas', 'team');
@@ -43,7 +43,18 @@ const TEAM_USAGE = `usage: orch team backlog [n] | say <text|file>
        orch team fake "<text>" --as <user> [--reply-to <user>]   (mock adapter only)
        files are read only from ideas/drafts/`;
 const IMPL_USAGE = `usage: orch impl say <text|file> | raise <idea id> <text|file> | pin <file>
+       orch impl title <thread id> <title, at most 8 words> --keywords a,b,c
        pin takes ideas/vision.md or a file under ideas/drafts/; say and raise read files only from ideas/drafts/`;
+
+// `impl title`'s store, by thread id; read under the ideas/ lock. A file that does not parse stops the command
+// rather than being written over.
+const implTitlesFile = (root: string) => join(root, 'ideas', 'impl-threads.json');
+function implTitles(root: string): Record<string, Title> {
+  const f = implTitlesFile(root);
+  if (!existsSync(f)) return {};
+  try { return JSON.parse(readFileSync(f, 'utf8')); }
+  catch (e) { return fail(`ideas/impl-threads.json does not parse, fix or remove it: ${e instanceof Error ? e.message : e}`); }
+}
 
 const chatOf = (d: Deps) => d.chat ?? chatFor(d.root, loadConfig(d.root), d.log);
 const now = (d: Deps) => (d.now ?? (() => new Date().toISOString()))();
@@ -104,6 +115,15 @@ export async function impl(args: string[], d: Deps): Promise<string> {
     nonEmpty(outward(body));
     await say(d, chat, 'impl', raisePost(idea, body, ideas));
     return `raised ${idea.id} in ${CHANNELS.impl}`;
+  }
+  if (sub === 'title') {
+    const [thread, ...words] = rest;
+    const want = parseTitle(words);
+    if (!thread || typeof want === 'string') return fail(`${typeof want === 'string' ? `${want}\n` : ''}${IMPL_USAGE}`);
+    const t = await chat.getThread(thread) ?? fail(`no thread ${thread}`);
+    if (t.parent !== await channelId(d.root, chat, 'impl')) fail(`${thread} is not a thread in ${CHANNELS.impl}`);
+    return retitle(d, chat, `impl ${thread} title`, { id: thread, ...t }, want, locked(d.root, () => implTitles(d.root))[thread],
+      title => locked(d.root, () => writeAtomic(implTitlesFile(d.root), JSON.stringify({ ...implTitles(d.root), [thread]: title }, null, 2) + '\n')));
   }
   if (sub === 'pin') {
     if (rest.length !== 1) fail(IMPL_USAGE);

@@ -13,8 +13,9 @@ export interface Chat {
   createThread(message: string, name: string): Promise<string>;
   // The thread already opened on a top-level post, if any.
   findThread(message: string): Promise<string | null>;
-  // A thread's current name, null when it is gone.
-  getThread(thread: string): Promise<{ name: string } | null>;
+  // A thread's current name, the channel it is in and whether it is archived, null when it is gone.
+  getThread(thread: string): Promise<{ name: string; parent?: string; archived?: boolean } | null>;
+  setArchived(thread: string, archived: boolean): Promise<void>;
   // Renames a thread; an archived one is unarchived for the rename and archived again, even when the rename fails.
   renameThread(thread: string, name: string): Promise<void>;
   // target is a thread or channel id; long text goes out as several messages, files with the last.
@@ -33,6 +34,10 @@ export interface Chat {
   // Throws PinRefused when the bot may not pin there.
   pin(channel: string, message: string): Promise<void>;
   remove(channel: string, message: string): Promise<void>;
+  // Replaces the text of one of the bot's messages, pinging nobody; false when the message is gone. Discord refuses
+  // it in an archived thread.
+  edit(channel: string, message: string, text: string): Promise<boolean>;
+  hasMessage(channel: string, message: string): Promise<boolean>;
 }
 
 // files: media already read and checked by the caller; the adapter never reads a path.
@@ -41,7 +46,9 @@ export type ReplyOptions = { files?: Attachment[]; ping?: string };
 // ids: every message the post went out as, in order.
 export type Posted = { ts?: string; ids: string[] };
 export type Outgoing =
-  | { kind: 'thread'; message: string; thread: string; name: string }
+  | { kind: 'thread'; message: string; thread: string; name: string; parent?: string }
+  | { kind: 'edit'; target: string; message: string; text: string }
+  | { kind: 'archive'; thread: string; archived: boolean }
   | { kind: 'rename'; thread: string; name: string }
   | { kind: 'reply'; target: string; text: string; files?: string[]; ping?: string }
   | { kind: 'react'; target: string; message: string; emoji: string }
@@ -117,11 +124,27 @@ export class MockChat implements Chat {
     return t?.kind === 'thread' ? t.thread : null;
   }
   async getThread(thread: string) {
-    const name = this.outbox().flatMap(o => (o.kind === 'thread' || o.kind === 'rename') && o.thread === thread ? [o.name] : []).at(-1);
-    return name === undefined ? null : { name };
+    const out = this.outbox();
+    const name = out.flatMap(o => (o.kind === 'thread' || o.kind === 'rename') && o.thread === thread ? [o.name] : []).at(-1);
+    const opened = out.find(o => o.kind === 'thread' && o.thread === thread);
+    if (name === undefined) return null;
+    return { name, parent: (opened?.kind === 'thread' && opened.parent) || this.channel, ...(this.archived(thread) ? { archived: true } : {}) };
+  }
+  private archived(thread: string) {
+    const last = this.outbox().filter(o => o.kind === 'archive' && o.thread === thread).at(-1);
+    return last?.kind === 'archive' && last.archived;
+  }
+  async setArchived(thread: string, archived: boolean) { this.out({ kind: 'archive', thread, archived }); }
+  // A thread someone opened in another channel, such as implementer-discussions.
+  openThread(parent: string, message: string, name: string) {
+    const thread = `t-${message}`;
+    this.out({ kind: 'thread', message, thread, name, parent });
+    return thread;
   }
   async renameThread(thread: string, name: string) { this.out({ kind: 'rename', thread, name }); }
+  // As on Discord, a post in an archived thread unarchives it.
   async reply(target: string, text: string, o: ReplyOptions = {}): Promise<Posted> {
+    if (this.archived(target)) this.out({ kind: 'archive', thread: target, archived: false });
     const parts = split(text);
     const sent = parts.map((t, n) => this.out({
       kind: 'reply', target, text: t,
@@ -143,6 +166,17 @@ export class MockChat implements Chat {
   }
   async pin(target: string, message: string) { this.out({ kind: 'pin', target, message }); }
   async remove(target: string, message: string) { this.out({ kind: 'delete', target, message }); }
+  async edit(target: string, message: string, text: string) {
+    if (!await this.hasMessage(target, message)) return false;
+    if (this.archived(target)) throw new Error('Thread is archived');
+    this.out({ kind: 'edit', target, message, text });
+    return true;
+  }
+  // Message ids are outbox line numbers: one of orch's posts there, not deleted since.
+  async hasMessage(target: string, message: string) {
+    const out = this.outbox(), posted = out[Number(message.slice(1)) - 1];
+    return posted?.kind === 'reply' && posted.target === target && !out.some(o => o.kind === 'delete' && o.target === target && o.message === message);
+  }
   outbox(): (Outgoing & { ts: string })[] { return lines(join(this.dir, 'outbox.jsonl')).map(l => JSON.parse(l)); }
   // `orch idea fake`: post as someone, at the top level or inside an idea's thread. Mock user ids are their names.
   // channel: a top-level post in another channel. replyTo: the user whose message this one replies to.
@@ -323,9 +357,12 @@ export class DiscordChat implements Chat {
     catch (e: any) { if (e?.status === 404) return null; throw e; }
   }
   async getThread(thread: string) {
-    try { return { name: (await (await this.api()).get(route.channel(thread))).name as string }; }
-    catch (e: any) { if (e?.status === 404) return null; throw e; }
+    try {
+      const t = await (await this.api()).get(route.channel(thread));
+      return { name: t.name as string, ...(t.parent_id ? { parent: t.parent_id as string } : {}), ...(t.thread_metadata?.archived ? { archived: true } : {}) };
+    } catch (e: any) { if (e?.status === 404) return null; throw e; }
   }
+  async setArchived(thread: string, archived: boolean) { await (await this.api()).patch(route.channel(thread), { body: { archived } }); }
   // Discord renames an archived thread only after unarchiving it. It is archived again whether the rename worked or not;
   // a rename that worked with a re-archive that failed throws RearchiveFailed.
   async renameThread(thread: string, name: string) {
@@ -395,6 +432,15 @@ export class DiscordChat implements Chat {
     catch (e: any) { if (e?.status === 403 || e?.code === 50013 || e?.code === 50001) throw new PinRefused(why(e)); throw e; }
   }
   async remove(channel: string, message: string) { await (await this.api()).delete(route.message(channel, message)); }
+  // 10008 is Discord's Unknown Message.
+  async edit(channel: string, message: string, text: string) {
+    try { await (await this.api()).patch(route.message(channel, message), { body: { content: text, allowed_mentions: NO_PINGS } }); return true; }
+    catch (e: any) { if (e?.status === 404 || e?.code === 10008) return false; throw e; }
+  }
+  async hasMessage(channel: string, message: string) {
+    try { await (await this.api()).get(route.message(channel, message)); return true; }
+    catch (e: any) { if (e?.status === 404 || e?.code === 10008) return false; throw e; }
+  }
 }
 
 export function chatFor(root: string, config: Config, onError?: OnError): Chat {
