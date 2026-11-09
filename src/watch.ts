@@ -1,11 +1,11 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { classify } from './triage.ts';
+import { classify, herdrReport, markFeed, screenTail, type Seen } from './triage.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 
@@ -30,11 +30,12 @@ function follow(d: string) {
     if (!e.sid || e.sid === self) return;
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
     if (e.event === 'Idea' || e.event === 'Team') return console.log(e.msg);
-    const kind = classify(e);
-    if (kind === 'skip') return;
     // Codex panes have no session id in herdr, so a worker is also found by its worktree.
     const w = json('workers.json', []).find((x: any) => x.status === 'running' && x.worktree === e.cwd);
     const s = names()[e.sid] ?? (w ? { name: `worker ${w.name}`, pane: w.pane } : { name: e.sid.slice(0, 8), pane: '?' });
+    if (s.name.startsWith('worker ')) markFeed(seen, s.name, e, Date.now());
+    const kind = classify(e);
+    if (kind === 'skip') return;
     const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
     // Workers' helper subagents end with an empty DONE from a session orch doesn't know; nothing to act on.
     if (kind === 'done' && !text.trim() && s.pane === '?') return;
@@ -45,6 +46,53 @@ function follow(d: string) {
   const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day()); } }, 60_000);
   tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => follow(day()), 1000); } });
 }
+
+// herdr's own view of each running worker, for the blocks and finishes the hook feed misses (a hook that failed,
+// Codex, whose turn hooks herdr 0.9.5 dropped). Per worker: wait until it works, wait until it settles, report.
+// Starting with "until working" keeps a worker that already sat idle from being reported on every re-arm.
+const seen: Seen = new Map();
+const waiting = new Map<string, ChildProcess>();
+// Bounded, so a wait the watcher left behind when it died ends on its own; a timeout just starts the next cycle.
+function herdrWait(pane: string, args: string[], then: (r: any) => void) {
+  const c = spawn('herdr', ['agent', 'wait', pane, ...args, '--timeout', String(30 * 60_000)]);
+  let out = '';
+  c.stdout.on('data', d => { out += d; });
+  c.on('error', () => then({ error: { code: 'spawn' } }));
+  c.on('close', () => { try { then(JSON.parse(out)); } catch { then({ error: { code: 'unparsed' } }); } });
+  return c;
+}
+function watchWorker(w: { name: string; pane: string; sid?: string }) {
+  const name = `worker ${w.name}`;
+  const stop = () => waiting.delete(w.name);
+  const gone = (r: any) => !waiting.has(w.name) || (r.error && r.error.code !== 'timeout');
+  const cycle = () => waiting.set(w.name, herdrWait(w.pane, ['--until', 'working'], r => {
+    if (gone(r)) return stop();
+    if (r.error) return cycle();
+    waiting.set(w.name, herdrWait(w.pane, [], r => {
+      if (gone(r)) return stop();
+      if (r.error) return cycle();
+      const status = r.result?.agent?.agent_status ?? '';
+      // The feed's Stop hook fires with herdr's state change; give it a few seconds to arrive first.
+      setTimeout(() => {
+        const kind = herdrReport(seen, name, status, Date.now());
+        if (kind) {
+          const screen = spawnSync('herdr', ['agent', 'read', w.pane, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+          console.log(`${kind.toUpperCase()} ${name} [${w.pane}] ${(w.sid || '-').slice(0, 8)}: (herdr: ${status}) ${screenTail(screen)}`);
+        }
+        if (waiting.has(w.name)) cycle();
+      }, 5000);
+    }));
+  }));
+  cycle();
+}
+function syncWorkers() {
+  const running = json('workers.json', []).filter((w: any) => w.status === 'running' && w.pane);
+  for (const w of running) if (!waiting.has(w.name)) watchWorker(w);
+  for (const [n, c] of waiting) if (!running.some((w: any) => w.name === n)) { waiting.delete(n); c.kill(); }
+}
+syncWorkers();
+setInterval(syncWorkers, 30_000);
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(sig, () => { for (const c of waiting.values()) c.kill(); process.exit(0); });
 
 // Ideas still waiting on orch, so nothing posted while orch was down is missed.
 try { for (const l of pendingLines(loadIdeas(root))) console.log(l); }

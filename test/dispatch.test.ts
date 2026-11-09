@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { herdrCaps, promptOutcome, isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -71,6 +71,7 @@ test('steering skips focused and blocked panes', () => {
   assert.match(canSteer({ agent_status: 'idle', focused: true, pane_id: 'p' }, 'half a sentence')!, /typing/);
   assert.match(canSteer({ agent_status: 'idle', pane_id: 'p' }, 'left behind')!, /unsent draft/);
   assert.match(canSteer({ agent_status: 'blocked', pane_id: 'p' })!, /decision/);
+  assert.match(canSteer({ agent_status: 'blocked', pane_id: 'p' }, '1. Coffee')!, /decision/, 'a question dialog is no draft');
   assert.match(canSteer(undefined)!, /no live agent/);
   assert.equal(canSteer({ agent_status: 'done', pane_id: 'p' }), null);
 });
@@ -238,6 +239,27 @@ test('a prompt counts as landed only after 6 s busy with an empty box and no raw
   assert.equal(promptVerdict(Array(10).fill(idle)), 'idle');
   assert.equal(promptVerdict([idle, { ...busy, status: 'done' }, busy]), 'landed');
   assert.equal(promptVerdict([busy, busy, { ...busy, draft: null }]), 'landed', 'no input box drawn while it works');
+});
+
+test('only a herdr server from 0.9.4 on is trusted to keep pane input clean', () => {
+  assert.deepEqual(herdrCaps('0.9.3'), { cleanInput: false });
+  assert.deepEqual(herdrCaps('0.9.4'), { cleanInput: true });
+  assert.deepEqual(herdrCaps('0.9.5'), { cleanInput: true });
+  assert.deepEqual(herdrCaps('0.10.0'), { cleanInput: true });
+  assert.deepEqual(herdrCaps('1.0.0-beta.1'), { cleanInput: true });
+  assert.deepEqual(herdrCaps('0.8.12'), { cleanInput: false });
+  assert.deepEqual(herdrCaps(undefined), { cleanInput: false }, 'an unreadable version keeps the screen checks');
+  assert.deepEqual(herdrCaps('garbage'), { cleanInput: false });
+});
+
+test('agent prompt --wait: settled or still working landed, stalled gets one more Enter, anything else failed', () => {
+  assert.deepEqual(promptOutcome({ result: { agent: { agent_status: 'done' } } }), { landed: 'done' });
+  assert.deepEqual(promptOutcome({ result: { agent: { agent_status: 'blocked' } } }), { landed: 'blocked' });
+  assert.deepEqual(promptOutcome({ error: { code: 'timeout', message: 'timed out waiting for agent status' } }), { landed: 'working' });
+  assert.deepEqual(promptOutcome({ error: { code: 'agent_prompt_stalled', message: 'x' } }), { stalled: true });
+  assert.deepEqual(promptOutcome({ error: { code: 'agent_blocked', message: 'agent hprobe is blocked and requires interactive input' } }),
+    { failed: 'agent_blocked agent hprobe is blocked and requires interactive input' });
+  assert.deepEqual(promptOutcome({ error: { code: 'agent_not_found' } }), { failed: 'agent_not_found' });
 });
 
 test('prTitle takes the plan line of a later round, strips bold and cuts at the sentence', () => {

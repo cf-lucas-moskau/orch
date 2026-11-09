@@ -145,9 +145,10 @@ export function inputDraft(ansiScreen: string): string | null {
 // A focused pane with an empty input box is fine: the user is only looking at it.
 export function canSteer(a: Live | undefined, draft = ''): string | null {
   if (!a) return 'no live agent with that name or pane';
+  // A question dialog's selected option reads like a draft, so blocked comes first.
+  if (a.agent_status === 'blocked') return 'session is blocked on a dialog; that is a decision, not a prompt';
   // Any text already in the box would be submitted together with ours, focused or not.
   if (draft) return `${a.focused ? 'the user is typing in that pane' : 'that pane has an unsent draft'} ("${draft.slice(0, 40)}")`;
-  if (a.agent_status === 'blocked') return 'session is blocked on a dialog; that is a decision, not a prompt';
   return null;
 }
 
@@ -264,6 +265,26 @@ export function promptVerdict(samples: PromptSample[], max = 10): PromptVerdict 
   const last2 = samples.slice(-2);
   if (samples.length >= 3 && last2.every(x => BUSY.includes(x.status ?? '') && !x.draft)) return 'landed';
   return samples.length >= max ? 'idle' : 'pending';
+}
+
+// What the running herdr server can be trusted with. From 0.9.4 terminal replies no longer leak into pane input,
+// the cause of garbled first prompts, so `agent prompt --wait` alone says whether a prompt landed. Older servers, or
+// one whose version orch can't read, keep orch's own screen checks (promptVerdict, waitReady's settle loop).
+export type HerdrCaps = { cleanInput: boolean };
+export function herdrCaps(version?: string): HerdrCaps {
+  const v = (version ?? '').match(/^(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  return { cleanInput: !!v && v[0] * 1e6 + v[1] * 1e3 + v[2] >= 9004 };
+}
+
+// `herdr agent prompt --wait --timeout <over 5 s>`, read: herdr reports agent_prompt_stalled within 5 s when the agent
+// showed no activity, so a timeout means it is still working on the prompt.
+export type HerdrReply = { result?: { agent?: { agent_status?: string } }; error?: { code: string; message?: string } };
+export type PromptOutcome = { landed: string } | { stalled: true } | { failed: string };
+export function promptOutcome(r: HerdrReply): PromptOutcome {
+  if (!r.error) return { landed: r.result?.agent?.agent_status ?? 'unknown' };
+  if (r.error.code === 'timeout') return { landed: 'working' };
+  if (r.error.code === 'agent_prompt_stalled') return { stalled: true };
+  return { failed: `${r.error.code} ${r.error.message ?? ''}`.trim() };
 }
 
 // Two workers on one repo changing the same files collide at merge time; found early, the later one merges the default branch in or coordinates.

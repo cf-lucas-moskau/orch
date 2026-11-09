@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { herdrCaps, isGarbledPrompt, promptOutcome, type HerdrCaps, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -78,11 +78,38 @@ const potetoSkill = (): string | false => {
 };
 const worker = (name: string) => loadWorkers().find(w => w.name === name && w.status === 'running') ?? die(`no running worker ${name}`);
 
-// Submit and confirm the session picked it up, without waiting for the whole turn.
-// A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28):
-// clear the input line and send it once more before giving up.
-// Pastes the prompt and watches it land (promptVerdict). Returns the agent's status, or the reason it did not land.
+// The running server's version from its ping, which `herdr` itself does not print. The binary can be newer than the
+// server: every session lives in the server, so it is never restarted for an upgrade.
+function serverVersion(): string | undefined {
+  const sock = process.env.HERDR_SOCKET_PATH ?? join(homedir(), '.config/herdr/herdr.sock');
+  const r = spawnSync('nc', ['-U', '-w', '2', sock], { input: '{"id":"orch:ping","method":"ping","params":{}}\n', encoding: 'utf8', timeout: 4000 });
+  try { return JSON.parse(r.stdout.split('\n')[0]).result?.version; } catch { return undefined; }
+}
+let capsMemo: HerdrCaps | undefined;
+// ORCH_HERDR_VERSION pretends another server version, to try either path.
+const caps = () => capsMemo ??= herdrCaps(process.env.ORCH_HERDR_VERSION || serverVersion());
+
+// Submits a prompt and confirms the session picked it up, without waiting out a long turn. Returns the agent's
+// status, or the reason it did not land.
 function trySubmit(target: string, text: string): { status: string } | { failed: string } {
+  if (!caps().cleanInput) return trySubmitWatched(target, text);
+  const r = promptOutcome(herdr('agent', 'prompt', target, text, '--wait', '--timeout', '10000'));
+  if ('failed' in r) return r;
+  let status = 'landed' in r ? r.landed : '';
+  // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter.
+  if ('stalled' in r) {
+    herdr('agent', 'send-keys', target, 'enter');
+    const w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--timeout', '10000');
+    if (w.error) return { failed: 'the agent never picked it up (no activity after the prompt and one more Enter)' };
+    status = w.result?.agent?.agent_status ?? 'working';
+  }
+  const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible', '--ansi'], { encoding: 'utf8' }).stdout ?? '';
+  return isGarbledPrompt(screen) ? { failed: 'it arrived garbled (raw paste codes on screen)' } : { status };
+}
+
+// For servers before 0.9.4: pastes the prompt and watches the screen until it lands (promptVerdict).
+// A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28).
+function trySubmitWatched(target: string, text: string): { status: string } | { failed: string } {
   const send = () => herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
   const r = send();
   // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter: the text sits in
@@ -120,8 +147,26 @@ function relaunch(name: string, kind: Kind, pane: string) {
   return started.error ? started : waitReady(name);
 }
 
-// herdr reports ready a moment before Claude's input box takes pastes, also after the trust dialog.
+// Ready for a prompt: idle or done. Right after the trust keys the dialog still shows as blocked, so blocked only
+// counts once the wait for ready runs out. herdr's own wait is enough from 0.9.4 on.
 function waitReady(name: string) {
+  if (!caps().cleanInput) return waitReadyWatched(name);
+  const w = herdr('agent', 'wait', name, '--until', 'idle', '--until', 'done', '--timeout', '30000');
+  if (w.error?.code === 'timeout' && herdr('agent', 'get', name).result?.agent?.agent_status === 'blocked')
+    return { error: { code: 'agent_blocked', message: 'blocked after trust' } };
+  return w;
+}
+
+// A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives, on servers
+// that leak those answers into pane input.
+function nudge(name: string) {
+  if (caps().cleanInput) return;
+  herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
+  herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+}
+
+// For servers before 0.9.4, which report ready a moment before Claude's input box takes pastes, also after the trust dialog.
+function waitReadyWatched(name: string) {
   let last = '', before = '';
   for (let i = 0; i < 60; i++) {
     spawnSync('sleep', ['1']);
@@ -223,9 +268,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   const brief = join(root, 'briefs', `${name}.md`);
   mkdirSync(join(root, 'briefs'), { recursive: true });
   writeFileSync(brief, potetoLine(rec, potetoSkill()) + workerBrief(task, p, rec, !extra.prHead && !stacked));
-  // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives.
-  herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
-  herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+  nudge(name);
   const prompt = workerPrompt(brief);
   let sent = trySubmit(name, prompt);
   // One fresh start when the first prompt did not land: idea-28 and idea-25-2 sat idle for hours with it garbled.
@@ -234,8 +277,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
     const again = relaunch(name, kind, pane);
     if (!again.error) {
       saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, sid: herdr('agent', 'get', name).result?.agent?.agent_session?.value ?? w.sid } : w));
-      herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
-      herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+      nudge(name);
       sent = trySubmit(name, prompt);
     }
   }
