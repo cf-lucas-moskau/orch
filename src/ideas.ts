@@ -57,6 +57,7 @@ export const STALE_DAYS = 14;
 export const STAGES = { building: 'building the change', checking: 'running the tests and a code review', deploying: 'putting it live', playtesting: 'trying it out on the live game' } as const;
 export type Stage = keyof typeof STAGES;
 export const PULSE_MIN = 5;
+export const PULSE_MAX_MIN = 24 * 60;
 export const NOTE_GAP_MIN = 2;
 export const ASK_TIMEOUT_MIN = 10;
 export const NUDGE_MIN = 60;
@@ -355,15 +356,22 @@ export function split(text: string, max = 2000): string[] {
 // The watcher keeps the live bridge up: only on the discord adapter, never while the kill switch is on.
 export const bridgeShouldStart = (adapter: Config['adapter'], off: boolean, running: boolean) => adapter === 'discord' && !off && !running;
 
-// A short note every few minutes while an idea builds, so the thread knows work goes on. Null when anything was
-// posted in the thread by orch within the last PULSE_MIN minutes.
+// A short note while an idea builds, so the thread knows work goes on. The wait starts at PULSE_MIN after orch's last
+// post and doubles with each pulse in a row, up to PULSE_MAX_MIN, so a build that stalls for days doesn't flood its thread.
 export function pulse(i: Idea, now: string): string | null {
   if (i.state !== 'building') return null;
-  if (minsSince(lastOrch(i), now) < PULSE_MIN) return null;
+  if (minsSince(lastOrch(i), now) < Math.min(PULSE_MIN * 2 ** pulsesInARow(i), PULSE_MAX_MIN)) return null;
   const mins = i.startedAt ? Math.max(1, Math.round((Date.parse(now) - Date.parse(i.startedAt)) / 60_000)) : undefined;
   return `Still on it: ${STAGES[i.stage ?? 'building']}${mins ? ` (${mins} min in)` : ''}.`;
 }
 
+const isPulse = (m: { by: string; text: string }) => m.by === 'orch' && m.text.startsWith('Still on it:');
+const pulsesInARow = (i: Idea) => {
+  const ms = i.messages ?? [];
+  let n = 0;
+  while (n < ms.length && isPulse(ms[ms.length - 1 - n]!)) n++;
+  return n;
+};
 const lastOrch = (i: Idea) => [i.startedAt, ...(i.messages ?? []).filter(m => m.by === 'orch').map(m => m.ts)].filter(Boolean).sort().at(-1);
 const minsSince = (from: string | undefined, now: string) => from ? (Date.parse(now) - Date.parse(from)) / 60_000 : Infinity;
 

@@ -752,6 +752,19 @@ test('a building idea gets a progress note every few minutes, naming its stage',
   assert.equal(pulse({ ...b, stage: undefined }, '2026-10-30T10:30:00.000Z'), 'Still on it: building the change (30 min in).');
 });
 
+test('pulses in a row back off, doubling up to a day, and any other post resets them', () => {
+  const p = (ts: string) => ({ ts, by: 'orch', text: 'Still on it: building the change.' });
+  const b = { ...base, state: 'building' as const, startedAt: '2026-10-30T10:00:00.000Z',
+    messages: [{ ts: '2026-10-30T10:00:00.000Z', by: 'orch', text: 'Building it now.' }, p('2026-10-30T10:05:00.000Z'), p('2026-10-30T10:15:00.000Z')] };
+  assert.equal(pulse(b, '2026-10-30T10:34:00.000Z'), null, 'two in a row: waits 20 min');
+  assert.ok(pulse(b, '2026-10-30T10:35:00.000Z'));
+  const many = { ...b, messages: [...b.messages, ...Array.from({ length: 20 }, () => p('2026-10-30T12:00:00.000Z'))] };
+  assert.equal(pulse(many, '2026-10-31T11:59:00.000Z'), null, 'capped at a day');
+  assert.ok(pulse(many, '2026-10-31T12:00:00.000Z'));
+  const reset = { ...many, messages: [...many.messages, { ts: '2026-10-30T12:01:00.000Z', by: 'pnin', text: 'any news?' }] };
+  assert.ok(pulse(reset, '2026-10-30T12:06:00.000Z'), 'a member post resets the wait to 5 min');
+});
+
 test('note text keeps words with a slash and loses real paths', () => {
   assert.equal(scrub('Swipe left/right to steer, and/or tap. Half the map, 1/2 done.'), 'Swipe left/right to steer, and/or tap. Half the map, 1/2 done.');
   assert.equal(scrub('Changed game/boat.ts and assets/sprites/boat.png, see ~/notes and ./build/out'), 'Changed and, see and');
