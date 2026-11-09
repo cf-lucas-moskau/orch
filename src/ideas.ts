@@ -111,7 +111,7 @@ export const roundOf = (i: Idea) => i.round ?? 1;
 export const entry = (i: Idea, kind: Entry['kind'], text: string, ts: string, by?: string, msg?: string): Idea =>
   ({ ...i, dossier: [...i.dossier ?? [], { ts, round: roundOf(i), kind, text: text.trim(), ...(by ? { by } : {}), ...(msg ? { msg } : {}) }] });
 
-export const PAUSED = 'The idea bridge is paused right now. Try again later.';
+export const PAUSED = 'Development is on pause for now because we hit our usage limits. Your message is saved and nothing gets lost; we pick it up as soon as we are back.';
 const day = (iso: string) => new Date(iso).toLocaleDateString('sv-SE');
 
 // A decline (stranger, paused, over the daily limit) is said once per user per day, then the bridge stays silent so a busy channel stays quiet.
