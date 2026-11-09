@@ -10,6 +10,7 @@
     "watch": "node --experimental-strip-types --no-warnings src/watch.ts",
     "state": "node --experimental-strip-types --no-warnings src/state-run.ts",
     "orch": "node --experimental-strip-types --no-warnings src/orch.ts",
+    "queue": "node --experimental-strip-types --no-warnings src/queue-run.ts",
     "ideas": "node --experimental-strip-types --no-warnings src/ideas-run.ts",
     "reflect": "node --experimental-strip-types --no-warnings src/reflect-run.ts",
     "test:mod": "claude plugin test mod"
