@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { herdrCaps, isGarbledPrompt, promptOutcome, type HerdrCaps, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -100,21 +100,19 @@ const caps = () => {
 function trySubmit(target: string, text: string): { status: string } | { failed: string } {
   if (!caps().cleanInput) return trySubmitWatched(target, text);
   const before = herdr('agent', 'get', target).result?.agent?.state_change_seq;
-  const r = promptOutcome(herdr('agent', 'prompt', target, text, '--wait', '--timeout', '10000'));
-  if ('failed' in r) return r;
-  let status = 'landed' in r ? r.landed : '';
-  // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter. A quick turn
-  // may already be done by the time herdr looks; done only counts as a new state, not the one before the prompt.
-  if ('stalled' in r) {
-    herdr('agent', 'send-keys', target, 'enter');
-    let w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '10000');
-    if (w.result?.agent?.agent_status === 'done' && w.result.agent.state_change_seq === before)
-      w = herdr('agent', 'wait', target, '--until', 'working', '--until', 'blocked', '--timeout', '10000');
-    if (w.error) return { failed: 'the agent never picked it up (no activity after the prompt and one more Enter)' };
-    status = w.result?.agent?.agent_status ?? 'working';
+  const until = (states: string[]) => states.flatMap(s => ['--until', s]);
+  let [stage, action] = submitStep({ at: 'prompt' }, herdr('agent', 'prompt', target, text, '--wait', '--timeout', '10000'), before);
+  for (;;) {
+    if ('landed' in action) return { status: action.landed };
+    if ('failed' in action) return action;
+    let answer: HerdrReply | string;
+    if ('read' in action) answer = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible', '--ansi'], { encoding: 'utf8' }).stdout ?? '';
+    else {
+      if ('enter' in action) herdr('agent', 'send-keys', target, 'enter');
+      answer = herdr('agent', 'wait', target, ...until('enter' in action ? action.enter : action.wait), '--timeout', '10000');
+    }
+    [stage, action] = submitStep(stage, answer, before);
   }
-  const screen = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible', '--ansi'], { encoding: 'utf8' }).stdout ?? '';
-  return isGarbledPrompt(screen) ? { failed: 'it arrived garbled (raw paste codes on screen)' } : { status };
 }
 
 // For servers before 0.9.4: pastes the prompt and watches the screen until it lands (promptVerdict).
@@ -157,23 +155,21 @@ function relaunch(name: string, kind: Kind, pane: string) {
   return started.error ? started : waitReady(name);
 }
 
-// Ready for a prompt: idle or done. Right after the trust keys the dialog still shows as blocked, so blocked only
-// counts once the wait for ready runs out. herdr's own wait is enough from 0.9.4 on.
-function waitReady(name: string) {
+// Ready for a prompt (readyStep). herdr's own wait, plus a short settle, is enough from 0.9.4 on.
+function waitReady(name: string): HerdrReply {
   if (!caps().cleanInput) return waitReadyWatched(name);
-  const w = herdr('agent', 'wait', name, '--until', 'idle', '--until', 'done', '--timeout', '30000');
-  if (w.error?.code === 'timeout' && herdr('agent', 'get', name).result?.agent?.agent_status === 'blocked')
-    return { error: { code: 'agent_blocked', message: 'blocked after trust' } };
-  if (w.error) return w;
-  // The input box can lag idle by a moment, most of all right after the trust dialog: wait for two equal screens.
-  let last = '';
-  for (let i = 0; i < 6; i++) {
-    const screen = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
-    if (screen && screen === last) break;
-    last = screen;
-    spawnSync('sleep', ['1']);
+  let [stage, action] = readyStep({ at: 'wait' }, herdr('agent', 'wait', name, '--until', 'idle', '--until', 'done', '--timeout', '30000'));
+  for (;;) {
+    if ('ready' in action) return action.ready;
+    if ('error' in action) return action;
+    let answer: HerdrReply | string;
+    if ('get' in action) answer = herdr('agent', 'get', name);
+    else {
+      if (stage.at === 'settle' && stage.reads > 0) spawnSync('sleep', ['1']);
+      answer = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+    }
+    [stage, action] = readyStep(stage, answer);
   }
-  return w;
 }
 
 // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives, on servers
@@ -305,6 +301,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
     die(`worker ${name} never got its brief: ${sent.failed}. Read pane ${pane}, then clean up and run it again.`);
   }
   const status = sent.status;
+  saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, prompted: stamp() } : w));
   log(`run ${name} (${kind}${extra.pair ? `, pair ${extra.pair}` : ''}) on ${p.repo} (${branch}, pane ${pane}): ${task.slice(0, 120)}`);
   console.log(`${name} (${kind}) ${status} in ${pane}, worktree ${path}`);
 }

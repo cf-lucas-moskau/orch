@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { herdrCaps, promptOutcome, isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -260,6 +260,49 @@ test('agent prompt --wait: settled or still working landed, stalled gets one mor
   assert.deepEqual(promptOutcome({ error: { code: 'agent_blocked', message: 'agent hprobe is blocked and requires interactive input' } }),
     { failed: 'agent_blocked agent hprobe is blocked and requires interactive input' });
   assert.deepEqual(promptOutcome({ error: { code: 'agent_not_found' } }), { failed: 'agent_not_found' });
+});
+
+// Drives a step machine with scripted answers, collecting the actions it asks for.
+function drive<S, A>(step: (s: S, a: any) => [S, A], start: S, answers: unknown[]): A[] {
+  const actions: A[] = [];
+  let s = start;
+  for (const a of answers) { const [n, act] = step(s, a); s = n; actions.push(act); }
+  return actions;
+}
+const reply = (agent_status: string, state_change_seq = 1) => ({ result: { agent: { agent_status, state_change_seq } } });
+
+test('submitStep: a landed prompt is checked for raw paste codes once', () => {
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [reply('done', 8), '⏺ PONG\n❯ ']),
+    [{ read: true }, { landed: 'done' }]);
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [{ error: { code: 'timeout' } }, '^[[200~Read brief.md^[[201~']),
+    [{ read: true }, { failed: 'it arrived garbled (raw paste codes on screen)' }]);
+  assert.deepEqual(submitStep({ at: 'prompt' }, { error: { code: 'agent_blocked', message: 'agent x is blocked' } })[1],
+    { failed: 'agent_blocked agent x is blocked' });
+});
+
+test('submitStep: a stalled prompt gets one Enter; a new done counts, the old one does not', () => {
+  const stalled = { error: { code: 'agent_prompt_stalled' } };
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [stalled, reply('done', 9), '❯ ']),
+    [{ enter: ['working', 'blocked', 'done'] }, { read: true }, { landed: 'done' }], 'a quick turn finished before herdr looked');
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [stalled, reply('done', 7), reply('working', 10), '⏺ x']),
+    [{ enter: ['working', 'blocked', 'done'] }, { wait: ['working', 'blocked'] }, { read: true }, { landed: 'working' }]);
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [stalled, reply('done', 7), { error: { code: 'timeout' } }]),
+    [{ enter: ['working', 'blocked', 'done'] }, { wait: ['working', 'blocked'] }, { failed: 'the agent never picked it up (no activity after the prompt and one more Enter)' }]);
+  assert.deepEqual(drive((s, a) => submitStep(s, a, 7), { at: 'prompt' } as const, [stalled, { error: { code: 'timeout' } }])[1],
+    { failed: 'the agent never picked it up (no activity after the prompt and one more Enter)' });
+});
+
+test('readyStep: idle or done, then two equal screens; blocked only once the wait runs out', () => {
+  const ok = reply('idle');
+  assert.deepEqual(drive(readyStep, { at: 'wait' } as const, [ok, 'booting', 'box', 'box']),
+    [{ read: true }, { read: true }, { read: true }, { ready: ok }]);
+  assert.deepEqual(drive(readyStep, { at: 'wait' } as const, [ok, '', '']).at(-1), { read: true }, 'an empty read is no screen');
+  assert.deepEqual(drive(readyStep, { at: 'wait' } as const, [ok, 'a', 'b', 'c', 'd', 'e', 'f']).at(-1), { ready: ok }, 'six reads at most');
+  assert.deepEqual(drive(readyStep, { at: 'wait' } as const, [{ error: { code: 'timeout' } }, reply('blocked')]),
+    [{ get: true }, { error: { code: 'agent_blocked', message: 'blocked after trust' } }]);
+  assert.deepEqual(drive(readyStep, { at: 'wait' } as const, [{ error: { code: 'timeout' } }, reply('working')])[1],
+    { error: { code: 'timeout', message: 'not ready after 30 s' } });
+  assert.deepEqual(readyStep({ at: 'wait' }, { error: { code: 'agent_not_found', message: 'gone' } })[1], { error: { code: 'agent_not_found', message: 'gone' } });
 });
 
 test('prTitle takes the plan line of a later round, strips bold and cuts at the sentence', () => {

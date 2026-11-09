@@ -11,7 +11,6 @@ local.md
 projects.md
 workers.json
 overlap.json
-watch-seen.json
 log.md
 decisions/*
 !decisions/README.md

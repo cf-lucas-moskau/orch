@@ -6,6 +6,8 @@ export type Kind = 'claude' | 'codex';
 export type Worker = {
   name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; parent?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
   workspace: string; pane: string; sid: string; started: string; status: 'running' | 'closed';
+  // When its first prompt landed; until then it sits idle, which is no finish.
+  prompted?: string;
 };
 export type Live = {
   agent_status: string; focused?: boolean; pane_id: string; name?: string; agent_session?: { value?: string };
@@ -278,13 +280,70 @@ export function herdrCaps(version?: string): HerdrCaps {
 
 // `herdr agent prompt --wait --timeout <over 5 s>`, read: herdr reports agent_prompt_stalled within 5 s when the agent
 // showed no activity, so a timeout means it is still working on the prompt.
-export type HerdrReply = { result?: { agent?: { agent_status?: string } }; error?: { code: string; message?: string } };
+export type HerdrReply = { result?: { agent?: { agent_status?: string; state_change_seq?: number } }; error?: { code: string; message?: string } };
 export type PromptOutcome = { landed: string } | { stalled: true } | { failed: string };
 export function promptOutcome(r: HerdrReply): PromptOutcome {
   if (!r.error) return { landed: r.result?.agent?.agent_status ?? 'unknown' };
   if (r.error.code === 'timeout') return { landed: 'working' };
   if (r.error.code === 'agent_prompt_stalled') return { stalled: true };
   return { failed: `${r.error.code} ${r.error.message ?? ''}`.trim() };
+}
+
+// Submitting a prompt on a 0.9.4+ server, one herdr answer at a time. The caller runs the returned action and feeds
+// its answer back: a herdr reply after `prompt`, `enter` (Enter, then a wait) and `wait`, the visible screen (with
+// ANSI codes) after `read`. before is the agent's state_change_seq before the prompt.
+export type SubmitStage = { at: 'prompt' } | { at: 'enter' } | { at: 'active' } | { at: 'screen'; status: string };
+export type SubmitAction =
+  | { enter: string[] } | { wait: string[] } | { read: true }
+  | { landed: string } | { failed: string };
+const NO_PICKUP = 'the agent never picked it up (no activity after the prompt and one more Enter)';
+export function submitStep(stage: SubmitStage, answer: HerdrReply | string, before?: number): [SubmitStage, SubmitAction] {
+  const reply = typeof answer === 'string' ? {} : answer;
+  const status = reply.result?.agent?.agent_status ?? 'working';
+  switch (stage.at) {
+    case 'prompt': {
+      const r = promptOutcome(reply);
+      if ('failed' in r) return [stage, r];
+      // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter.
+      if ('stalled' in r) return [{ at: 'enter' }, { enter: ['working', 'blocked', 'done'] }];
+      return [{ at: 'screen', status: r.landed }, { read: true }];
+    }
+    case 'enter':
+      if (reply.error) return [stage, { failed: NO_PICKUP }];
+      // A quick turn may be done by the time herdr looks; the done from before the prompt is no pickup.
+      if (status === 'done' && reply.result?.agent?.state_change_seq === before) return [{ at: 'active' }, { wait: ['working', 'blocked'] }];
+      return [{ at: 'screen', status }, { read: true }];
+    case 'active':
+      if (reply.error) return [stage, { failed: NO_PICKUP }];
+      return [{ at: 'screen', status }, { read: true }];
+    case 'screen':
+      return [stage, isGarbledPrompt(String(answer)) ? { failed: 'it arrived garbled (raw paste codes on screen)' } : { landed: stage.status }];
+  }
+}
+
+// Waiting for a started agent to take a prompt on a 0.9.4+ server, the same way: a herdr reply after `wait`
+// (until idle or done) and `get`, the visible screen after `read`. Right after the trust keys the dialog still shows
+// as blocked, so blocked only counts once the wait runs out; after idle the input box can lag a moment, most of all
+// after the trust dialog, so ready means two equal screens in a row (at most six reads, a second apart).
+export type ReadyStage = { at: 'wait' } | { at: 'status' } | { at: 'settle'; ok: HerdrReply; last?: string; reads: number };
+export type ReadyAction = { get: true } | { read: true } | { ready: HerdrReply } | { error: { code: string; message: string } };
+export function readyStep(stage: ReadyStage, answer: HerdrReply | string): [ReadyStage, ReadyAction] {
+  const reply = typeof answer === 'string' ? {} : answer;
+  switch (stage.at) {
+    case 'wait':
+      if (!reply.error) return [{ at: 'settle', ok: reply, reads: 0 }, { read: true }];
+      if (reply.error.code === 'timeout') return [{ at: 'status' }, { get: true }];
+      return [stage, { error: { code: reply.error.code, message: reply.error.message ?? '' } }];
+    case 'status':
+      return [stage, reply.result?.agent?.agent_status === 'blocked'
+        ? { error: { code: 'agent_blocked', message: 'blocked after trust' } }
+        : { error: { code: 'timeout', message: 'not ready after 30 s' } }];
+    case 'settle': {
+      const screen = String(answer), reads = stage.reads + 1;
+      if ((screen && screen === stage.last) || reads >= 6) return [stage, { ready: stage.ok }];
+      return [{ ...stage, last: screen, reads }, { read: true }];
+    }
+  }
 }
 
 // Two workers on one repo changing the same files collide at merge time; found early, the later one merges the default branch in or coordinates.

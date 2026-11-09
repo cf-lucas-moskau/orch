@@ -40,7 +40,6 @@ Everything except the READMEs is local to this machine and not in git.
 | `decisions/` | One file per needs-the-user decision. |
 | `workers.json` | Workers orch dispatched: name, repo, branch, worktree, pane, session id, status. |
 | `overlap.json` | Worker pairs the watcher already reported as changing the same files (`orch overlap --new`). |
-| `watch-seen.json` | Each worker's last finish or block the watcher handled from herdr, so a re-arm does not report it again. |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |
 | `routines/` | Recurring tasks and their `state.json`; format in `routines/README.md`. |
 | `notes/` | Notes from `/orch note` and ingest. |
