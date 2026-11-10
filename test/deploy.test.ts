@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // End to end on a throwaway origin and deploy checkout; backup and d14 are npm scripts that record their runs outside it.
 function world() {
   const root = mkdtempSync(join(tmpdir(), 'deploy-evr-'));
-  const origin = join(root, 'origin.git'), work = join(root, 'work'), dir = join(root, 'deploy'), runsFile = join(root, 'runs');
+  const origin = join(root, 'origin.git'), work = join(root, 'work'), dir = join(root, 'deploy'), runsFile = join(root, 'runs'), tmp = join(root, 'tmp');
+  mkdirSync(tmp);
   const g = (cwd: string, ...a: string[]) => execFileSync('git', ['-C', cwd, ...a], { encoding: 'utf8' }).trim();
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   execFileSync('git', ['clone', '-q', origin, work]);
@@ -31,9 +32,9 @@ process.exit(code);`);
   writeFileSync(join(dir, 'releases', 'current', 'manifest.json'), JSON.stringify({ release: 'r1', commit: first.slice(0, 8) }));
   const deploy = (env: Record<string, string> = {}) =>
     spawnSync(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, '..', 'src', 'deploy-evrloot.ts')],
-      { env: { ...process.env, EVR_DEPLOY_DIR: dir, RUNS: runsFile, ...env }, encoding: 'utf8' });
+      { env: { ...process.env, EVR_DEPLOY_DIR: dir, RUNS: runsFile, TMPDIR: tmp, ...env }, encoding: 'utf8' });
   const runs = () => existsSync(runsFile) ? readFileSync(runsFile, 'utf8') : '';
-  return { dir, first, commit, deploy, runs, head: () => g(dir, 'rev-parse', 'HEAD'), g };
+  return { dir, tmp, first, commit, deploy, runs, head: () => g(dir, 'rev-parse', 'HEAD'), g };
 }
 
 test('a release without migrations deploys: fast-forward, backup verify, d14 A, summary lines only', () => {
@@ -44,6 +45,7 @@ test('a release without migrations deploys: fast-forward, backup verify, d14 A, 
   assert.equal(r.stdout, `deploy ${next.slice(0, 8)} (8790 runs ${w.first.slice(0, 8)})\nbackup verified\nd14 done\n`);
   assert.equal(w.head(), next);
   assert.equal(w.runs(), 'backup\nd14 A --yes\n');
+  assert.deepEqual(readdirSync(w.tmp).filter(f => f.startsWith('deploy-evrloot-')), [], 'the step logs are removed after a successful deploy');
   assert.equal(w.deploy().status, 0, 'a rerun on the deployed revision deploys nothing new and passes');
 });
 
@@ -99,6 +101,7 @@ test('a failed backup verify stops before d14; d14 failing keeps its own exit st
   assert.equal(r.status, 4);
   assert.match(r.stderr, /backup exited 1; full log .*backup\.log\ndeploy stopped: backup verify failed/);
   assert.equal(w.runs(), 'backup\n');
+  assert.equal(w.head(), w.first, 'a failed backup verify leaves the checkout where it was');
   r = w.deploy({ D14_EXIT: '7' });
   assert.equal(r.status, 7);
   assert.match(r.stderr, /d14 done\nd14 exited 7/);

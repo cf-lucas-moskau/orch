@@ -5,7 +5,7 @@
 // nothing here tries to judge SQL. Exit codes: 2 checkout not deployable, 3 migrations need Lucas (listed on stderr),
 // 4 backup verify failed, otherwise d14's own. EVR_DEPLOY_DIR points it at another checkout (tests).
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,12 +36,11 @@ if (!isAncestor(deployed, main)) stop(2, `8790 runs ${deployed.slice(0, 8)}, whi
 const migrations = git('diff', '--name-only', '--no-renames', deployed, main, '--', 'packages/db/migrations');
 if (migrations) stop(3, `migrations since ${deployed.slice(0, 8)} need Lucas:\n${migrations}`);
 
-git('merge', '--ff-only', '-q', main);
-if (git('rev-parse', 'HEAD') !== main) stop(2, 'HEAD is not origin/main after the fast-forward');
 console.log(`deploy ${main.slice(0, 8)} (8790 runs ${deployed.slice(0, 8)})`);
 
+// Output goes to a log; the summary lines are printed, the exit status is the step's own. The logs stay only when a
+// step failed, for the decision.
 const logs = mkdtempSync(join(tmpdir(), 'deploy-evrloot-'));
-// Output goes to a log; the summary lines are printed, the exit status is the step's own.
 function step(name: string, args: string[], summary: (lines: string[]) => string[]) {
   const r = spawnSync('npm', ['run', '-s', ...args], { cwd: dir, encoding: 'utf8', maxBuffer: 1 << 28 });
   const out = (r.stdout ?? '') + (r.stderr ?? '');
@@ -52,6 +51,11 @@ function step(name: string, args: string[], summary: (lines: string[]) => string
   console.error(`${name} exited ${r.status ?? r.signal}; full log ${join(logs, `${name}.log`)}`);
   return r.status ?? 1;
 }
+// The backup is verified before the checkout moves, so every stop up to here leaves it where it was.
 if (step('backup', ['alpha:backup', '--', '--verify'], ls => ls.slice(-1))) stop(4, 'backup verify failed');
-process.exit(step('d14', ['alpha:d14', '--', 'A', '--yes'],
-  ls => ls.filter(l => /^(ok|warn|d14|die|error)|not ok|Error/.test(l) && !/^ok {3}[a-z -]+: [0-9]+$/.test(l))));
+git('merge', '--ff-only', '-q', main);
+if (git('rev-parse', 'HEAD') !== main) stop(2, 'HEAD is not origin/main after the fast-forward');
+const status = step('d14', ['alpha:d14', '--', 'A', '--yes'],
+  ls => ls.filter(l => /^(ok|warn|d14|die|error)|not ok|Error/.test(l) && !/^ok {3}[a-z -]+: [0-9]+$/.test(l)));
+if (status === 0) rmSync(logs, { recursive: true, force: true });
+process.exit(status);

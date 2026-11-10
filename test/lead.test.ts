@@ -106,7 +106,7 @@ function orchDir() {
 // A fake herdr first on PATH: every herdr call in these tests lands here, so no test can touch a real pane or workspace.
 // It records each call and answers agent list and workspace get from what the test set.
 // screen: what agent read shows, an empty input box by default.
-function herdrStub(o: { agents?: object[]; label?: string; screen?: string } = {}) {
+function herdrStub(o: { agents?: object[]; label?: string; screen?: string; sid?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
   writeFileSync(join(dir, 'agents.json'), JSON.stringify({ result: { agents: o.agents ?? [] } }));
   writeFileSync(join(dir, 'screen'), (o.screen ?? 'done.\n❯ \n────') + '\n');
@@ -117,7 +117,7 @@ case "$1 $2" in
   "agent read") cat '${dir}/screen' ;;
   "workspace get") echo '{"result":{"workspace":{"label":"${o.label ?? ''}"}}}' ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w20"},"root_pane":{"pane_id":"w20:p1"}}}' ;;
-  "agent get") echo '{"result":{"agent":{"agent_status":"idle","state_change_seq":1}}}' ;;
+  "agent get") echo '{"result":{"agent":{"agent_status":"idle","state_change_seq":1${o.sid ? `,"agent_session":{"value":"${o.sid}"}` : ""}}}}' ;;
   "agent start"|"agent prompt") echo '{"error":{"code":"stub","message":"stub"}}' ;;
   *) echo '{"result":{"type":"ok"}}' ;;
 esac
@@ -137,12 +137,25 @@ function watcher(root: string, env: Record<string, string>) {
   const p = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: root, ORCH_QUEUE: 'off', ...herdrStub().env, ...env } });
   spawned.push(p);
   const lines: string[] = [];
-  createInterface({ input: p.stdout }).on('line', l => lines.push(l));
+  let probed = false;
+  // Probe lines (see ready) are kept out of lines, so assertions see only what the test caused.
+  createInterface({ input: p.stdout }).on('line', l => { if (l.includes('watcher-probe')) probed = true; else lines.push(l); });
   const until = async (pred: (ls: string[]) => boolean, ms = 8000) => {
     for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 100))) if (pred(lines)) return;
     assert.fail(`timed out; got ${JSON.stringify(lines)}`);
   };
-  return { p, lines, until };
+  // Ready: a lead's watcher once its beat carries its session id; orch's once it prints a feed line, so nothing the test
+  // writes next can land before its tail runs, however loaded the machine is.
+  const ready = async () => {
+    const feed = join(root, 'feed', `${new Date().toLocaleDateString('sv-SE')}.jsonl`);
+    for (const end = Date.now() + 15_000; Date.now() < end; await new Promise(r => setTimeout(r, 200))) {
+      if (env.ORCH_LEAD) { try { if (readFileSync(join(root, 'leads', `${env.ORCH_LEAD}.beat`), 'utf8').trim() === env.ORCH_SID) return; } catch {} continue; }
+      if (probed) return;
+      appendFileSync(feed, JSON.stringify({ ts: new Date().toISOString(), sid: 'probe000', event: 'Stop', cwd: '/probe', prompt: '', msg: 'watcher-probe' }) + '\n');
+    }
+    assert.fail('watcher never became ready');
+  };
+  return { p, lines, until, ready };
 }
 const kill = (p: ChildProcess) => new Promise(r => { p.on('exit', r); p.kill(); });
 const has = (re: RegExp) => (ls: string[]) => ls.some(l => re.test(l));
@@ -150,10 +163,10 @@ const has = (re: RegExp) => (ls: string[]) => ls.some(l => re.test(l));
 test('the watchers split one feed: Evrloot lines to the lead, the rest to orch', async () => {
   const w = orchDir();
   const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
-  await new Promise(r => setTimeout(r, 300));
+  await lead.ready();
   assert.equal(readFileSync(join(w.root, 'leads', 'evrloot.beat'), 'utf8'), 'lead0001\n', 'the lead beats with its session id');
   const orch = watcher(w.root, { ORCH_SID: 'orch0001' });
-  await new Promise(r => setTimeout(r, 1500));
+  await orch.ready();
 
   w.stop('evr00001', join(w.root, 'idea-74'), 'Done: arena wager works.');
   w.stop('net00001', join(w.root, 'netto-proto'), 'Done: excel unified.');
@@ -185,9 +198,9 @@ const inboxHas = (root: string, re: RegExp) => async () => {
 test('a worker DONE that lands while the lead watcher is between arms reaches it on re-arm, once', async () => {
   const w = orchDir();
   const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
-  await new Promise(r => setTimeout(r, 300));
+  await lead.ready();
   const orch = watcher(w.root, { ORCH_SID: 'orch0001' });
-  await new Promise(r => setTimeout(r, 1500));
+  await orch.ready();
   await kill(lead.p);
   w.stop('evr00001', join(w.root, 'idea-74'), 'Done between arms.');
   await inboxHas(w.root, /Done between arms\./)();
@@ -210,7 +223,7 @@ test('a worker DONE that lands just before the lead dies reaches orch when it ta
   const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
   await lead.until(has(/^IDEA I-3 new ann: more bats$/));
   const orch = watcher(w.root, { ORCH_SID: 'orch0001', ORCH_LEAD_CHECK_MS: '300' });
-  await new Promise(r => setTimeout(r, 1500));
+  await orch.ready();
   assert.equal(orch.lines.some(l => l.startsWith('IDEA')), false, 'the lead replays its own ideas');
   appendFileSync(w.feed, JSON.stringify({ ts: new Date().toISOString(), sid: 'bridge', event: 'Idea', cwd: '', prompt: '', msg: 'IDEA I-3 new ann: more bats' }) + '\n');
   await inboxHas(w.root, /IDEA I-3/)();
@@ -267,11 +280,16 @@ test('the inbox is read forward from a saved offset per day file; a half-written
   post(root, 'evrloot', 'C');
   assert.deepEqual(take(), ['half done', 'C']);
   assert.equal(readFileSync(inboxFile(root), 'utf8'), 'B\nhalf done\nC\n', 'nothing is trimmed while it runs');
+  const old4 = inboxFile(root, new Date(now - 4 * day).toLocaleDateString('sv-SE'));
+  post(root, 'evrloot', 'late', now - 4 * day);
   prune(root, 'evrloot');
-  assert.equal(existsSync(inboxFile(root, new Date(now - 3 * day).toLocaleDateString('sv-SE'))), false, 'three days old: pruned');
+  assert.equal(existsSync(inboxFile(root, new Date(now - 3 * day).toLocaleDateString('sv-SE'))), false, 'three days old and read: pruned');
+  assert.equal(existsSync(old4), true, 'an old file with an unread line is kept');
   assert.equal(existsSync(inboxFile(root, new Date(now - day).toLocaleDateString('sv-SE'))), true);
   post(root, 'evrloot', 'D');
-  assert.deepEqual(take(), ['D'], 'offsets survive a prune');
+  assert.deepEqual(take(), ['late', 'D'], 'offsets survive a prune');
+  prune(root, 'evrloot');
+  assert.equal(existsSync(old4), false, 'read now: pruned');
 });
 
 test('posts from several processes and a reader running at the same time deliver every line exactly once', async () => {
@@ -337,6 +355,19 @@ test('lead start on a live lead takes its ids from herdr and re-arms a watcher t
   orchCmd(w.root, h.env, 'lead', 'start', 'evrloot');
   assert.ok(h.calls().some(c => c.startsWith('agent prompt lead-evrloot orch restarted you as lead evrloot. Re-arm your watcher')), h.calls().join('\n'));
   assert.equal(h.calls().some(c => /^(workspace (create|close)|agent start)/.test(c)), false);
+});
+
+test('orch’s watcher fills in a running lead’s empty session id from herdr, and its beat then counts', async () => {
+  const w = orchDir();
+  writeFileSync(join(w.root, 'leads', 'evrloot.json'), JSON.stringify({ name: 'evrloot', workspace: 'w', pane: 'p', sid: '', started: '', status: 'running' }));
+  writeFileSync(join(w.root, 'leads', 'evrloot.beat'), 'lead0009\n');
+  const orch = watcher(w.root, { ORCH_SID: 'orch0001', ...herdrStub({ sid: 'lead0009' }).env });
+  await orch.until(() => JSON.parse(readFileSync(join(w.root, 'leads', 'evrloot.json'), 'utf8')).sid === 'lead0009');
+  await orch.ready();
+  w.stop('evr00001', join(w.root, 'idea-74'), 'Done for the lead.');
+  await inboxHas(w.root, /Done for the lead\./)();
+  assert.equal(orch.lines.some(l => /Done for the lead/.test(l)), false, 'the lead is up, so its line went to the inbox');
+  await kill(orch.p);
 });
 
 test('lead start never types the re-arm prompt over a draft or into a blocked lead, like steer', () => {

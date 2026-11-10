@@ -554,8 +554,12 @@ function lead([sub, name]: string[]) {
   }
   nudge(agent);
   const status = submit(agent, leadPrompt(name, resume.length > 0));
-  // A fresh session's id shows up with its first turn.
-  save({ name, workspace, pane, sid: sid(), started: stamp(), status: 'running' });
+  // A fresh session's id shows up with its first turn; until the record has it, the lead's beat matches no session and
+  // orch keeps its lines. Waited for up to 30 s; orch's watcher fills it in later if it is still empty.
+  let id = herdr('agent', 'get', agent).result?.agent?.agent_session?.value ?? '';
+  for (let i = 0; i < 30 && !id; i++) { spawnSync('sleep', ['1']); id = herdr('agent', 'get', agent).result?.agent?.agent_session?.value ?? ''; }
+  save({ name, workspace, pane, sid: id || rec?.sid || '', started: stamp(), status: 'running' });
+  if (!id) console.error(`${agent}: no session id from herdr after 30 s; orch's watcher fills it in once herdr has it`);
   log(`lead start ${name} (${resume.length ? `resumed ${rec!.sid.slice(0, 8)}` : 'fresh'}) in ${pane}, workspace ${workspace}`);
   console.log(`${agent} ${status} in ${pane}${resume.length ? ', resumed' : ''}`);
 }

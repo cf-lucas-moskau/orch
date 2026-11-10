@@ -4,7 +4,7 @@
 // written while the lead's watcher was between arms or dead comes on the next read. Nothing is trimmed while it runs;
 // the lead's watcher deletes files older than two days when it starts. A crash between printing and saving the offset
 // prints those lines again: at least once, never lost.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Beat } from './lead.ts';
 
@@ -24,21 +24,29 @@ export function post(root: string, name: string, line: string, now = Date.now())
 export function read(root: string, name: string, emit: (line: string) => void) {
   const all = files(root, name);
   if (!all.length) return;
-  let offsets: Record<string, number> = {};
-  try { offsets = JSON.parse(readFileSync(offsetsFile(root, name), 'utf8')); } catch {}
+  const offsets = loadOffsets(root, name);
   const save = () => {
     const tmp = `${offsetsFile(root, name)}.tmp`;
     writeFileSync(tmp, JSON.stringify(Object.fromEntries(all.map(f => [f, offsets[f] ?? 0]))) + '\n');
     renameSync(tmp, offsetsFile(root, name));
   };
   for (const f of all) {
-    const buf = readFileSync(join(dir(root), f)), from = offsets[f] ?? 0, end = buf.lastIndexOf(10) + 1;
-    if (end <= from) continue;
-    for (const l of buf.subarray(from, end).toString('utf8').split('\n')) if (l) emit(l);
-    offsets[f] = end;
+    // Only the bytes past the offset are read, so a day's file costs nothing once it has been read.
+    const path = join(dir(root), f), from = offsets[f] ?? 0, size = statSync(path).size;
+    if (size <= from) continue;
+    const buf = Buffer.alloc(size - from), fd = openSync(path, 'r');
+    try { readSync(fd, buf, 0, buf.length, from); } finally { closeSync(fd); }
+    const end = buf.lastIndexOf(10) + 1;
+    if (!end) continue;
+    for (const l of buf.subarray(0, end).toString('utf8').split('\n')) if (l) emit(l);
+    offsets[f] = from + end;
     save();
   }
 }
+
+const loadOffsets = (root: string, name: string): Record<string, number> => {
+  try { return JSON.parse(readFileSync(offsetsFile(root, name), 'utf8')); } catch { return {}; }
+};
 
 // The beat a lead's watcher writes (src/lead.ts): when, and from which session.
 export function readBeat(root: string, name: string): Beat | undefined {
@@ -46,8 +54,11 @@ export function readBeat(root: string, name: string): Beat | undefined {
   try { return { ms: statSync(p).mtimeMs, sid: readFileSync(p, 'utf8').trim() }; } catch { return undefined; }
 }
 
-// Deletes inbox files from before the day before yesterday.
+// Deletes inbox files from before the day before yesterday that have been read to the end; an unread line keeps its file.
 export function prune(root: string, name: string, now = Date.now()) {
-  const keep = dayOf(now - 2 * 864e5);
-  for (const f of files(root, name)) if (f.slice(prefix(name).length) < keep) rmSync(join(dir(root), f), { force: true });
+  const keep = dayOf(now - 2 * 864e5), offsets = loadOffsets(root, name);
+  for (const f of files(root, name)) {
+    const path = join(dir(root), f);
+    if (f.slice(prefix(name).length) < keep && (offsets[f] ?? 0) >= statSync(path).size) rmSync(path, { force: true });
+  }
 }

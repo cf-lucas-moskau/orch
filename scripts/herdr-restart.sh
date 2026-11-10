@@ -7,6 +7,7 @@
 set -u
 ORCH=${ORCH_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 DEADLINE=${DEADLINE:-02:15}
+# SETTLE_S and WAKE_S: seconds to let the server settle after stop and orch boot before its prompt (tests set 0).
 DRY=0; [ "${1:-}" = "--dry" ] && DRY=1
 # node and npm from nvm's default, wherever it points.
 export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -70,7 +71,7 @@ for x in json.load(sys.stdin).get("result",{}).get("agents",[]):
 # 3. Restart the server.
 if ! out=$(run herdr server stop 2>&1); then say "herdr server stop failed, nothing restarted: $out"; done_ 6; fi
 [ -n "$out" ] && say "$out"
-[ $DRY = 1 ] || sleep 5
+[ $DRY = 1 ] || sleep "${SETTLE_S:-5}"
 run sh -c 'nohup herdr server >/dev/null 2>&1 &'
 if [ $DRY = 0 ]; then
   for i in $(seq 1 30); do herdr workspace list >/dev/null 2>&1 && break; sleep 2; done
@@ -94,24 +95,27 @@ resume() { # sid kind cwd name
   echo "$pane"
 }
 orch_pane=""
+# Every command in these loops reads /dev/null, so none of them eats the rest of the session list from stdin.
 while IFS=$'\t' read -r sid kind cwd name; do
-  [ "$sid" = "$ORCH_SID" ] && orch_pane=$(resume "$sid" "$kind" "$cwd" orch | tail -1)
+  [ "$sid" = "$ORCH_SID" ] && orch_pane=$(resume "$sid" "$kind" "$cwd" orch </dev/null | tail -1)
 done <<< "$snap"
-[ -n "$orch_pane" ] || [ $DRY = 1 ] || { orch_pane=$(resume "$ORCH_SID" claude "$ORCH" orch | tail -1); }
-# Leads (herdr agents named lead-<name>) come back through lead start: their own workspace, the same conversation, and
-# the prompt to re-arm their watcher.
+[ -n "$orch_pane" ] || [ $DRY = 1 ] || { orch_pane=$(resume "$ORCH_SID" claude "$ORCH" orch </dev/null | tail -1); }
+# Leads (herdr agents named lead-<name>) are not resumed here: orch brings them back with lead start once its
+# workers.json panes are right again (the prompt below).
+leads=""
 while IFS=$'\t' read -r sid kind cwd name; do
   [ "$sid" = "$ORCH_SID" ] && continue
   case "$name" in
-    lead-*) run npm run -s orch -- lead start "${name#lead-}" || say "lead start ${name#lead-} failed; orch runs it after restore" ;;
-    *) resume "$sid" "$kind" "$cwd" "$name" >/dev/null ;;
+    lead-*) leads="$leads ${name#lead-}" ;;
+    *) resume "$sid" "$kind" "$cwd" "$name" </dev/null >/dev/null ;;
   esac
 done <<< "$snap"
 
 # 5. Tell orch it came back.
 msg="The herdr server was restarted for D-50 and this session resumed. Re-arm the watcher, run npm run -s orch -- restore and the board, check every worker came back, update each worker's pane and workspace in workers.json from herdr agent list (the panes are new), and note the result in log.md and D-50."
+for l in $leads; do msg="$msg Only after workers.json is updated, run npm run -s orch -- lead start $l and check lead status $l says its watcher is up."; done
 if [ $DRY = 1 ]; then say "would prompt orch: $msg"; else
-  sleep 20
+  sleep "${WAKE_S:-20}"
   herdr agent prompt "$orch_pane" "$msg" --wait --timeout 120000 >/dev/null 2>&1 || say "prompt to orch did not land; resume it by hand: cd $ORCH && claude --resume $ORCH_SID"
 fi
 say "done"; done_ 0

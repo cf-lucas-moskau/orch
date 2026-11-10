@@ -9,7 +9,7 @@ import { classify, screenTail } from './triage.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
-import { LEADS, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
+import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -154,8 +154,19 @@ function startLeadSide(name: string) {
 
 // orch's side: says once when a started lead goes down or comes back, and prints what a lead that is not up left in its
 // inbox. Taking over, it replays that lead's waiting ideas too, once: an inbox line the replay already showed is skipped.
+// A running lead whose record has no session id yet (lead start gave up waiting) gets it from herdr, so its beat can match.
+function syncLeadSid(name: string) {
+  const rec = record(name);
+  if (rec?.status !== 'running' || rec.sid) return;
+  const r = spawnSync('herdr', ['agent', 'get', leadAgent(name)], { encoding: 'utf8', timeout: 10_000 });
+  let sid = '';
+  try { sid = JSON.parse(r.stdout).result?.agent?.agent_session?.value ?? ''; } catch {}
+  if (sid) writeFileSync(leadPath(name, 'json'), JSON.stringify({ ...rec, sid }, null, 2) + '\n');
+}
+
 function checkLeads(starting = false) {
   for (const lead of Object.values(LEADS)) {
+    syncLeadSid(lead.name);
     const marker = leadPath(lead.name, 'down'), was = existsSync(marker), isUp = up(lead.name);
     const n = leadNotice(lead, isUp, json(`leads/${lead.name}.json`, null)?.status === 'running', was);
     if (n.down && !was) writeFileSync(marker, '');
