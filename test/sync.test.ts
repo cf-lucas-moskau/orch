@@ -373,7 +373,7 @@ test('the watcher prints an OVERLAP error line when the check fails', async () =
     writeFileSync(join(base, 'workers.json'), '{not json');
     const { spawn } = await import('node:child_process');
     const c = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, '..', 'src', 'watch.ts')],
-      { env: { ...process.env, ORCH_DIR: base, ORCH_SID: 'test' } });
+      { env: { ...process.env, ORCH_DIR: base, ORCH_SID: 'test', ORCH_QUEUE: 'off' } });
     const line = await new Promise<string>((done, fail) => {
       const t = setTimeout(() => fail(new Error('no OVERLAP line in 15 s')), 15_000);
       let out = '';

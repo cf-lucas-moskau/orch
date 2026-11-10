@@ -414,7 +414,7 @@ test('review 2 (2): ideas waiting on orch are flagged, listed, briefed and repla
   const brief = buildBrief({ date: '2026-10-30', feed: [], since: NOW, names: {}, decisions: [], plans: [], learned: [], workers: [], ideas: pendingLines(loadIdeas(w.root)) });
   assert.match(brief, /## Ideas waiting on orch \(1\)\nIDEA I-1 go bob: go\n/);
 
-  const watch = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: w.root } });
+  const watch = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: w.root, ORCH_QUEUE: 'off' } });
   const first = await new Promise<string>(r => watch.stdout.once('data', d => r(String(d).split('\n')[0])));
   watch.kill();
   assert.equal(first, 'IDEA I-1 go bob: go');
