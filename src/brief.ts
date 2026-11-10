@@ -12,6 +12,13 @@ export function parseDecision(md: string): Decision {
   return { id: head?.[1] ?? '', question: head?.[2].trim() ?? '', session: field('Session'), status: field('Status') };
 }
 
+// orch and the leads both file decisions, so a number is claimed by creating its file, never by picking it and writing later.
+export const nextDecisionNumber = (files: string[]) =>
+  Math.max(0, ...files.map(f => Number(f.match(/^D-(\d+)\.md$/)?.[1] ?? 0))) + 1;
+
+export const decisionSkeleton = (n: number, question: string, session: string, opened: string) =>
+  `# D-${String(n).padStart(2, '0')}: ${question}\n\n- Session: ${session}\n- Opened: ${opened}\n- Status: open\n- Stakes: \n- Gates: \n\n## Options\n1. \n\n## Recommendation\n\n\n## Outcome\n\n`;
+
 export function parseLearned(md: string): Learned[] {
   return md.split(/^(?=## L-\d+:)/m).slice(1).map(s => ({
     id: s.match(/^## (L-\d+):/)![1],

@@ -5,6 +5,8 @@ description: Start, steer, check and clean up worker sessions. Use for /orch run
 
 All commands run in orch's directory as `npm run -s orch -- <command>`; rules are in `policies.md` under Relay and steering, Workers, and Claude, Codex and pairs.
 
+Workers on a lead's repo (evrloot-next for lead evrloot, `src/lead.ts`) belong to that lead: their DONE, QUESTION, BLOCKED and OVERLAP lines reach only the lead's watcher while it beats, and the lead runs this skill for them. orch steps in only after `LEAD <name> down`.
+
 run: `run <repo> <name> [task] [--kind claude|codex|both] [--from <ref>]`. Claude workers start in poteto-mode automatically; their full brief is written to `briefs/<name>.md`. `<repo>` is a registered name, a path, or a folder under the code dir (`ORCH_CODE_DIR`, default ~/code). Kind: what the user said ("with Codex" is codex, "both" or "duel" is both), else the plan task's tag, else claude; tag `(both)` yourself for the risky task types in `policies.md`. Without a task, the text comes from the `<name>` task in `plans/<repo>.md`. Both starts `<name>-cl` and `<name>-cx`. Tell the user names and panes in one line. If it says not ready, read the pane and file a decision.
 
 done: a `DONE worker <name>` line from the watcher. For a pair worker, wait until both are done, then `judge <pair>`: report the winner and why, mark the plan task `[x]`, ship the winner as below, and file a decision for abandoning the loser. For a single worker, run `gates <name> -m "<what this round did>"`; on a pass it makes the worker's commit. Pass: mark the plan task `[x]`, one FYI line, then ship. Fail: `steer <name>` once with the failing tail; a second fail is a decision.

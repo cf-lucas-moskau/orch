@@ -1,11 +1,12 @@
 // orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, routines and ideas.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
-import { buildBrief, parseDecision, parseLearned } from './brief.ts';
+import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
+import { LEADS, leadAgent, leadPrompt, leadUp, type LeadRecord } from './lead.ts';
 import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
@@ -460,7 +461,85 @@ function restore() {
   const lost = restoreList(feed, liveSids, new Date(now - 48 * 36e5).toISOString())
     .filter(l => !l.cwd.includes('/.herdr/worktrees/') || loadWorkers().some(w => w.sid === l.sid && w.status === 'running'));
   if (!lost.length) return console.log('nothing to restore');
-  for (const l of lost) console.log(`${names[l.sid]?.name ?? l.sid.slice(0, 8)} (${l.kind}, last ${l.lastTs.slice(0, 16)}): cd ${l.cwd} && ${resumeCommand(l)}${l.asked ? `\n  was asked: ${l.asked.slice(0, 100)}` : ''}`);
+  // A lead comes back through lead start: its own workspace, the same conversation, its watcher re-armed.
+  const leads = Object.keys(LEADS).map(leadRecord).filter((r): r is LeadRecord => r?.status === 'running');
+  for (const l of lost) {
+    const lead = leads.find(r => r.sid === l.sid);
+    if (lead) { console.log(`${leadAgent(lead.name)} (lead, last ${l.lastTs.slice(0, 16)}): npm run -s orch -- lead start ${lead.name}`); continue; }
+    console.log(`${names[l.sid]?.name ?? l.sid.slice(0, 8)} (${l.kind}, last ${l.lastTs.slice(0, 16)}): cd ${l.cwd} && ${resumeCommand(l)}${l.asked ? `\n  was asked: ${l.asked.slice(0, 100)}` : ''}`);
+  }
+}
+
+// lead start|stop|status <name>: a long-running session that runs one area (src/lead.ts, the orch-lead skill), in its
+// own herdr workspace with cwd in orch's folder so every orch command and skill works there.
+const leadFile = (name: string) => join(root, 'leads', `${name}.json`);
+function leadRecord(name: string): LeadRecord | undefined {
+  try { return JSON.parse(readFileSync(leadFile(name), 'utf8')); } catch { return undefined; }
+}
+const beatMs = (name: string) => { try { return statSync(join(root, 'leads', `${name}.beat`)).mtimeMs; } catch { return undefined; } };
+
+function lead([sub, name]: string[]) {
+  const usage = `usage: orch lead start|stop|status <${Object.keys(LEADS).join('|')}>`;
+  if (!name || !LEADS[name]) die(usage);
+  const agent = leadAgent(name), rec = leadRecord(name);
+  const save = (r: LeadRecord) => { mkdirSync(join(root, 'leads'), { recursive: true }); writeFileSync(leadFile(name), JSON.stringify(r, null, 2) + '\n'); };
+  const a = herdr('agent', 'get', agent).result?.agent;
+  if (sub === 'status') {
+    const beat = beatMs(name);
+    return console.log(`${agent}: ${a?.agent_status ? `${a.agent_status} in ${a.pane_id}` : 'no live session'}, watcher ${leadUp(beat, Date.now()) ? 'up' : 'down'}`
+      + `${beat ? ` (beat ${Math.round((Date.now() - beat) / 1000)} s ago)` : ''}, record ${rec ? `${rec.status} since ${rec.started}` : 'none'}`);
+  }
+  if (sub === 'stop') {
+    if (rec?.workspace && a?.agent_status) herdr('workspace', 'close', rec.workspace);
+    if (rec) save({ ...rec, status: 'stopped' });
+    log(`lead stop ${name}${rec ? ` (workspace ${rec.workspace})` : ''}`);
+    return console.log(`${agent} stopped; orch's watcher handles its lines`);
+  }
+  if (sub !== 'start') die(usage);
+  // Idempotent: a live lead is left alone, so restore and a second start never make two.
+  if (a?.agent_status) {
+    if (rec?.status !== 'running') save({ ...(rec ?? { name, workspace: '', pane: a.pane_id, sid: '', started: stamp() }), status: 'running' });
+    return console.log(`${agent} already runs in ${a.pane_id}`);
+  }
+  // A workspace left from a lead whose agent quit goes; the lead always starts in a fresh one.
+  if (rec?.workspace && herdr('workspace', 'get', rec.workspace).result) herdr('workspace', 'close', rec.workspace);
+  const ws = herdr('workspace', 'create', '--cwd', root, '--label', agent, '--no-focus');
+  if (ws.error) die(`workspace create failed: ${ws.error.message}`);
+  const workspace: string = ws.result.workspace.workspace_id, pane: string = ws.result.root_pane.pane_id;
+  // Remote Control like orch's own session, so its pushes reach Lucas's phone; --resume keeps the session id.
+  const resume = rec?.sid ? ['--resume', rec.sid] : [];
+  let started = herdr('agent', 'start', agent, '--kind', 'claude', '--pane', pane, '--timeout', '60000', '--', '-n', agent, '--remote-control', agent, ...resume);
+  if (!started.error) started = waitReady(agent);
+  const sid = () => herdr('agent', 'get', agent).result?.agent?.agent_session?.value || rec?.sid || '';
+  save({ name, workspace, pane, sid: sid(), started: stamp(), status: 'running' });
+  if (started.error) {
+    log(`lead start ${name}: not ready (${started.error.code}), pane ${pane}. Needs a decision.`);
+    die(`${agent} is not ready (${started.error.code}); read pane ${pane}`);
+  }
+  nudge(agent);
+  const status = submit(agent, leadPrompt(name, resume.length > 0));
+  // A fresh session's id shows up with its first turn.
+  save({ name, workspace, pane, sid: sid(), started: stamp(), status: 'running' });
+  log(`lead start ${name} (${resume.length ? `resumed ${rec!.sid.slice(0, 8)}` : 'fresh'}) in ${pane}, workspace ${workspace}`);
+  console.log(`${agent} ${status} in ${pane}${resume.length ? ', resumed' : ''}`);
+}
+
+// decision new "<question>" [--session "<name (workspace, pane)>"]: claims the next D-NN by creating its file, so orch and
+// the leads never write the same number. Prints the path; fill in the rest with an edit.
+function decision([sub, ...args]: string[]) {
+  const i = args.indexOf('--session');
+  const session = i >= 0 ? args[i + 1] ?? '' : '';
+  const question = (i >= 0 ? [...args.slice(0, i), ...args.slice(i + 2)] : args).join(' ').trim();
+  if (sub !== 'new' || !question) die('usage: orch decision new "<question>" [--session "<name> (<workspace>, <pane>)"]');
+  const dir = join(root, 'decisions');
+  for (;;) {
+    const n = nextDecisionNumber(readdirSync(dir));
+    const file = join(dir, `D-${String(n).padStart(2, '0')}.md`);
+    try { writeFileSync(file, decisionSkeleton(n, question, session, stamp()), { flag: 'wx' }); }
+    catch (e: any) { if (e.code === 'EEXIST') continue; throw e; }
+    log(`decision new D-${String(n).padStart(2, '0')}: ${question.slice(0, 120)}`);
+    return console.log(file);
+  }
 }
 
 function brief() {
@@ -889,5 +968,5 @@ async function team(args: string[]) { try { console.log(await teamCmd(args, { ro
 async function impl(args: string[]) { try { console.log(await implCmd(args, { root, log, run: () => die('impl never dispatches') })); } catch (e: any) { die(e.message); } }
 
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);
