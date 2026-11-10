@@ -479,6 +479,13 @@ function leadRecord(name: string): LeadRecord | undefined {
 }
 const beatMs = (name: string) => { try { return statSync(join(root, 'leads', `${name}.beat`)).mtimeMs; } catch { return undefined; } };
 
+// herdr reuses workspace ids after a server restart, so a recorded id is closed only while it still carries the lead's label.
+function closeLeadWorkspace(id: string, agent: string) {
+  const label = herdr('workspace', 'get', id).result?.workspace?.label;
+  if (label === agent) herdr('workspace', 'close', id);
+  else if (label) console.error(`left workspace ${id} open: it is ${label}, not ${agent}`);
+}
+
 function lead([sub, name]: string[]) {
   const usage = `usage: orch lead start|stop|status <${Object.keys(LEADS).join('|')}>`;
   if (!name || !LEADS[name]) die(usage);
@@ -492,7 +499,7 @@ function lead([sub, name]: string[]) {
   }
   if (sub === 'stop') {
     const workspace = la?.workspace_id ?? rec?.workspace;
-    if (workspace && la) herdr('workspace', 'close', workspace);
+    if (workspace) closeLeadWorkspace(workspace, agent);
     // Its watcher counts as down at once, so orch's watcher takes its lines from the next one on.
     rmSync(join(root, 'leads', `${name}.beat`), { force: true });
     if (rec) save({ ...rec, status: 'stopped' });
@@ -516,7 +523,7 @@ function lead([sub, name]: string[]) {
     return console.log(`${agent} already runs in ${la.pane_id}; its watcher was down, re-arm prompt ${status}`);
   }
   // A workspace left from a lead whose agent quit goes; the lead always starts in a fresh one.
-  if (rec?.workspace && herdr('workspace', 'get', rec.workspace).result) herdr('workspace', 'close', rec.workspace);
+  if (rec?.workspace) closeLeadWorkspace(rec.workspace, agent);
   const ws = herdr('workspace', 'create', '--cwd', root, '--label', agent, '--no-focus');
   if (ws.error) die(`workspace create failed: ${ws.error.message}`);
   const workspace: string = ws.result.workspace.workspace_id, pane: string = ws.result.root_pane.pane_id;

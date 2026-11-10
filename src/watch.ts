@@ -30,8 +30,18 @@ const workerRepo = (name: string) => json('workers.json', []).find((w: any) => w
 function say(line: string) {
   const owner = ownerOf(line, workerRepo);
   if (shows(owner, me, up)) return console.log(line);
-  if (!me) post(root, owner, line);
+  if (me) return;
+  // An inbox that cannot be written must not lose the line: orch prints it itself.
+  try { post(root, owner, line); } catch (e) { inboxError(e); console.log(line); }
 }
+// Inbox errors never stop a watcher; each different one is said once.
+let lastInboxError = '';
+function inboxError(e: unknown) {
+  const msg = `LEAD error: inbox: ${e instanceof Error ? e.message : e}`;
+  if (msg !== lastInboxError) console.log(msg);
+  lastInboxError = msg;
+}
+const safeDrain = (name: string, emit: (l: string) => void) => { try { drain(root, name, emit); } catch (e) { inboxError(e); } };
 // Sessions that are leads: their turns end all day and they escalate through decisions/, so orch skips their DONE lines.
 const leadSids = () => new Set(Object.keys(LEADS).flatMap(n => json(`leads/${n}.json`, null)?.sid ?? []));
 // Workers orch dispatched are tagged so a DONE line triggers their gates check.
@@ -137,8 +147,8 @@ function startLeadSide(name: string) {
   setInterval(touch, 60_000);
   const replayed = new Set(pending(name));
   for (const l of replayed) console.log(l);
-  drain(root, name, l => { if (!replayed.has(l)) console.log(l); });
-  setInterval(() => drain(root, name, l => console.log(l)), 1000);
+  safeDrain(name, l => { if (!replayed.has(l)) console.log(l); });
+  setInterval(() => safeDrain(name, l => console.log(l)), 1000);
 }
 
 // orch's side: says once when a started lead goes down or comes back, and prints what a lead that is not up left in its
@@ -155,14 +165,14 @@ function checkLeads(starting = false) {
     const replay = !!n.line && !starting;
     const shown = new Set(replay || starting ? pending(lead.name) : []);
     if (replay) for (const l of shown) console.log(l);
-    drain(root, lead.name, l => { if (!shown.has(l)) console.log(l); });
+    safeDrain(lead.name, l => { if (!shown.has(l)) console.log(l); });
   }
 }
 
 function startOrchSide() {
   for (const l of pending()) { const o = ownerOf(l, workerRepo); if (o === 'orch' || !up(o)) console.log(l); }
   checkLeads(true);
-  setInterval(checkLeads, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
+  setInterval(() => { try { checkLeads(); } catch (e) { inboxError(e); } }, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
   syncFollowers();
   setInterval(syncFollowers, 30_000);
   follow(day());

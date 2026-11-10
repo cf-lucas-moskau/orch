@@ -47,7 +47,7 @@ Everything except the READMEs is local to this machine and not in git.
 | `decisions/` | One file per needs-the-user decision. |
 | `workers.json` | Workers orch dispatched: name, repo, branch, worktree, pane, session id, status. |
 | `overlap.json` | Worker pairs the watcher already reported as changing the same files (`orch overlap --new`). |
-| `leads/` | Per lead: `<name>.json` (workspace, pane, session id, running or stopped), `<name>.beat` (its watcher's heartbeat), `<name>.inbox` and `.offset` (lines orch's watcher hands it, read from the saved offset, trimmed once read), `<name>.down` (orch already said LEAD down). |
+| `leads/` | Per lead: `<name>.json` (workspace, pane, session id, running or stopped), `<name>.beat` (its watcher's heartbeat), `<name>.inbox` (lines orch's watcher hands it, unread until a drain prints and removes them; `.inbox.lock` while one writes or drains), `<name>.down` (orch already said LEAD down). |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |
 | `routines/` | Recurring tasks and their `state.json`; format in `routines/README.md`. |
 | `notes/` | Notes from `/orch note` and ingest. |

@@ -5,15 +5,27 @@
 #   scripts/herdr-restart.sh            wait for idle workers (until DEADLINE), restart, resume
 # Log: ~/Library/Logs/orch.herdr-restart.log
 set -u
-ORCH=/Users/lucas/orch
-ORCH_SID=${ORCH_SID:-9e6a6924-c94a-4fa0-b0c3-10cadfa12d23}
+ORCH=${ORCH_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 DEADLINE=${DEADLINE:-02:15}
 DRY=0; [ "${1:-}" = "--dry" ] && DRY=1
-export PATH="/opt/homebrew/bin:/Users/lucas/.nvm/versions/node/v22.23.3/bin:/usr/local/bin:/usr/bin:/bin"
+# node and npm from nvm's default, wherever it points.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
 cd "$ORCH" || exit 1
 say() { echo "$(date '+%F %T') $*"; }
 run() { if [ $DRY = 1 ]; then say "would run: $*"; else "$@"; fi; }
 done_() { [ $DRY = 1 ] || launchctl remove orch.herdr-restart 2>/dev/null; exit "$1"; }
+
+# orch's own session: ORCH_SID, else the agent in herdr's workspace labelled orch (sessions.json leaves orch out).
+if [ -z "${ORCH_SID:-}" ]; then
+  ws=$(herdr workspace list 2>/dev/null | python3 -c '
+import json,sys
+print(next((w["workspace_id"] for w in json.load(sys.stdin).get("result",{}).get("workspaces",[]) if w.get("label")=="orch"), ""))' 2>/dev/null)
+  ORCH_SID=$(herdr agent list 2>/dev/null | python3 -c '
+import json,sys
+print(next(((a.get("agent_session") or {}).get("value","") for a in json.load(sys.stdin).get("result",{}).get("agents",[]) if a.get("workspace_id")==sys.argv[1]), ""))' "$ws" 2>/dev/null)
+fi
+[ -n "$ORCH_SID" ] || { say "no orch session found (no agent in a workspace labelled orch); set ORCH_SID"; done_ 3; }
 
 # Agents working right now, other than orch's own pane.
 working() {
@@ -48,6 +60,12 @@ for x in json.load(sys.stdin).get("result",{}).get("agents",[]):
   if sid and cwd: print(sid, kind, cwd, name, sep="\t")')
 say "sessions to bring back:"; echo "$snap" | sed 's/^/  /'
 [ -n "$snap" ] || { say "no sessions found, aborting"; done_ 3; }
+# A live agent without a session id could not be resumed; stop before the server goes down.
+lost=$(herdr agent list 2>/dev/null | python3 -c '
+import json,sys
+for x in json.load(sys.stdin).get("result",{}).get("agents",[]):
+  if not (x.get("agent_session") or {}).get("value"): print(x.get("name") or x.get("pane_id"), x.get("agent") or "?", x.get("cwd") or "")')
+[ -z "$lost" ] || { say "aborting, these agents have no session id and would be lost:"; echo "$lost" | sed 's/^/  /'; done_ 5; }
 
 # 3. Restart the server.
 run herdr server stop
@@ -78,8 +96,14 @@ while IFS=$'\t' read -r sid kind cwd name; do
   [ "$sid" = "$ORCH_SID" ] && orch_pane=$(resume "$sid" "$kind" "$cwd" orch | tail -1)
 done <<< "$snap"
 [ -n "$orch_pane" ] || [ $DRY = 1 ] || { orch_pane=$(resume "$ORCH_SID" claude "$ORCH" orch | tail -1); }
+# Leads (herdr agents named lead-<name>) come back through lead start: their own workspace, the same conversation, and
+# the prompt to re-arm their watcher.
 while IFS=$'\t' read -r sid kind cwd name; do
-  [ "$sid" = "$ORCH_SID" ] || resume "$sid" "$kind" "$cwd" "$name" >/dev/null
+  [ "$sid" = "$ORCH_SID" ] && continue
+  case "$name" in
+    lead-*) run npm run -s orch -- lead start "${name#lead-}" || say "lead start ${name#lead-} failed; orch runs it after restore" ;;
+    *) resume "$sid" "$kind" "$cwd" "$name" >/dev/null ;;
+  esac
 done <<< "$snap"
 
 # 5. Tell orch it came back.

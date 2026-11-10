@@ -98,11 +98,35 @@ function orchDir() {
   return { root, feed, stop };
 }
 
+// A fake herdr first on PATH: every herdr call in these tests lands here, so no test can touch a real pane or workspace.
+// It records each call and answers agent list and workspace get from what the test set.
+function herdrStub(o: { agents?: object[]; label?: string } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
+  writeFileSync(join(dir, 'agents.json'), JSON.stringify({ result: { agents: o.agents ?? [] } }));
+  writeFileSync(join(dir, 'herdr'), `#!/bin/sh
+echo "$*" >> '${dir}/calls'
+case "$1 $2" in
+  "agent list") cat '${dir}/agents.json' ;;
+  "workspace get") echo '{"result":{"workspace":{"label":"${o.label ?? ''}"}}}' ;;
+  "workspace create") echo '{"result":{"workspace":{"workspace_id":"w20"},"root_pane":{"pane_id":"w20:p1"}}}' ;;
+  "agent get") echo '{"result":{"agent":{"agent_status":"idle","state_change_seq":1}}}' ;;
+  "agent start"|"agent prompt") echo '{"error":{"code":"stub","message":"stub"}}' ;;
+  *) echo '{"result":{"type":"ok"}}' ;;
+esac
+`, { mode: 0o755 });
+  return {
+    env: { PATH: `${dir}:${process.env.PATH}`, ORCH_HERDR_VERSION: '0.9.5' },
+    calls: () => existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n') : [],
+  };
+}
+const orchCmd = (root: string, env: Record<string, string>, ...a: string[]) =>
+  spawnSync(process.execPath, [...nodeArgs, join(SRC, 'orch.ts'), ...a], { cwd: root, env: { ...process.env, ORCH_DIR: root, ...env }, encoding: 'utf8', timeout: 60_000 });
+
 const spawned: ChildProcess[] = [];
 after(() => { for (const p of spawned) p.kill(); });
 
 function watcher(root: string, env: Record<string, string>) {
-  const p = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: root, ORCH_QUEUE: 'off', ...env } });
+  const p = spawn(process.execPath, [...nodeArgs, join(SRC, 'watch.ts')], { env: { ...process.env, ORCH_DIR: root, ORCH_QUEUE: 'off', ...herdrStub().env, ...env } });
   spawned.push(p);
   const lines: string[] = [];
   createInterface({ input: p.stdout }).on('line', l => lines.push(l));
@@ -225,18 +249,38 @@ test('the inbox drains from its saved offset, trims once read, and finishes a tr
   assert.deepEqual(take(), [], 'no inbox yet');
   post(root, 'evrloot', 'A');
   post(root, 'evrloot', 'B');
-  appendFileSync(join(root, 'leads', 'evrloot.inbox'), 'half');
-  assert.deepEqual(take(), ['A', 'B'], 'a line still being written waits');
-  assert.equal(readFileSync(join(root, 'leads', 'evrloot.inbox'), 'utf8'), 'A\nB\nhalf');
-  appendFileSync(join(root, 'leads', 'evrloot.inbox'), ' done\n');
-  assert.deepEqual(take(), ['half done']);
-  assert.equal(existsSync(join(root, 'leads', 'evrloot.inbox')), false, 'trimmed');
+  assert.deepEqual(take(), ['A', 'B']);
+  assert.equal(existsSync(join(root, 'leads', 'evrloot.inbox')), false, 'trimmed once read');
+  assert.deepEqual(take(), [], 'a read line is not delivered again');
   post(root, 'evrloot', 'C');
-  assert.deepEqual(take(), ['C'], 'a new inbox after a trim starts at 0');
-  writeFileSync(join(root, 'leads', 'evrloot.inbox.draining'), 'D\n');
-  post(root, 'evrloot', 'E');
-  assert.deepEqual(take(), ['D', 'E'], 'the half-done trim first, then the new inbox');
-  assert.deepEqual(take(), []);
+  assert.deepEqual(take(), ['C']);
+  const lock = join(root, 'leads', 'evrloot.inbox.lock');
+  mkdirSync(lock);
+  const old = (Date.now() - 60_000) / 1000;
+  utimesSync(lock, old, old);
+  post(root, 'evrloot', 'D');
+  assert.deepEqual(take(), ['D'], 'a lock its holder left behind is taken over');
+  assert.equal(existsSync(lock), false);
+});
+
+test('posts from several processes and a drain running at the same time deliver every line exactly once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-inbox-race-'));
+  const inbox = join(SRC, 'lead-inbox.ts');
+  const run = (code: string) => new Promise<string>((res, rej) => {
+    const p = spawn(process.execPath, [...nodeArgs, '--input-type=module', '-e', code], { encoding: 'utf8' } as any);
+    let out = '';
+    p.stdout!.on('data', d => { out += d; });
+    p.stderr!.on('data', d => { out += d; });
+    p.on('exit', c => c === 0 ? res(out) : rej(new Error(out)));
+  });
+  const poster = (k: number) => run(`import { post } from ${JSON.stringify(inbox)}; for (let i = 0; i < 300; i++) post(${JSON.stringify(root)}, 'evrloot', 'p${k} ' + i);`);
+  const drainer = run(`import { drain } from ${JSON.stringify(inbox)};
+    const end = Date.now() + 3000; while (Date.now() < end) drain(${JSON.stringify(root)}, 'evrloot', l => console.log(l));`);
+  const [, , , drained] = await Promise.all([poster(1), poster(2), poster(3), drainer]);
+  const got = drained.split('\n').filter(Boolean);
+  drain(root, 'evrloot', l => got.push(l));
+  assert.equal(got.length, 900);
+  assert.equal(new Set(got).size, 900);
 });
 
 test('lead stop marks the lead down at once and prints what it left: waiting ideas, then its unread inbox', () => {
@@ -244,7 +288,8 @@ test('lead stop marks the lead down at once and prints what it left: waiting ide
   writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
   writeFileSync(join(w.root, 'leads', 'evrloot.beat'), 'lead0001\n');
   writeFileSync(join(w.root, 'leads', 'evrloot.inbox'), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: unread\n');
-  const r = spawnSync(process.execPath, [...nodeArgs, join(SRC, 'orch.ts'), 'lead', 'stop', 'evrloot'], { cwd: w.root, env: { ...process.env, ORCH_DIR: w.root }, encoding: 'utf8' });
+  const h = herdrStub({ agents: [{ name: 'lead-evrloot', pane_id: 'w9:p1', workspace_id: 'w9', agent_status: 'idle', agent_session: { value: 'lead0001' } }], label: 'lead-evrloot' });
+  const r = orchCmd(w.root, h.env, 'lead', 'stop', 'evrloot');
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(r.stdout.trim().split('\n'), [
     "lead-evrloot stopped; orch's watcher handles its lines. Waiting on orch now:",
@@ -253,13 +298,41 @@ test('lead stop marks the lead down at once and prints what it left: waiting ide
   ]);
   assert.equal(existsSync(join(w.root, 'leads', 'evrloot.beat')), false);
   assert.equal(JSON.parse(readFileSync(join(w.root, 'leads', 'evrloot.json'), 'utf8')).status, 'stopped');
+  assert.deepEqual(h.calls(), ['agent list', 'workspace get w9', 'workspace close w9']);
+});
+
+test('lead stop and start never close a workspace that is not the lead’s (herdr reuses ids after a restart)', () => {
+  const w = orchDir();
+  const h = herdrStub({ agents: [], label: 'orch' });
+  writeFileSync(join(w.root, 'leads', 'evrloot.json'), JSON.stringify({ name: 'evrloot', workspace: 'w9', pane: 'w9:p1', sid: 'lead0001', started: '', status: 'running' }));
+  const stop = orchCmd(w.root, h.env, 'lead', 'stop', 'evrloot');
+  assert.equal(stop.status, 0, stop.stderr);
+  assert.match(stop.stderr, /left workspace w9 open: it is orch, not lead-evrloot/);
+  orchCmd(w.root, h.env, 'lead', 'start', 'evrloot');
+  assert.equal(h.calls().filter(c => c.startsWith('workspace close')).length, 0);
+  assert.ok(h.calls().includes('workspace create --cwd ' + w.root + ' --label lead-evrloot --no-focus'), h.calls().join('\n'));
+});
+
+test('lead start on a live lead takes its ids from herdr and re-arms a watcher that stopped beating', () => {
+  const w = orchDir();
+  const h = herdrStub({ agents: [{ name: 'lead-evrloot', pane_id: 'w7:p2', workspace_id: 'w7', agent_status: 'idle', agent_session: { value: 'lead0002' } }], label: 'lead-evrloot' });
+  writeFileSync(join(w.root, 'leads', 'evrloot.beat'), 'lead0002\n');
+  const fresh = orchCmd(w.root, h.env, 'lead', 'start', 'evrloot');
+  assert.equal(fresh.stdout.trim(), 'lead-evrloot already runs in w7:p2');
+  const rec = JSON.parse(readFileSync(join(w.root, 'leads', 'evrloot.json'), 'utf8'));
+  assert.deepEqual([rec.workspace, rec.pane, rec.sid, rec.status], ['w7', 'w7:p2', 'lead0002', 'running']);
+  assert.equal(h.calls().some(c => c.startsWith('agent prompt')), false);
+  stale(w.root);
+  orchCmd(w.root, h.env, 'lead', 'start', 'evrloot');
+  assert.ok(h.calls().some(c => c.startsWith('agent prompt lead-evrloot orch restarted you as lead evrloot. Re-arm your watcher')), h.calls().join('\n'));
+  assert.equal(h.calls().some(c => /^(workspace (create|close)|agent start)/.test(c)), false);
 });
 
 test('lead and decision commands refuse bad input before touching herdr', () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-lead-cmd-'));
   mkdirSync(join(root, 'decisions'));
   writeFileSync(join(root, 'decisions', 'D-07.md'), '# D-07: old\n');
-  const orch = (...a: string[]) => spawnSync(process.execPath, [...nodeArgs, join(SRC, 'orch.ts'), ...a], { cwd: root, env: { ...process.env, ORCH_DIR: root }, encoding: 'utf8' });
+  const orch = (...a: string[]) => orchCmd(root, herdrStub().env, ...a);
   const bad = orch('lead', 'start', 'nope');
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /usage: orch lead start\|stop\|status <evrloot>/);

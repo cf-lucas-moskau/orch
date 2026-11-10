@@ -9,7 +9,7 @@ The orch session-start steps in CLAUDE.md are orch's, not yours: no morning-brie
 
 ## On start and on every restart
 
-Arm your watcher: Monitor with `ORCH_SID=<your session id> ORCH_LEAD=<name> npm run -s watch`, timeout 30 min, re-armed on every expiry. It beats `leads/<name>.beat` every minute and prints your lines, which orch's watcher (the one that reads the feed, follows workers and runs the bridge) puts in `leads/<name>.inbox` while your beat is fresh. Your watcher reads the inbox from a saved offset, so a line written while it was between arms comes on the next arm. A beat older than three minutes hands your lines back to orch (`LEAD <name> down`), so re-arm right away. On start it also replays every idea still waiting (`IDEA ...` lines); answer each.
+Arm your watcher: Monitor with `ORCH_SID=<your session id> ORCH_LEAD=<name> npm run -s watch`, timeout 30 min, re-armed on every expiry. It beats `leads/<name>.beat` every minute and prints your lines, which orch's watcher (the one that reads the feed, follows workers and runs the bridge) puts in `leads/<name>.inbox` while your beat is fresh. Whatever is in the inbox is unread: your watcher prints and removes it on arm and every second, so a line written while it was between arms comes on the next arm. A beat older than three minutes hands your lines back to orch (`LEAD <name> down`), so re-arm right away. On start it also replays every idea still waiting (`IDEA ...` lines); answer each.
 
 ## Work
 
@@ -17,7 +17,7 @@ Sort each line by `policies.md` and `local.md`, as orch would:
 - `IDEA` and `TEAM`: the orch-ideas skill.
 - `BRIDGE error`: fix it before anything else; the bridge must run while `ideas/config.json` says `discord`. orch's watcher starts it when it is down.
 - `DONE worker`, `QUESTION worker`, `BLOCKED worker`, `OVERLAP`: the orch-dispatch skill (gates, steer, ship, cleanup). Review with the orch-review skill. Autonomy in `local.md` covers push, open-pr and merge for evrloot-next as it does for orch.
-- Deploys: `npm run -s deploy:evrloot`, the one command for the standing approval in `local.md` (gate-green evrloot-next on main, additive migrations only). It stops on its own for a migration that drops data or a failed backup verify; both go to Lucas. A reseed always goes to Lucas first.
+- Deploys: `npm run -s deploy:evrloot`, the one command for the standing approval in `local.md` (gate-green evrloot-next on main, additive migrations only). It checks every migration since the release 8790 runs before the checkout moves and stops on its own (exit 3) for one that drops, truncates or deletes data or changes a shipped migration, (exit 2) for a dirty checkout or local commits, and (exit 4) for a failed backup verify; any other failure is d14's own exit status. A stop goes to Lucas; a rerun refuses the same migration again, so never work around one. A reseed always goes to Lucas first.
 - Live checks: play every shipped change on https://api.runforit.io as Admin 2 (the live scripts use `admin-partner.json`), with the rules in `local.md`: small purchases only, never trades or challenges with real players, and recording starts only after sign-in.
 
 Every guardrail in `policies.md` and `local.md` binds you as it binds orch. Never edit permission settings (`.claude/settings*.json`, `~/.claude/settings*.json`, allow rules, hooks); a recurring block becomes a decision with the fix for Lucas to apply.

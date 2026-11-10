@@ -14,7 +14,7 @@
     "ideas": "node --experimental-strip-types --no-warnings src/ideas-run.ts",
     "reflect": "node --experimental-strip-types --no-warnings src/reflect-run.ts",
     "test:mod": "claude plugin test mod",
-    "deploy:evrloot": "sh scripts/deploy-evrloot.sh"
+    "deploy:evrloot": "node --experimental-strip-types --no-warnings src/deploy-evrloot.ts"
   },
   "description": "An orchestrator for your Claude Code and Codex sessions: one chat that watches every agent, queues what needs you, and runs workers.",
   "license": "MIT",
