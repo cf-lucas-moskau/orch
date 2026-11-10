@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { LEADS, leadNotice, leadPrompt, leadUp, ownerOf, shows } from '../src/lead.ts';
 import { decisionSkeleton, nextDecisionNumber, parseDecision } from '../src/brief.ts';
-import { drain, post } from '../src/lead-inbox.ts';
+import { post, prune, read } from '../src/lead-inbox.ts';
 
 const repos: Record<string, string> = { 'idea-74': 'evrloot-next', 'netto-proto': 'netto' };
 const owner = (line: string) => ownerOf(line, n => repos[n]);
@@ -47,12 +47,17 @@ test('a lead watcher shows only its lines; orch shows a lead’s lines only whil
   assert.equal(shows('evrloot', 'evrloot', () => false), true, 'a lead keeps its lines even when its own beat is late');
 });
 
-test('a lead is up while its beat is under three minutes old', () => {
+test('a lead is up while a fresh beat comes from the session its running record names', () => {
   const now = 1_000_000_000;
-  assert.equal(leadUp(undefined, now), false);
-  assert.equal(leadUp(now - 60_000, now), true);
-  assert.equal(leadUp(now - 179_000, now), true);
-  assert.equal(leadUp(now - 180_000, now), false);
+  const rec = { sid: 'lead0001', status: 'running' as const };
+  assert.equal(leadUp(undefined, rec, now), false);
+  assert.equal(leadUp({ ms: now - 60_000, sid: 'lead0001' }, rec, now), true);
+  assert.equal(leadUp({ ms: now - 179_000, sid: 'lead0001' }, rec, now), true);
+  assert.equal(leadUp({ ms: now - 180_000, sid: 'lead0001' }, rec, now), false, 'stale');
+  assert.equal(leadUp({ ms: now, sid: 'other' }, rec, now), false, 'a watcher of another session');
+  assert.equal(leadUp({ ms: now, sid: 'lead0001' }, { ...rec, status: 'stopped' }, now), false, 'a stopped lead');
+  assert.equal(leadUp({ ms: now, sid: 'lead0001' }, undefined, now), false, 'never started');
+  assert.equal(leadUp({ ms: now, sid: '' }, { ...rec, sid: '' }, now), false, 'no session id on either side');
 });
 
 test('LEAD down is said once for a started lead, LEAD up once when it is back, nothing for a stopped one', () => {
@@ -100,13 +105,16 @@ function orchDir() {
 
 // A fake herdr first on PATH: every herdr call in these tests lands here, so no test can touch a real pane or workspace.
 // It records each call and answers agent list and workspace get from what the test set.
-function herdrStub(o: { agents?: object[]; label?: string } = {}) {
+// screen: what agent read shows, an empty input box by default.
+function herdrStub(o: { agents?: object[]; label?: string; screen?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
   writeFileSync(join(dir, 'agents.json'), JSON.stringify({ result: { agents: o.agents ?? [] } }));
+  writeFileSync(join(dir, 'screen'), (o.screen ?? 'done.\n❯ \n────') + '\n');
   writeFileSync(join(dir, 'herdr'), `#!/bin/sh
 echo "$*" >> '${dir}/calls'
 case "$1 $2" in
   "agent list") cat '${dir}/agents.json' ;;
+  "agent read") cat '${dir}/screen' ;;
   "workspace get") echo '{"result":{"workspace":{"label":"${o.label ?? ''}"}}}' ;;
   "workspace create") echo '{"result":{"workspace":{"workspace_id":"w20"},"root_pane":{"pane_id":"w20:p1"}}}' ;;
   "agent get") echo '{"result":{"agent":{"agent_status":"idle","state_change_seq":1}}}' ;;
@@ -166,9 +174,11 @@ test('the watchers split one feed: Evrloot lines to the lead, the rest to orch',
 });
 
 const stale = (root: string) => { const old = (Date.now() - 10 * 60_000) / 1000; utimesSync(join(root, 'leads', 'evrloot.beat'), old, old); };
+const today = () => new Date().toLocaleDateString('sv-SE');
+const inboxFile = (root: string, day = today()) => join(root, 'leads', `evrloot.inbox-${day}`);
 const inboxHas = (root: string, re: RegExp) => async () => {
   for (const end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 100)))
-    if (existsSync(join(root, 'leads', 'evrloot.inbox')) && re.test(readFileSync(join(root, 'leads', 'evrloot.inbox'), 'utf8'))) return;
+    if (existsSync(inboxFile(root)) && re.test(readFileSync(inboxFile(root), 'utf8'))) return;
   assert.fail('never reached the inbox');
 };
 
@@ -186,7 +196,6 @@ test('a worker DONE that lands while the lead watcher is between arms reaches it
   await new Promise(r => setTimeout(r, 1500));
   assert.equal(rearmed.lines.filter(l => /Done between arms/.test(l)).length, 1);
   assert.equal(orch.lines.some(l => /Done between arms/.test(l)), false, 'orch never prints it while the lead is up');
-  assert.equal(existsSync(join(w.root, 'leads', 'evrloot.inbox')), false, 'a fully read inbox is trimmed');
   await kill(rearmed.p);
   const third = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
   await new Promise(r => setTimeout(r, 1500));
@@ -230,7 +239,7 @@ test('a worker DONE that lands just before the lead dies reaches orch when it ta
 test('orch starting with the lead already down says LEAD down and replays each waiting idea once', async () => {
   const w = orchDir();
   writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
-  writeFileSync(join(w.root, 'leads', 'evrloot.inbox'), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: left over\n');
+  writeFileSync(inboxFile(w.root), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: left over\n');
   const orch = watcher(w.root, { ORCH_SID: 'orch0001' });
   await orch.until(has(/left over$/));
   await new Promise(r => setTimeout(r, 500));
@@ -242,28 +251,30 @@ test('orch starting with the lead already down says LEAD down and replays each w
   await kill(orch.p);
 });
 
-test('the inbox drains from its saved offset, trims once read, and finishes a trim a crash left half done', () => {
+test('the inbox is read forward from a saved offset per day file; a half-written line waits; old days are pruned', () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-inbox-'));
   const got: string[] = [];
-  const take = () => { got.length = 0; drain(root, 'evrloot', l => got.push(l)); return [...got]; };
+  const take = () => { got.length = 0; read(root, 'evrloot', l => got.push(l)); return [...got]; };
+  const day = 864e5, now = Date.now();
   assert.deepEqual(take(), [], 'no inbox yet');
-  post(root, 'evrloot', 'A');
+  post(root, 'evrloot', 'old', now - 3 * day);
+  post(root, 'evrloot', 'A', now - day);
   post(root, 'evrloot', 'B');
-  assert.deepEqual(take(), ['A', 'B']);
-  assert.equal(existsSync(join(root, 'leads', 'evrloot.inbox')), false, 'trimmed once read');
+  appendFileSync(inboxFile(root), 'half');
+  assert.deepEqual(take(), ['old', 'A', 'B'], 'oldest day first');
   assert.deepEqual(take(), [], 'a read line is not delivered again');
+  appendFileSync(inboxFile(root), ' done\n');
   post(root, 'evrloot', 'C');
-  assert.deepEqual(take(), ['C']);
-  const lock = join(root, 'leads', 'evrloot.inbox.lock');
-  mkdirSync(lock);
-  const old = (Date.now() - 60_000) / 1000;
-  utimesSync(lock, old, old);
+  assert.deepEqual(take(), ['half done', 'C']);
+  assert.equal(readFileSync(inboxFile(root), 'utf8'), 'B\nhalf done\nC\n', 'nothing is trimmed while it runs');
+  prune(root, 'evrloot');
+  assert.equal(existsSync(inboxFile(root, new Date(now - 3 * day).toLocaleDateString('sv-SE'))), false, 'three days old: pruned');
+  assert.equal(existsSync(inboxFile(root, new Date(now - day).toLocaleDateString('sv-SE'))), true);
   post(root, 'evrloot', 'D');
-  assert.deepEqual(take(), ['D'], 'a lock its holder left behind is taken over');
-  assert.equal(existsSync(lock), false);
+  assert.deepEqual(take(), ['D'], 'offsets survive a prune');
 });
 
-test('posts from several processes and a drain running at the same time deliver every line exactly once', async () => {
+test('posts from several processes and a reader running at the same time deliver every line exactly once', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-inbox-race-'));
   const inbox = join(SRC, 'lead-inbox.ts');
   const run = (code: string) => new Promise<string>((res, rej) => {
@@ -274,11 +285,11 @@ test('posts from several processes and a drain running at the same time deliver 
     p.on('exit', c => c === 0 ? res(out) : rej(new Error(out)));
   });
   const poster = (k: number) => run(`import { post } from ${JSON.stringify(inbox)}; for (let i = 0; i < 300; i++) post(${JSON.stringify(root)}, 'evrloot', 'p${k} ' + i);`);
-  const drainer = run(`import { drain } from ${JSON.stringify(inbox)};
-    const end = Date.now() + 3000; while (Date.now() < end) drain(${JSON.stringify(root)}, 'evrloot', l => console.log(l));`);
-  const [, , , drained] = await Promise.all([poster(1), poster(2), poster(3), drainer]);
+  const reader = run(`import { read } from ${JSON.stringify(inbox)};
+    const end = Date.now() + 3000; while (Date.now() < end) read(${JSON.stringify(root)}, 'evrloot', l => console.log(l));`);
+  const [, , , drained] = await Promise.all([poster(1), poster(2), poster(3), reader]);
   const got = drained.split('\n').filter(Boolean);
-  drain(root, 'evrloot', l => got.push(l));
+  read(root, 'evrloot', l => got.push(l));
   assert.equal(got.length, 900);
   assert.equal(new Set(got).size, 900);
 });
@@ -287,7 +298,7 @@ test('lead stop marks the lead down at once and prints what it left: waiting ide
   const w = orchDir();
   writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
   writeFileSync(join(w.root, 'leads', 'evrloot.beat'), 'lead0001\n');
-  writeFileSync(join(w.root, 'leads', 'evrloot.inbox'), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: unread\n');
+  writeFileSync(inboxFile(w.root), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: unread\n');
   const h = herdrStub({ agents: [{ name: 'lead-evrloot', pane_id: 'w9:p1', workspace_id: 'w9', agent_status: 'idle', agent_session: { value: 'lead0001' } }], label: 'lead-evrloot' });
   const r = orchCmd(w.root, h.env, 'lead', 'stop', 'evrloot');
   assert.equal(r.status, 0, r.stderr);
@@ -326,6 +337,19 @@ test('lead start on a live lead takes its ids from herdr and re-arms a watcher t
   orchCmd(w.root, h.env, 'lead', 'start', 'evrloot');
   assert.ok(h.calls().some(c => c.startsWith('agent prompt lead-evrloot orch restarted you as lead evrloot. Re-arm your watcher')), h.calls().join('\n'));
   assert.equal(h.calls().some(c => /^(workspace (create|close)|agent start)/.test(c)), false);
+});
+
+test('lead start never types the re-arm prompt over a draft or into a blocked lead, like steer', () => {
+  const w = orchDir();
+  const live = (status: string) => [{ name: 'lead-evrloot', pane_id: 'w7:p2', workspace_id: 'w7', agent_status: status, agent_session: { value: 'lead0001' } }];
+  const typing = herdrStub({ agents: live('idle'), screen: 'some output\n❯ half a sentence\n────' });
+  const r = orchCmd(w.root, typing.env, 'lead', 'start', 'evrloot');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /re-arm prompt not sent: that pane has an unsent draft \("half a sentence"\)/);
+  assert.equal(typing.calls().some(c => c.startsWith('agent prompt')), false);
+  const blocked = herdrStub({ agents: live('blocked') });
+  assert.match(orchCmd(w.root, blocked.env, 'lead', 'start', 'evrloot').stderr, /re-arm prompt not sent: session is blocked on a dialog/);
+  assert.equal(blocked.calls().some(c => c.startsWith('agent prompt')), false);
 });
 
 test('lead and decision commands refuse bad input before touching herdr', () => {

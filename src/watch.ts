@@ -1,6 +1,6 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -10,7 +10,7 @@ import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply }
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
-import { drain, post } from './lead-inbox.ts';
+import { post, prune, read, readBeat } from './lead-inbox.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -22,8 +22,8 @@ const json = (f: string, fallback: any) => { try { return JSON.parse(readFileSyn
 const me = process.env.ORCH_LEAD || undefined;
 if (me && !LEADS[me]) { console.log(`LEAD error: ORCH_LEAD=${me} is no lead (${Object.keys(LEADS).join(', ')})`); process.exit(1); }
 const leadPath = (name: string, ext: string) => join(root, 'leads', `${name}.${ext}`);
-const beat = (name: string) => { try { return statSync(leadPath(name, 'beat')).mtimeMs; } catch { return undefined; } };
-const up = (name: string) => leadUp(beat(name), Date.now());
+const record = (name: string) => json(`leads/${name}.json`, undefined);
+const up = (name: string) => leadUp(readBeat(root, name), record(name), Date.now());
 const workerRepo = (name: string) => json('workers.json', []).find((w: any) => w.status === 'running' && w.name === name)?.repo;
 // orch's watcher makes every line, a lead's included, and never drops one: a line of a lead that is up goes to that
 // lead's inbox, which only its watcher prints. A lead's watcher prints only its own lines.
@@ -41,7 +41,7 @@ function inboxError(e: unknown) {
   if (msg !== lastInboxError) console.log(msg);
   lastInboxError = msg;
 }
-const safeDrain = (name: string, emit: (l: string) => void) => { try { drain(root, name, emit); } catch (e) { inboxError(e); } };
+const safeRead = (name: string, emit: (l: string) => void) => { try { read(root, name, emit); } catch (e) { inboxError(e); } };
 // Sessions that are leads: their turns end all day and they escalate through decisions/, so orch skips their DONE lines.
 const leadSids = () => new Set(Object.keys(LEADS).flatMap(n => json(`leads/${n}.json`, null)?.sid ?? []));
 // Workers orch dispatched are tagged so a DONE line triggers their gates check.
@@ -138,17 +138,18 @@ const pending = (owner?: string) => {
   catch (e) { return [`IDEA - error: ideas/ could not be read: ${e instanceof Error ? e.message : e}`]; }
 };
 
-// A lead's watcher: a heartbeat with its session id every minute and its inbox, drained on arm and every second.
+// A lead's watcher: a heartbeat with its session id every minute and its inbox, read on arm and every second.
 // Feed, herdr followers, bridge, queue page, overlap and board stay with orch's watcher alone, so nothing runs twice.
 function startLeadSide(name: string) {
   mkdirSync(join(root, 'leads'), { recursive: true });
+  try { prune(root, name); } catch (e) { inboxError(e); }
   const touch = () => writeFileSync(leadPath(name, 'beat'), self + '\n');
   touch();
   setInterval(touch, 60_000);
   const replayed = new Set(pending(name));
   for (const l of replayed) console.log(l);
-  safeDrain(name, l => { if (!replayed.has(l)) console.log(l); });
-  setInterval(() => safeDrain(name, l => console.log(l)), 1000);
+  safeRead(name, l => { if (!replayed.has(l)) console.log(l); });
+  setInterval(() => safeRead(name, l => console.log(l)), 1000);
 }
 
 // orch's side: says once when a started lead goes down or comes back, and prints what a lead that is not up left in its
@@ -165,7 +166,7 @@ function checkLeads(starting = false) {
     const replay = !!n.line && !starting;
     const shown = new Set(replay || starting ? pending(lead.name) : []);
     if (replay) for (const l of shown) console.log(l);
-    safeDrain(lead.name, l => { if (!shown.has(l)) console.log(l); });
+    safeRead(lead.name, l => { if (!shown.has(l)) console.log(l); });
   }
 }
 

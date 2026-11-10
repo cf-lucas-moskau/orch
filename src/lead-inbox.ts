@@ -1,43 +1,53 @@
-// IO glue: a lead's inbox, leads/<name>.inbox. orch's watcher appends every line of a lead that is up; whoever drains it
-// (the lead's watcher, or orch when the lead is down or stopped) prints it and removes it under one lock, so the file
-// itself is the read position: what is in it is unread, and a line written while the lead's watcher was between arms or
-// dead is delivered on the next drain. Delivery is at least once: a crash between printing and removing prints again.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+// IO glue: a lead's inbox, one append-only file per day, leads/<name>.inbox-<YYYY-MM-DD>. orch's watcher appends each
+// line of a lead that is up in one O_APPEND write, which lands whole. Whoever reads it (the lead's watcher, or orch when
+// the lead is down or stopped) goes forward from a byte offset per file kept in leads/<name>.offsets.json, so a line
+// written while the lead's watcher was between arms or dead comes on the next read. Nothing is trimmed while it runs;
+// the lead's watcher deletes files older than two days when it starts. A crash between printing and saving the offset
+// prints those lines again: at least once, never lost.
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Beat } from './lead.ts';
 
-const paths = (root: string, name: string) => ({ inbox: join(root, 'leads', `${name}.inbox`) });
+const dayOf = (t: number) => new Date(t).toLocaleDateString('sv-SE');
+const dir = (root: string) => join(root, 'leads');
+const prefix = (name: string) => `${name}.inbox-`;
+const files = (root: string, name: string) =>
+  existsSync(dir(root)) ? readdirSync(dir(root)).filter(f => f.startsWith(prefix(name)) && /^\d{4}-\d{2}-\d{2}$/.test(f.slice(prefix(name).length))).sort() : [];
+const offsetsFile = (root: string, name: string) => join(dir(root), `${name}.offsets.json`);
 
-// One holder at a time, across processes: a post never lands in a file a drain is trimming, and two drains (the lead's
-// and orch's takeover) never read the same lines. mkdir is atomic; a lock older than STALE_MS was left by a holder that
-// died, and is taken over.
-const STALE_MS = 10_000;
-function locked<T>(root: string, name: string, fn: () => T): T {
-  mkdirSync(join(root, 'leads'), { recursive: true });
-  const lock = `${paths(root, name).inbox}.lock`;
-  for (let waited = 0; ; waited += 10) {
-    try { mkdirSync(lock); break; }
-    catch (e: any) {
-      if (e.code !== 'EEXIST') throw e;
-      try { if (Date.now() - statSync(lock).mtimeMs > STALE_MS) rmSync(lock, { recursive: true, force: true }); } catch {}
-      if (waited > 2 * STALE_MS) throw new Error(`inbox lock ${lock} held for over ${2 * STALE_MS / 1000} s`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
+export function post(root: string, name: string, line: string, now = Date.now()) {
+  mkdirSync(dir(root), { recursive: true });
+  appendFileSync(join(dir(root), prefix(name) + dayOf(now)), line + '\n');
+}
+
+// Prints every line past the saved offsets with emit, oldest file first. A line still being written waits.
+export function read(root: string, name: string, emit: (line: string) => void) {
+  const all = files(root, name);
+  if (!all.length) return;
+  let offsets: Record<string, number> = {};
+  try { offsets = JSON.parse(readFileSync(offsetsFile(root, name), 'utf8')); } catch {}
+  const save = () => {
+    const tmp = `${offsetsFile(root, name)}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(all.map(f => [f, offsets[f] ?? 0]))) + '\n');
+    renameSync(tmp, offsetsFile(root, name));
+  };
+  for (const f of all) {
+    const buf = readFileSync(join(dir(root), f)), from = offsets[f] ?? 0, end = buf.lastIndexOf(10) + 1;
+    if (end <= from) continue;
+    for (const l of buf.subarray(from, end).toString('utf8').split('\n')) if (l) emit(l);
+    offsets[f] = end;
+    save();
   }
-  try { return fn(); } finally { rmSync(lock, { recursive: true, force: true }); }
 }
 
-export function post(root: string, name: string, line: string) {
-  locked(root, name, () => appendFileSync(paths(root, name).inbox, line + '\n'));
+// The beat a lead's watcher writes (src/lead.ts): when, and from which session.
+export function readBeat(root: string, name: string): Beat | undefined {
+  const p = join(dir(root), `${name}.beat`);
+  try { return { ms: statSync(p).mtimeMs, sid: readFileSync(p, 'utf8').trim() }; } catch { return undefined; }
 }
 
-// Prints every unread line with emit, then removes the inbox.
-export function drain(root: string, name: string, emit: (line: string) => void) {
-  locked(root, name, () => drainLocked(root, name, emit));
-}
-
-function drainLocked(root: string, name: string, emit: (line: string) => void) {
-  const { inbox } = paths(root, name);
-  if (!existsSync(inbox)) return;
-  for (const l of readFileSync(inbox, 'utf8').split('\n')) if (l) emit(l);
-  rmSync(inbox);
+// Deletes inbox files from before the day before yesterday.
+export function prune(root: string, name: string, now = Date.now()) {
+  const keep = dayOf(now - 2 * 864e5);
+  for (const f of files(root, name)) if (f.slice(prefix(name).length) < keep) rmSync(join(dir(root), f), { force: true });
 }

@@ -1,13 +1,13 @@
 // Deploys evrloot-next to world 8790 (d14 step A: same world, new code), the one way orch and the Evrloot lead ship it:
 // `npm run -s deploy:evrloot`, one command so the allow rule for `npm run *` matches it (local.md has the approval).
 // Every check runs against what 8790 runs now (releases/current/manifest.json) before the checkout moves, so a rerun
-// after a refusal refuses again. Exit codes: 2 checkout not deployable, 3 a migration needs Lucas, 4 backup verify
-// failed, otherwise d14's own. EVR_DEPLOY_DIR points it at another checkout (tests).
+// after a refusal refuses again. Any migration in that range stops it: Lucas approves each one (they are rare), so
+// nothing here tries to judge SQL. Exit codes: 2 checkout not deployable, 3 migrations need Lucas (listed on stderr),
+// 4 backup verify failed, otherwise d14's own. EVR_DEPLOY_DIR points it at another checkout (tests).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { migrationBlocker } from './deploy.ts';
 
 const dir = process.env.EVR_DEPLOY_DIR ?? join(homedir(), 'code', 'evrloot-next-deploy');
 const stop = (code: number, msg: string): never => { console.error(`deploy stopped: ${msg}`); process.exit(code); };
@@ -19,7 +19,13 @@ const git = (...args: string[]) => {
 const isAncestor = (a: string, b: string) => spawnSync('git', ['-C', dir, 'merge-base', '--is-ancestor', a, b]).status === 0;
 
 git('fetch', '-q', 'origin');
-if (git('status', '--porcelain', '--untracked-files=no')) stop(2, `${dir} has uncommitted changes`);
+// Tracked changes anywhere stop it. Untracked files only under the migrations folder do, since those could run against
+// the database; logs elsewhere (d14's, the live server's alpha-prod.log) belong there.
+const list = (s: string) => s.split('\n').slice(0, 10).join('\n');
+const modified = git('status', '--porcelain', '--untracked-files=no');
+if (modified) stop(2, `${dir} has uncommitted changes:\n${list(modified)}`);
+const strays = git('status', '--porcelain', '--untracked-files=all', '--', 'packages/db/migrations');
+if (strays) stop(2, `${dir} has untracked migration files:\n${list(strays)}`);
 const head = git('rev-parse', 'HEAD'), main = git('rev-parse', 'origin/main');
 if (!isAncestor(head, main)) stop(2, `HEAD ${head.slice(0, 8)} is not on origin/main`);
 let commit: string;
@@ -27,8 +33,8 @@ try { commit = JSON.parse(readFileSync(join(dir, 'releases', 'current', 'manifes
 catch (e) { stop(2, `cannot tell what 8790 runs (releases/current/manifest.json): ${e instanceof Error ? e.message : e}`); }
 const deployed = git('rev-parse', `${commit!}^{commit}`);
 if (!isAncestor(deployed, main)) stop(2, `8790 runs ${deployed.slice(0, 8)}, which is not on origin/main`);
-const blocker = migrationBlocker(git('diff', '--name-status', deployed, main, '--', 'packages/db/migrations'), p => git('show', `${main}:${p}`));
-if (blocker) stop(3, `${blocker}; that one goes to Lucas`);
+const migrations = git('diff', '--name-only', '--no-renames', deployed, main, '--', 'packages/db/migrations');
+if (migrations) stop(3, `migrations since ${deployed.slice(0, 8)} need Lucas:\n${migrations}`);
 
 git('merge', '--ff-only', '-q', main);
 if (git('rev-parse', 'HEAD') !== main) stop(2, 'HEAD is not origin/main after the fast-forward');

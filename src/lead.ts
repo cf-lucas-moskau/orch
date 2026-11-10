@@ -20,10 +20,13 @@ export const leadAgent = (name: string) => `lead-${name}`;
 // What `lead start` keeps in leads/<name>.json, so a restart resumes the same conversation.
 export type LeadRecord = { name: string; workspace: string; pane: string; sid: string; started: string; status: 'running' | 'stopped' };
 
-// A lead's watcher touches leads/<name>.beat every minute with its session id. Older than this, the lead counts as down:
-// a watcher re-armed after its 30-minute Monitor timeout is back well within it.
+// A lead's watcher writes leads/<name>.beat every minute with its session id. The lead is up only while that beat is
+// fresh, comes from the session its record names, and the record says running: a watcher left over from a stopped or
+// replaced lead does not count. A watcher re-armed after its 30-minute Monitor timeout is back well within the window.
 export const BEAT_STALE_MS = 3 * 60_000;
-export const leadUp = (beatMs: number | undefined, now: number) => beatMs !== undefined && now - beatMs < BEAT_STALE_MS;
+export type Beat = { ms: number; sid: string };
+export const leadUp = (beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number) =>
+  !!beat && !!rec && rec.status === 'running' && !!rec.sid && beat.sid === rec.sid && now - beat.ms < BEAT_STALE_MS;
 
 const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED']);
 

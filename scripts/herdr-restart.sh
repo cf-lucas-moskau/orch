@@ -68,7 +68,8 @@ for x in json.load(sys.stdin).get("result",{}).get("agents",[]):
 [ -z "$lost" ] || { say "aborting, these agents have no session id and would be lost:"; echo "$lost" | sed 's/^/  /'; done_ 5; }
 
 # 3. Restart the server.
-run herdr server stop
+if ! out=$(run herdr server stop 2>&1); then say "herdr server stop failed, nothing restarted: $out"; done_ 6; fi
+[ -n "$out" ] && say "$out"
 [ $DRY = 1 ] || sleep 5
 run sh -c 'nohup herdr server >/dev/null 2>&1 &'
 if [ $DRY = 0 ]; then
@@ -77,17 +78,18 @@ if [ $DRY = 0 ]; then
   say "server up: $(herdr --version)"
 fi
 
-# 4. Bring each session back in its own workspace, orch first.
+# 4. Bring each session back in its own workspace, orch first. Its only stdout is the new pane; everything it says,
+# errors included, goes to stderr (the log).
 resume() { # sid kind cwd name
-  local sid=$1 kind=$2 cwd=$3 name=$4 cmd ws pane
+  local sid=$1 kind=$2 cwd=$3 name=$4 cmd ws pane out
   if [ "$sid" = "$ORCH_SID" ]; then cmd="claude --resume $sid -n orch --remote-control orch --plugin-dir ./mod"
   elif [ "$kind" = codex ]; then cmd="codex resume $sid"
   else cmd="claude --resume $sid"; fi
   if [ $DRY = 1 ]; then say "would open $cwd (${name:-session}) and run: $cmd" >&2; return; fi
-  ws=$(herdr workspace create --cwd "$cwd" --label "${name:-$(basename "$cwd")}" --no-focus 2>/dev/null)
+  ws=$(herdr workspace create --cwd "$cwd" --label "${name:-$(basename "$cwd")}" --no-focus 2>&1)
   pane=$(echo "$ws" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null)
-  [ -n "$pane" ] || { say "could not open a pane for $sid in $cwd"; return; }
-  herdr pane run "$pane" "$cmd"
+  [ -n "$pane" ] || { say "could not open a pane for ${name:-$sid} in $cwd: $ws" >&2; return 1; }
+  out=$(herdr pane run "$pane" "$cmd" 2>&1) || { say "could not start ${name:-$sid} in $pane: $out" >&2; return 1; }
   say "resumed ${name:-$sid} in $pane" >&2
   echo "$pane"
 }
