@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify } from '../src/triage.ts';
+import { classify, screenTail } from '../src/triage.ts';
 import type { FeedEvent } from '../src/board.ts';
 
 const ev = (event: string, msg: string, tail?: string): FeedEvent => ({ ts: '', sid: 's', event, cwd: '', prompt: '', msg, tail });
@@ -30,6 +30,14 @@ test('a final report after a subagent message is done', () => {
 
 test('other events are noise', () => {
   assert.equal(classify(ev('SessionStart', '')), 'skip');
+});
+
+test('screenTail keeps the last words and drops the input box and status bar', () => {
+  const done = '\n\n❯ Reply with exactly PONG6.\n⏺ PONG6\n✻ Worked for 2s\n──────────\n❯ \n──────────\n  Haiku 5.5 | $0.02\n  ⏵⏵ auto mode on';
+  assert.equal(screenTail(done), '❯ Reply with exactly PONG6. ⏺ PONG6 ✻ Worked for 2s');
+  const asking = ' ☐ Drink\nDo you prefer tea or coffee?\n❯ 1. Coffee\n  2. Tea\n──────────\nEnter to select · Esc to cancel';
+  assert.equal(screenTail(asking), '☐ Drink Do you prefer tea or coffee? ❯ 1. Coffee 2. Tea Enter to select · Esc to cancel', 'a dialog has no empty box');
+  assert.equal(screenTail('x'.repeat(300)), 'x'.repeat(200));
 });
 
 test('"reviewer is now checking" is progress', () => {

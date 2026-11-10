@@ -1,11 +1,12 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { classify } from './triage.ts';
+import { classify, screenTail } from './triage.ts';
+import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 
@@ -30,6 +31,7 @@ function follow(d: string) {
     if (!e.sid || e.sid === self) return;
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
     if (e.event === 'Idea' || e.event === 'Team') return console.log(e.msg);
+    if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
     const kind = classify(e);
     if (kind === 'skip') return;
     // Codex panes have no session id in herdr, so a worker is also found by its worktree.
@@ -45,6 +47,53 @@ function follow(d: string) {
   const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day()); } }, 60_000);
   tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => follow(day()), 1000); } });
 }
+
+// herdr follows the workers that send no hook events (herdrFollowed), one follower per pane. hooked holds every
+// folder a hook event came from, today's and yesterday's feed at start, then each new line.
+const hooked = new Set<string>();
+for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
+  let text = '';
+  try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
+  for (const line of text.split('\n')) { try { const e = JSON.parse(line); if (e.cwd && e.event !== 'Idea' && e.event !== 'Team') hooked.add(e.cwd); } catch {} }
+}
+// Each follower's live herdr processes, by pane, killed when its worker is no longer followed or the watcher exits.
+const followers = new Map<string, Set<ChildProcess>>();
+// Bounded, so a wait the watcher left behind when it died ends on its own; a timeout just starts the next round.
+function herdrCall(procs: Set<ChildProcess>, args: string[]): Promise<HerdrReply> {
+  return new Promise(resolve => {
+    const c = spawn('herdr', args);
+    procs.add(c);
+    let out = '';
+    c.stdout.on('data', d => { out += d; });
+    c.on('error', () => resolve({ error: { code: 'spawn' } }));
+    c.on('close', () => { procs.delete(c); try { resolve(JSON.parse(out)); } catch { resolve({ error: { code: 'unparsed' } }); } });
+  });
+}
+function followPane(w: Followed, seed: boolean) {
+  const procs = new Set<ChildProcess>();
+  followers.set(w.pane, procs);
+  followWorker({
+    get: () => herdrCall(procs, ['agent', 'get', w.pane]),
+    wait: until => herdrCall(procs, ['agent', 'wait', w.pane, ...until.flatMap(u => ['--until', u]), '--timeout', String(30 * 60_000)]),
+    sleep: ms => new Promise(r => setTimeout(r, ms)),
+    emit: (kind, a) => {
+      const screen = spawnSync('herdr', ['agent', 'read', w.pane, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+      console.log(`${kind.toUpperCase()} worker ${w.name} [${w.pane}] -: (herdr: ${a.agent_status}) ${screenTail(screen)}`);
+    },
+  }, () => followers.get(w.pane) === procs, seed).finally(() => { if (followers.get(w.pane) === procs) followers.delete(w.pane); });
+}
+// At start the followed panes' states are known already: a watcher re-arm must not report them again.
+let seeding = true;
+function syncFollowers() {
+  const want = herdrFollowed(json('workers.json', []) as Followed[], hooked);
+  for (const w of want) if (!followers.has(w.pane)) followPane(w, seeding);
+  seeding = false;
+  for (const [pane, procs] of followers) if (!want.some(w => w.pane === pane)) { followers.delete(pane); for (const c of procs) c.kill(); }
+}
+syncFollowers();
+setInterval(syncFollowers, 30_000);
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
+  process.on(sig, () => { for (const procs of followers.values()) for (const c of procs) c.kill(); process.exit(0); });
 
 // Ideas still waiting on orch, so nothing posted while orch was down is missed.
 try { for (const l of pendingLines(loadIdeas(root))) console.log(l); }

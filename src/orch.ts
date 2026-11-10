@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, parseDecision, parseLearned } from './brief.ts';
-import { potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -78,11 +78,46 @@ const potetoSkill = (): string | false => {
 };
 const worker = (name: string) => loadWorkers().find(w => w.name === name && w.status === 'running') ?? die(`no running worker ${name}`);
 
-// Submit and confirm the session picked it up, without waiting for the whole turn.
-// A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28):
-// clear the input line and send it once more before giving up.
-// Pastes the prompt and watches it land (promptVerdict). Returns the agent's status, or the reason it did not land.
+// The running server's version from its ping, which `herdr` itself does not print. The binary can be newer than the
+// server: every session lives in the server, so it is never restarted for an upgrade.
+function serverVersion(): string | undefined {
+  const sock = process.env.HERDR_SOCKET_PATH ?? join(homedir(), '.config/herdr/herdr.sock');
+  const r = spawnSync('nc', ['-U', '-w', '2', sock], { input: '{"id":"orch:ping","method":"ping","params":{}}\n', encoding: 'utf8', timeout: 4000 });
+  try { return JSON.parse(r.stdout.split('\n')[0]).result?.version; } catch { return undefined; }
+}
+let capsMemo: HerdrCaps | undefined;
+// ORCH_HERDR_VERSION pretends another server version, to try either path. A fallback says so once per run.
+const caps = () => {
+  if (capsMemo) return capsMemo;
+  const version = process.env.ORCH_HERDR_VERSION || serverVersion();
+  capsMemo = herdrCaps(version);
+  if (!capsMemo.cleanInput) console.error(`herdr server ${version ?? '(version unreadable)'} is before 0.9.4: watching the screen for prompts`);
+  return capsMemo;
+};
+
+// Submits a prompt and confirms the session picked it up, without waiting out a long turn. Returns the agent's
+// status, or the reason it did not land.
 function trySubmit(target: string, text: string): { status: string } | { failed: string } {
+  if (!caps().cleanInput) return trySubmitWatched(target, text);
+  const before = herdr('agent', 'get', target).result?.agent?.state_change_seq;
+  const until = (states: string[]) => states.flatMap(s => ['--until', s]);
+  let [stage, action] = submitStep({ at: 'prompt' }, herdr('agent', 'prompt', target, text, '--wait', '--timeout', '10000'), before);
+  for (;;) {
+    if ('landed' in action) return { status: action.landed };
+    if ('failed' in action) return action;
+    let answer: HerdrReply | string;
+    if ('read' in action) answer = spawnSync('herdr', ['agent', 'read', target, '--source', 'visible', '--ansi'], { encoding: 'utf8' }).stdout ?? '';
+    else {
+      if ('enter' in action) herdr('agent', 'send-keys', target, 'enter');
+      answer = herdr('agent', 'wait', target, ...until('enter' in action ? action.enter : action.wait), '--timeout', '10000');
+    }
+    [stage, action] = submitStep(stage, answer, before);
+  }
+}
+
+// For servers before 0.9.4: pastes the prompt and watches the screen until it lands (promptVerdict).
+// A fresh pane sometimes swallows the first paste as terminal noise (agent_prompt_stalled, three times on 2026-10-27/28).
+function trySubmitWatched(target: string, text: string): { status: string } | { failed: string } {
   const send = () => herdr('agent', 'prompt', target, text, '--wait', '--until', 'working', '--until', 'blocked', '--until', 'done', '--timeout', '20000');
   const r = send();
   // A prompt that starts with a slash command opens Claude's autocomplete, which takes the first Enter: the text sits in
@@ -120,8 +155,33 @@ function relaunch(name: string, kind: Kind, pane: string) {
   return started.error ? started : waitReady(name);
 }
 
-// herdr reports ready a moment before Claude's input box takes pastes, also after the trust dialog.
-function waitReady(name: string) {
+// Ready for a prompt (readyStep). herdr's own wait, plus a short settle, is enough from 0.9.4 on.
+function waitReady(name: string): HerdrReply {
+  if (!caps().cleanInput) return waitReadyWatched(name);
+  let [stage, action] = readyStep({ at: 'wait' }, herdr('agent', 'wait', name, '--until', 'idle', '--until', 'done', '--timeout', '30000'));
+  for (;;) {
+    if ('ready' in action) return action.ready;
+    if ('error' in action) return action;
+    let answer: HerdrReply | string;
+    if ('get' in action) answer = herdr('agent', 'get', name);
+    else {
+      if (stage.at === 'settle' && stage.reads > 0) spawnSync('sleep', ['1']);
+      answer = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout ?? '';
+    }
+    [stage, action] = readyStep(stage, answer);
+  }
+}
+
+// A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives, on servers
+// that leak those answers into pane input.
+function nudge(name: string) {
+  if (caps().cleanInput) return;
+  herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
+  herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+}
+
+// For servers before 0.9.4, which report ready a moment before Claude's input box takes pastes, also after the trust dialog.
+function waitReadyWatched(name: string) {
   let last = '', before = '';
   for (let i = 0; i < 60; i++) {
     spawnSync('sleep', ['1']);
@@ -223,9 +283,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   const brief = join(root, 'briefs', `${name}.md`);
   mkdirSync(join(root, 'briefs'), { recursive: true });
   writeFileSync(brief, potetoLine(rec, potetoSkill()) + workerBrief(task, p, rec, !extra.prHead && !stacked));
-  // A keystroke first lets Claude send its terminal queries and take their answers before the paste arrives.
-  herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
-  herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+  nudge(name);
   const prompt = workerPrompt(brief);
   let sent = trySubmit(name, prompt);
   // One fresh start when the first prompt did not land: idea-28 and idea-25-2 sat idle for hours with it garbled.
@@ -234,8 +292,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
     const again = relaunch(name, kind, pane);
     if (!again.error) {
       saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, sid: herdr('agent', 'get', name).result?.agent?.agent_session?.value ?? w.sid } : w));
-      herdr('agent', 'send-keys', name, 'space'); spawnSync('sleep', ['2']);
-      herdr('agent', 'send-keys', name, 'backspace'); spawnSync('sleep', ['1']);
+      nudge(name);
       sent = trySubmit(name, prompt);
     }
   }
@@ -244,6 +301,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
     die(`worker ${name} never got its brief: ${sent.failed}. Read pane ${pane}, then clean up and run it again.`);
   }
   const status = sent.status;
+  saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, prompted: stamp() } : w));
   log(`run ${name} (${kind}${extra.pair ? `, pair ${extra.pair}` : ''}) on ${p.repo} (${branch}, pane ${pane}): ${task.slice(0, 120)}`);
   console.log(`${name} (${kind}) ${status} in ${pane}, worktree ${path}`);
 }

@@ -16,3 +16,12 @@ export function classify(e: FeedEvent): Kind {
   if (INTERIM.test(e.msg)) return 'skip';
   return 'done';
 }
+
+// The agent's last words on a visible screen: everything from an empty input box down (the box, the status bar)
+// and rule lines dropped, whitespace collapsed, the last 200 characters.
+export function screenTail(screen: string): string {
+  const lines = screen.split('\n');
+  const box = lines.findLastIndex(l => /^\s*[❯›]\s*$/.test(l));
+  return (box >= 0 ? lines.slice(0, box) : lines).filter(l => !/^[\s─━]*$/.test(l))
+    .join(' ').replace(/\s+/g, ' ').trim().slice(-200);
+}
