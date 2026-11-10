@@ -9,7 +9,7 @@ The orch session-start steps in CLAUDE.md are orch's, not yours: no morning-brie
 
 ## On start and on every restart
 
-Arm your watcher: Monitor with `ORCH_SID=<your session id> ORCH_LEAD=<name> npm run -s watch`, timeout 30 min, re-armed on every expiry. It prints only your lines and beats `leads/<name>.beat` every minute; while the beat is fresh, orch's watcher drops your lines, and a beat older than three minutes hands them back to orch (`LEAD <name> down`). So never leave the watcher unarmed. Lines orch's watcher makes itself (BRIDGE, OVERLAP for your repo) reach yours through `leads/<name>.inbox`. On start it replays every idea still waiting (`IDEA ... ` lines); answer each.
+Arm your watcher: Monitor with `ORCH_SID=<your session id> ORCH_LEAD=<name> npm run -s watch`, timeout 30 min, re-armed on every expiry. It beats `leads/<name>.beat` every minute and prints your lines, which orch's watcher (the one that reads the feed, follows workers and runs the bridge) puts in `leads/<name>.inbox` while your beat is fresh. Your watcher reads the inbox from a saved offset, so a line written while it was between arms comes on the next arm. A beat older than three minutes hands your lines back to orch (`LEAD <name> down`), so re-arm right away. On start it also replays every idea still waiting (`IDEA ...` lines); answer each.
 
 ## Work
 

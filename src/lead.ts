@@ -1,5 +1,6 @@
-// Leads: long-running Claude sessions that each run one area of focus under orch. A lead's watcher prints the lines of
-// its area; orch's watcher drops them while that lead is up and handles them itself while it is down.
+// Leads: long-running Claude sessions that each run one area of focus under orch. orch's watcher makes every line; a
+// line of a lead that is up goes to that lead's inbox (src/lead-inbox.ts), which the lead's watcher prints. While the
+// lead is down, orch prints its lines itself.
 
 export type Lead = {
   name: string;

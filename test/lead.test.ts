@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { LEADS, leadNotice, leadPrompt, leadUp, ownerOf, shows } from '../src/lead.ts';
 import { decisionSkeleton, nextDecisionNumber, parseDecision } from '../src/brief.ts';
+import { drain, post } from '../src/lead-inbox.ts';
 
 const repos: Record<string, string> = { 'idea-74': 'evrloot-next', 'netto-proto': 'netto' };
 const owner = (line: string) => ownerOf(line, n => repos[n]);
@@ -114,7 +115,7 @@ function watcher(root: string, env: Record<string, string>) {
 const kill = (p: ChildProcess) => new Promise(r => { p.on('exit', r); p.kill(); });
 const has = (re: RegExp) => (ls: string[]) => ls.some(l => re.test(l));
 
-test('the watchers split one feed: Evrloot lines to the lead, the rest to orch; orch takes over when the lead goes down', async () => {
+test('the watchers split one feed: Evrloot lines to the lead, the rest to orch', async () => {
   const w = orchDir();
   const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
   await new Promise(r => setTimeout(r, 300));
@@ -138,20 +139,120 @@ test('the watchers split one feed: Evrloot lines to the lead, the rest to orch; 
 
   await kill(orch.p);
   await kill(lead.p);
-  const old = (Date.now() - 10 * 60_000) / 1000;
-  utimesSync(join(w.root, 'leads', 'evrloot.beat'), old, old);
-  const back = watcher(w.root, { ORCH_SID: 'orch0001' });
-  await back.until(has(/^LEAD evrloot down: orch handles/));
-  assert.equal(existsSync(join(w.root, 'leads', 'evrloot.down')), true);
-  w.stop('evr00001', join(w.root, 'idea-74'), 'Done again.');
-  await back.until(has(/^DONE worker idea-74 .*Done again\.$/));
-  await back.until(has(/^BRIDGE error/));
-  await kill(back.p);
+});
+
+const stale = (root: string) => { const old = (Date.now() - 10 * 60_000) / 1000; utimesSync(join(root, 'leads', 'evrloot.beat'), old, old); };
+const inboxHas = (root: string, re: RegExp) => async () => {
+  for (const end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 100)))
+    if (existsSync(join(root, 'leads', 'evrloot.inbox')) && re.test(readFileSync(join(root, 'leads', 'evrloot.inbox'), 'utf8'))) return;
+  assert.fail('never reached the inbox');
+};
+
+test('a worker DONE that lands while the lead watcher is between arms reaches it on re-arm, once', async () => {
+  const w = orchDir();
+  const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
+  await new Promise(r => setTimeout(r, 300));
+  const orch = watcher(w.root, { ORCH_SID: 'orch0001' });
+  await new Promise(r => setTimeout(r, 1500));
+  await kill(lead.p);
+  w.stop('evr00001', join(w.root, 'idea-74'), 'Done between arms.');
+  await inboxHas(w.root, /Done between arms\./)();
+  const rearmed = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
+  await rearmed.until(has(/Done between arms\.$/));
+  await new Promise(r => setTimeout(r, 1500));
+  assert.equal(rearmed.lines.filter(l => /Done between arms/.test(l)).length, 1);
+  assert.equal(orch.lines.some(l => /Done between arms/.test(l)), false, 'orch never prints it while the lead is up');
+  assert.equal(existsSync(join(w.root, 'leads', 'evrloot.inbox')), false, 'a fully read inbox is trimmed');
+  await kill(rearmed.p);
+  const third = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
+  await new Promise(r => setTimeout(r, 1500));
+  assert.equal(third.lines.some(l => /Done between arms/.test(l)), false, 'a read line is not delivered again');
+  await kill(third.p);
+  await kill(orch.p);
+});
+
+test('a worker DONE that lands just before the lead dies reaches orch when it takes over, with the waiting ideas, once', async () => {
+  const w = orchDir();
+  writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
+  const lead = watcher(w.root, { ORCH_SID: 'lead0001', ORCH_LEAD: 'evrloot' });
+  await lead.until(has(/^IDEA I-3 new ann: more bats$/));
+  const orch = watcher(w.root, { ORCH_SID: 'orch0001', ORCH_LEAD_CHECK_MS: '300' });
+  await new Promise(r => setTimeout(r, 1500));
+  assert.equal(orch.lines.some(l => l.startsWith('IDEA')), false, 'the lead replays its own ideas');
+  appendFileSync(w.feed, JSON.stringify({ ts: new Date().toISOString(), sid: 'bridge', event: 'Idea', cwd: '', prompt: '', msg: 'IDEA I-3 new ann: more bats' }) + '\n');
+  await inboxHas(w.root, /IDEA I-3/)();
+  await kill(lead.p);
+  w.stop('evr00001', join(w.root, 'idea-74'), 'Done before the crash.');
+  await inboxHas(w.root, /Done before the crash\./)();
+  stale(w.root);
+  await orch.until(has(/Done before the crash\.$/));
+  await new Promise(r => setTimeout(r, 1000));
+  assert.deepEqual(orch.lines.filter(l => /^(LEAD|IDEA|DONE worker idea)/.test(l)), [
+    'LEAD evrloot down: orch handles its IDEA, TEAM, BRIDGE and evrloot-next worker lines until it is back (npm run -s orch -- lead start evrloot)',
+    'IDEA I-3 new ann: more bats',
+    'DONE worker idea-74 [idea-74:p1] evr00001: Done before the crash.',
+  ]);
+  w.stop('evr00001', join(w.root, 'idea-74'), 'Done while down.');
+  await orch.until(has(/Done while down\.$/));
+  await kill(orch.p);
 
   const again = watcher(w.root, { ORCH_SID: 'orch0001' });
   await again.until(has(/^BRIDGE error/));
-  assert.equal(again.lines.some(l => l.startsWith('LEAD')), false, 'a re-armed watcher does not say LEAD down again');
+  await new Promise(r => setTimeout(r, 500));
+  assert.deepEqual(again.lines.filter(l => /^(LEAD|IDEA|DONE)/.test(l)), ['IDEA I-3 new ann: more bats'], 'a re-armed orch watcher replays once and says no second LEAD down');
   await kill(again.p);
+});
+
+test('orch starting with the lead already down says LEAD down and replays each waiting idea once', async () => {
+  const w = orchDir();
+  writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
+  writeFileSync(join(w.root, 'leads', 'evrloot.inbox'), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: left over\n');
+  const orch = watcher(w.root, { ORCH_SID: 'orch0001' });
+  await orch.until(has(/left over$/));
+  await new Promise(r => setTimeout(r, 500));
+  assert.deepEqual(orch.lines.filter(l => /^(LEAD|IDEA|DONE)/.test(l)), [
+    'IDEA I-3 new ann: more bats',
+    'LEAD evrloot down: orch handles its IDEA, TEAM, BRIDGE and evrloot-next worker lines until it is back (npm run -s orch -- lead start evrloot)',
+    'DONE worker idea-74 [idea-74:p1] evr00001: left over',
+  ]);
+  await kill(orch.p);
+});
+
+test('the inbox drains from its saved offset, trims once read, and finishes a trim a crash left half done', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orch-inbox-'));
+  const got: string[] = [];
+  const take = () => { got.length = 0; drain(root, 'evrloot', l => got.push(l)); return [...got]; };
+  assert.deepEqual(take(), [], 'no inbox yet');
+  post(root, 'evrloot', 'A');
+  post(root, 'evrloot', 'B');
+  appendFileSync(join(root, 'leads', 'evrloot.inbox'), 'half');
+  assert.deepEqual(take(), ['A', 'B'], 'a line still being written waits');
+  assert.equal(readFileSync(join(root, 'leads', 'evrloot.inbox'), 'utf8'), 'A\nB\nhalf');
+  appendFileSync(join(root, 'leads', 'evrloot.inbox'), ' done\n');
+  assert.deepEqual(take(), ['half done']);
+  assert.equal(existsSync(join(root, 'leads', 'evrloot.inbox')), false, 'trimmed');
+  post(root, 'evrloot', 'C');
+  assert.deepEqual(take(), ['C'], 'a new inbox after a trim starts at 0');
+  writeFileSync(join(root, 'leads', 'evrloot.inbox.draining'), 'D\n');
+  post(root, 'evrloot', 'E');
+  assert.deepEqual(take(), ['D', 'E'], 'the half-done trim first, then the new inbox');
+  assert.deepEqual(take(), []);
+});
+
+test('lead stop marks the lead down at once and prints what it left: waiting ideas, then its unread inbox', () => {
+  const w = orchDir();
+  writeFileSync(join(w.root, 'ideas', 'I-3.json'), JSON.stringify({ id: 'I-3', author: { id: 'u1', name: 'ann' }, text: 'more bats', state: 'talk', needsOrch: 'new', thread: 't3', messages: [] }));
+  writeFileSync(join(w.root, 'leads', 'evrloot.beat'), 'lead0001\n');
+  writeFileSync(join(w.root, 'leads', 'evrloot.inbox'), 'IDEA I-3 new ann: more bats\nDONE worker idea-74 [idea-74:p1] evr00001: unread\n');
+  const r = spawnSync(process.execPath, [...nodeArgs, join(SRC, 'orch.ts'), 'lead', 'stop', 'evrloot'], { cwd: w.root, env: { ...process.env, ORCH_DIR: w.root }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split('\n'), [
+    "lead-evrloot stopped; orch's watcher handles its lines. Waiting on orch now:",
+    'IDEA I-3 new ann: more bats',
+    'DONE worker idea-74 [idea-74:p1] evr00001: unread',
+  ]);
+  assert.equal(existsSync(join(w.root, 'leads', 'evrloot.beat')), false);
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'leads', 'evrloot.json'), 'utf8')).status, 'stopped');
 });
 
 test('lead and decision commands refuse bad input before touching herdr', () => {

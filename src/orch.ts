@@ -6,7 +6,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
-import { LEADS, leadAgent, leadPrompt, leadUp, type LeadRecord } from './lead.ts';
+import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, type LeadRecord } from './lead.ts';
+import { drain } from './lead-inbox.ts';
 import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
@@ -483,23 +484,36 @@ function lead([sub, name]: string[]) {
   if (!name || !LEADS[name]) die(usage);
   const agent = leadAgent(name), rec = leadRecord(name);
   const save = (r: LeadRecord) => { mkdirSync(join(root, 'leads'), { recursive: true }); writeFileSync(leadFile(name), JSON.stringify(r, null, 2) + '\n'); };
-  const a = herdr('agent', 'get', agent).result?.agent;
+  const la = live().find(x => x.name === agent);
   if (sub === 'status') {
     const beat = beatMs(name);
-    return console.log(`${agent}: ${a?.agent_status ? `${a.agent_status} in ${a.pane_id}` : 'no live session'}, watcher ${leadUp(beat, Date.now()) ? 'up' : 'down'}`
+    return console.log(`${agent}: ${la ? `${la.agent_status} in ${la.pane_id}` : 'no live session'}, watcher ${leadUp(beat, Date.now()) ? 'up' : 'down'}`
       + `${beat ? ` (beat ${Math.round((Date.now() - beat) / 1000)} s ago)` : ''}, record ${rec ? `${rec.status} since ${rec.started}` : 'none'}`);
   }
   if (sub === 'stop') {
-    if (rec?.workspace && a?.agent_status) herdr('workspace', 'close', rec.workspace);
+    const workspace = la?.workspace_id ?? rec?.workspace;
+    if (workspace && la) herdr('workspace', 'close', workspace);
+    // Its watcher counts as down at once, so orch's watcher takes its lines from the next one on.
+    rmSync(join(root, 'leads', `${name}.beat`), { force: true });
     if (rec) save({ ...rec, status: 'stopped' });
-    log(`lead stop ${name}${rec ? ` (workspace ${rec.workspace})` : ''}`);
-    return console.log(`${agent} stopped; orch's watcher handles its lines`);
+    log(`lead stop ${name}${workspace ? ` (workspace ${workspace})` : ''}`);
+    console.log(`${agent} stopped; orch's watcher handles its lines. Waiting on orch now:`);
+    // What the lead had not handled: its waiting ideas, then its unread inbox (lines the ideas already show skipped).
+    const ws = loadWorkers();
+    const ideas = pendingLines(loadIdeas(root)).filter(l => ownerOf(l, n => ws.find(w => w.name === n && w.status === 'running')?.repo) === name);
+    for (const l of ideas) console.log(l);
+    drain(root, name, l => { if (!ideas.includes(l)) console.log(l); });
+    return;
   }
   if (sub !== 'start') die(usage);
-  // Idempotent: a live lead is left alone, so restore and a second start never make two.
-  if (a?.agent_status) {
-    if (rec?.status !== 'running') save({ ...(rec ?? { name, workspace: '', pane: a.pane_id, sid: '', started: stamp() }), status: 'running' });
-    return console.log(`${agent} already runs in ${a.pane_id}`);
+  // Idempotent: a live lead is not started twice. Its ids come from herdr; a lead whose watcher stopped beating is told
+  // to re-arm it.
+  if (la) {
+    save({ name, workspace: la.workspace_id ?? rec?.workspace ?? '', pane: la.pane_id, sid: la.agent_session?.value || rec?.sid || '', started: rec?.started ?? stamp(), status: 'running' });
+    if (leadUp(beatMs(name), Date.now())) return console.log(`${agent} already runs in ${la.pane_id}`);
+    const status = submit(agent, leadPrompt(name, true));
+    log(`lead start ${name}: live in ${la.pane_id} but its watcher was down; told it to re-arm`);
+    return console.log(`${agent} already runs in ${la.pane_id}; its watcher was down, re-arm prompt ${status}`);
   }
   // A workspace left from a lead whose agent quit goes; the lead always starts in a fresh one.
   if (rec?.workspace && herdr('workspace', 'get', rec.workspace).result) herdr('workspace', 'close', rec.workspace);
