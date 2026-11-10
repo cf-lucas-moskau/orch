@@ -11,7 +11,7 @@ export type Worker = {
 };
 export type Live = {
   agent_status: string; focused?: boolean; pane_id: string; name?: string; agent_session?: { value?: string };
-  agent?: string; cwd?: string; terminal_title_stripped?: string;
+  agent?: string; cwd?: string; terminal_title_stripped?: string; workspace_id?: string;
 };
 
 const cells = (line: string) => line.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
