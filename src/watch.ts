@@ -95,3 +95,36 @@ function ensureBridge() {
 }
 ensureBridge();
 setInterval(ensureBridge, 60_000);
+
+// The decision queue page (src/queue-run.ts) the same way, checked every minute. Its port answering counts as running,
+// not a process match: workers run their own copies on other ports. A repeated error is printed once until it changes.
+const queuePort = Number(process.env.ORCH_QUEUE_PORT ?? 7390);
+const queueUp = () => fetch(`http://127.0.0.1:${queuePort}/api/queue`, { signal: AbortSignal.timeout(20_000) })
+  .then(r => r.ok, () => false);
+let queueBusy = false, queueError = '';
+async function ensureQueue() {
+  // ORCH_QUEUE=off: tests and second copies of the watcher must not start a page that outlives them.
+  if (queueBusy || process.env.ORCH_QUEUE === 'off') return;
+  queueBusy = true;
+  try {
+    if (await queueUp()) { queueError = ''; return; }
+    const log = join(homedir(), 'Library', 'Logs', 'orch.queue.log');
+    const script = join(import.meta.dirname, 'queue-run.ts');
+    const r = spawnSync('/bin/sh', ['-c', `nohup '${process.execPath}' --experimental-strip-types --no-warnings '${script}' >> '${log}' 2>&1 < /dev/null &`], { cwd: root, encoding: 'utf8' });
+    let up = false;
+    for (let i = 0; i < 10 && !up && r.status === 0; i++) { await new Promise(res => setTimeout(res, 500)); up = await queueUp(); }
+    // A crash ends with node's version banner; its Error: line says what went wrong.
+    const tail = () => {
+      try { const ls = readFileSync(log, 'utf8').trim().split('\n').slice(-30); return (ls.findLast(l => /\w*Error: /.test(l)) ?? ls.at(-1) ?? '').trim().slice(0, 200); }
+      catch { return ''; }
+    };
+    const msg = up ? '' : r.status !== 0 ? `could not start: ${r.stderr.trim()}` : `did not come up on port ${queuePort}: ${tail()}`;
+    // The page prints a one-time tailnet login link on start; orch relays it to the user's phone.
+    const login = () => { try { return [...readFileSync(log, 'utf8').matchAll(/^queue login link \(one use\): (\S+)$/gm)].at(-1)?.[1] ?? ''; } catch { return ''; } };
+    if (up) console.log(`QUEUE started on http://127.0.0.1:${queuePort} (it was down)${login() ? `; tailnet login link (one use): ${login()}` : ''}`);
+    else if (msg !== queueError) console.log(`QUEUE error: ${msg}`);
+    queueError = msg;
+  } finally { queueBusy = false; }
+}
+void ensureQueue();
+setInterval(() => void ensureQueue(), 60_000);

@@ -62,6 +62,10 @@ Focus it with ctrl+x tab. `m b w d f` switch tabs, `j k` select, `s` steer the s
 
 The deck is a [Claude Code mod](https://www.claudemod.com) (early access) and docks in fullscreen mode (`"tui": "fullscreen"` in your settings) on terminals 110+ columns wide.
 
+## Decision queue
+
+`npm run -s queue` serves one page at `http://127.0.0.1:7390` and on your Tailscale address (`ORCH_QUEUE_PORT` changes the port): every open decision, worker question or permission prompt, open idea question, PR still waiting to merge and idea being deployed, most urgent first, with orch's recommendation, links and the screenshots or clips each one names. `j k` move, `a` accept (press again or Enter to send), `r` reject and `e` edit open a box prefilled with the answer's start, Enter sends. An answer goes into orch's own pane through `orch steer`, like the deck's keys, so it arrives as your words and lands in `log.md`; it refuses while you have a draft typed there. An answer is bound to the item as it was when you opened it: if orch closes or rewrites it before you send, nothing is sent and the page tells you. From the tailnet the page needs a token: open the one-time login link it prints on start (orch relays it from the watcher's `QUEUE started` line) once per device, which sets a cookie; the token lives in `secrets/queue-token`. Localhost needs none. The page reads the ledger and writes nothing else. orch's watcher starts it whenever its port stops answering and checks every minute, so you rarely start it yourself; its log is `~/Library/Logs/orch.queue.log`.
+
 ## What orch never does on its own
 
 Push, merge, open or comment on PRs, deploy, touch a database, send anything outside your machine, or answer a permission prompt. Those always become a decision for you. Workers never commit; orch commits on the worker's branch only after your gates pass. The full rules are in `policies.md`; put your own overrides in `local.md`.
