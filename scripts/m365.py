@@ -26,10 +26,14 @@ def app():
 
 
 def save(cache):
+    # Written to a temp file and renamed, so two runs at once never leave a half-written cache.
     if cache.has_state_changed:
-        fd = os.open(CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        tmp = f'{CACHE}.{os.getpid()}'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
             f.write(cache.serialize())
+        os.replace(tmp, CACHE)
 
 
 def token():
@@ -42,12 +46,20 @@ def token():
     return r['access_token']
 
 
-def get(path, params=None, headers=None):
+def get(path, params=None, headers=None, all_pages=False):
     h = {'Authorization': f'Bearer {token()}', **(headers or {})}
-    r = requests.get(G + path, params=params, headers=h, timeout=30)
-    if r.status_code >= 400:
-        sys.exit(f'{r.status_code}: {r.text[:300]}')
-    return r.json()
+    url, out = G + path, None
+    while url:
+        r = requests.get(url, params=params, headers=h, timeout=30)
+        if r.status_code >= 400:
+            sys.exit(f'{r.status_code}: {r.text[:300]}')
+        j = r.json()
+        if out is None:
+            out = j
+        else:
+            out['value'] += j.get('value', [])
+        url, params = (j.get('@odata.nextLink'), None) if all_pages else (None, None)
+    return out
 
 
 def login():
@@ -84,9 +96,13 @@ def login_web(port=8400):
             pass
 
     srv = HTTPServer(('127.0.0.1', port), H)
-    srv.timeout = 900
-    while not got:
+    srv.timeout = 30
+    import time
+    deadline = time.time() + 900
+    while not got and time.time() < deadline:
         srv.handle_request()
+    if not got:
+        sys.exit('no sign-in within 15 minutes')
     r = a.acquire_token_by_auth_code_flow(flow, got)
     save(cache)
     print('signed in as', r.get('id_token_claims', {}).get('preferred_username') if 'access_token' in r else r)
@@ -108,7 +124,7 @@ def main(argv):
         ev = get('/me/calendarView', {'startDateTime': start.isoformat(), 'endDateTime': end.isoformat(),
                                        '$orderby': 'start/dateTime', '$top': 100,
                                        '$select': 'subject,start,end,location,organizer,attendees,isOnlineMeeting'},
-                 {'Prefer': 'outlook.timezone="Europe/Berlin"'})
+                 {'Prefer': 'outlook.timezone="Europe/Berlin"'}, all_pages=True)
         for e in ev.get('value', []):
             who = ', '.join(a['emailAddress']['name'] for a in e.get('attendees', [])[:6])
             print(f"{e['start']['dateTime'][:16]}–{e['end']['dateTime'][11:16]}  {e['subject']}  [{who}]")
@@ -118,7 +134,7 @@ def main(argv):
         q = ' '.join(argv[2:])
         p = {'$top': n, '$select': 'id,subject,from,receivedDateTime,bodyPreview'}
         if q:
-            p['$search'] = f'"{q}"'
+            p['$search'] = '"' + q.replace('"', ' ') + '"'
         else:
             p['$orderby'] = 'receivedDateTime desc'
         for m in get('/me/messages', p, {'ConsistencyLevel': 'eventual'} if q else None).get('value', []):
@@ -126,7 +142,10 @@ def main(argv):
             print(f"{m['receivedDateTime'][:16]}  {f}: {m['subject']}\n  id {m['id']}")
         return
     if cmd == 'read':
-        m = get(f'/me/messages/{argv[1]}', {'$select': 'subject,from,toRecipients,receivedDateTime,body'},
+        if len(argv) < 2:
+            sys.exit('usage: read <message id>')
+        from urllib.parse import quote
+        m = get(f'/me/messages/{quote(argv[1], safe="")}', {'$select': 'subject,from,toRecipients,receivedDateTime,body'},
                 {'Prefer': 'outlook.body-content-type="text"'})
         print(m['subject'], '\n', m['receivedDateTime'], (m.get('from') or {}).get('emailAddress'), '\n')
         return print(m['body']['content'])
