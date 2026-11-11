@@ -115,8 +115,10 @@ def main(argv):
     global ME
     if '--box' in argv:
         i = argv.index('--box')
+        if i + 1 >= len(argv):
+            sys.exit('usage: --box <mailbox address>')
         from urllib.parse import quote as q
-        ME = '/users/' + q(argv[i + 1])
+        ME = '/users/' + q(argv[i + 1], safe='@')
         argv = argv[:i] + argv[i + 2:]
     cmd = argv[0] if argv else 'me'
     if cmd == 'login':
