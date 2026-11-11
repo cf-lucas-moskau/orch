@@ -11,6 +11,7 @@ local.md
 projects.md
 workers.json
 overlap.json
+stalled.json
 leads/
 log.md
 decisions/*

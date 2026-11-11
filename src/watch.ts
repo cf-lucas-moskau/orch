@@ -11,6 +11,7 @@ import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
+import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -53,22 +54,26 @@ const names = (): Record<string, { name: string; pane: string }> => {
 
 // Every tail this watcher runs, killed when it exits so no tail outlives it.
 const tails = new Set<ChildProcess>();
-function tailF(file: string) {
-  const t = spawn('tail', ['-n0', '-F', file]);
+// from: the byte offset to start at, so no line written since the file was last read is missed.
+function tailF(file: string, from: number) {
+  const t = spawn('tail', ['-c', `+${from + 1}`, '-F', file]);
   tails.add(t);
   t.on('exit', () => tails.delete(t));
   return t;
 }
 
-function follow(d: string) {
+function follow(d: string, from: number) {
   const file = join(root, 'feed', `${d}.jsonl`);
   if (!existsSync(file)) writeFileSync(file, '', { flag: 'a' });
-  const tail = tailF(file);
+  const tail = tailF(file, from);
+  let pos = from;
   createInterface({ input: tail.stdout }).on('line', line => {
+    pos += Buffer.byteLength(line) + 1;
     let e: FeedEvent; try { e = JSON.parse(line); } catch { return; }
     if (!e.sid || e.sid === self) return;
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
     if (e.event === 'Idea' || e.event === 'Team') return say(e.msg);
+    sayStalls(stepStall(stalls, e));
     if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
     const kind = classify(e);
     if (kind === 'skip' || (kind === 'done' && leadSids().has(e.sid))) return;
@@ -82,17 +87,47 @@ function follow(d: string) {
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.
   let switching = false;
-  const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day()); } }, 60_000);
-  tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => follow(day()), 1000); } });
+  const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day(), 0); } }, 60_000);
+  tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => day() === d ? follow(d, pos) : follow(day(), 0), 1000); } });
 }
 
 // herdr follows the workers that send no hook events (herdrFollowed), one follower per pane. hooked holds every
 // folder a hook event came from, today's and yesterday's feed at start, then each new line.
+// Stalled workers (src/stall.ts) are rebuilt from the same two days of feed on every arm; only the stalls still current
+// after the whole replay are said. stalled.json holds the turns already said, so a re-arm says each stall once; entries
+// older than three days are dropped.
 const hooked = new Set<string>();
-for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
-  let text = '';
-  try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
-  for (const line of text.split('\n')) { try { const e = JSON.parse(line); if (e.cwd && e.event !== 'Idea' && e.event !== 'Team') hooked.add(e.cwd); } catch {} }
+// The feed's tail starts where this read of today's file ended (its last whole line), so nothing falls between them.
+const startDay = day();
+let startBytes = 0;
+const { stalls, current: startStalls } = (() => {
+  const feed: FeedEvent[] = [];
+  for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), startDay]) {
+    let text = '';
+    try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
+    text = text.slice(0, text.lastIndexOf('\n') + 1);
+    if (d === startDay) startBytes = Buffer.byteLength(text);
+    for (const line of text.split('\n')) {
+      try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { if (e.sid !== self) feed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
+    }
+  }
+  return replayStalls(feed, Date.now());
+})();
+// A worker with a known session id matches by it alone; its folder only when it has none (Codex).
+const workerOf = (st: Stall) => json('workers.json', []).find((x: any) => x.status === 'running'
+  && (x.sid ? x.sid === st.sid : !!x.worktree && (st.cwd === x.worktree || st.cwd.startsWith(x.worktree + '/'))));
+function sayStalls(found: Stall[]) {
+  for (const st of found) {
+    const w = workerOf(st);
+    if (!w) continue;
+    const said: Record<string, number> = json('stalled.json', {});
+    if (said[st.key]) continue;
+    const now = Date.now();
+    for (const k of Object.keys(said)) if (now - said[k] > 3 * 864e5) delete said[k];
+    said[st.key] = now;
+    writeFileSync(join(root, 'stalled.json'), JSON.stringify(said, null, 2) + '\n');
+    say(stallLine(w.name, w.pane, st));
+  }
 }
 // Each follower's live herdr processes, by pane, killed when its worker is no longer followed or the watcher exits.
 const followers = new Map<string, Set<ChildProcess>>();
@@ -187,7 +222,9 @@ function startOrchSide() {
   setInterval(() => { try { checkLeads(); } catch (e) { inboxError(e); } }, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
   syncFollowers();
   setInterval(syncFollowers, 30_000);
-  follow(day());
+  sayStalls(startStalls);
+  setInterval(() => sayStalls(tickStalls(stalls, Date.now())), Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
+  follow(startDay, startBytes);
   refresh();
   setInterval(refresh, 10 * 60_000);
   checkOverlap();
