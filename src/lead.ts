@@ -4,7 +4,7 @@
 
 export type Lead = {
   name: string;
-  // Workers on this repo belong to the lead: their DONE, QUESTION, BLOCKED and OVERLAP lines.
+  // Workers on this repo belong to the lead: their DONE, QUESTION, BLOCKED, STALLED and OVERLAP lines.
   repo: string;
   // Watcher line kinds that are the lead's whatever they name.
   kinds: readonly string[];
@@ -28,7 +28,7 @@ export type Beat = { ms: number; sid: string };
 export const leadUp = (beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number) =>
   !!beat && !!rec && rec.status === 'running' && !!rec.sid && beat.sid === rec.sid && now - beat.ms < BEAT_STALE_MS;
 
-const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED']);
+const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED', 'STALLED']);
 
 // Who handles a watcher line: a lead's name, or 'orch'. workerRepo finds a running worker's repo by name.
 export function ownerOf(line: string, workerRepo: (name: string) => string | undefined, leads: Lead[] = Object.values(LEADS)): string {

@@ -11,6 +11,7 @@ import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
+import { stallLine, step as stepStall, tick as tickStalls, type Stall, type Stalls } from './stall.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -69,6 +70,7 @@ function follow(d: string) {
     if (!e.sid || e.sid === self) return;
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
     if (e.event === 'Idea' || e.event === 'Team') return say(e.msg);
+    sayStalls(stepStall(stalls, e));
     if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
     const kind = classify(e);
     if (kind === 'skip' || (kind === 'done' && leadSids().has(e.sid))) return;
@@ -89,10 +91,31 @@ function follow(d: string) {
 // herdr follows the workers that send no hook events (herdrFollowed), one follower per pane. hooked holds every
 // folder a hook event came from, today's and yesterday's feed at start, then each new line.
 const hooked = new Set<string>();
+const startFeed: FeedEvent[] = [];
 for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
   let text = '';
   try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
-  for (const line of text.split('\n')) { try { const e = JSON.parse(line); if (e.cwd && e.event !== 'Idea' && e.event !== 'Team') hooked.add(e.cwd); } catch {} }
+  for (const line of text.split('\n')) {
+    try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { startFeed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
+  }
+}
+
+// Stalled workers (src/stall.ts), rebuilt from the same two days of feed on every arm. stalled.json holds the turns
+// already said, so a re-arm says each stall once; entries older than three days are dropped.
+const stalls: Stalls = new Map();
+function sayStalls(found: Stall[]) {
+  for (const st of found) {
+    const w = json('workers.json', []).find((x: any) => x.status === 'running'
+      && (x.sid === st.sid || (x.worktree && (st.cwd === x.worktree || st.cwd.startsWith(x.worktree + '/')))));
+    if (!w) continue;
+    const said: Record<string, number> = json('stalled.json', {});
+    if (said[st.key]) continue;
+    const now = Date.now();
+    for (const k of Object.keys(said)) if (now - said[k] > 3 * 864e5) delete said[k];
+    said[st.key] = now;
+    writeFileSync(join(root, 'stalled.json'), JSON.stringify(said, null, 2) + '\n');
+    say(stallLine(w.name, w.pane, st));
+  }
 }
 // Each follower's live herdr processes, by pane, killed when its worker is no longer followed or the watcher exits.
 const followers = new Map<string, Set<ChildProcess>>();
@@ -187,6 +210,9 @@ function startOrchSide() {
   setInterval(() => { try { checkLeads(); } catch (e) { inboxError(e); } }, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
   syncFollowers();
   setInterval(syncFollowers, 30_000);
+  for (const e of startFeed) if (e.sid && e.sid !== self) sayStalls(stepStall(stalls, e));
+  sayStalls(tickStalls(stalls, Date.now()));
+  setInterval(() => sayStalls(tickStalls(stalls, Date.now())), Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
   follow(day());
   refresh();
   setInterval(refresh, 10 * 60_000);

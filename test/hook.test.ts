@@ -80,3 +80,13 @@ test('codex permission requests land as blocked-style notifications tagged codex
   assert.equal(a.agent, 'codex');
   assert.equal(b.msg, 'Done. Push it?');
 });
+
+test('a turn that ends on an API error keeps the error, its details and the shown message', () => {
+  const d = fresh();
+  run(d, { session_id: 's9', hook_event_name: 'StopFailure', cwd: '/x', error: 'unknown', error_details: 'socket hang up', last_assistant_message: 'API Error: Connection lost' });
+  run(d, { session_id: 's9', hook_event_name: 'StopFailure', cwd: '/x', error: 'rate_limit' });
+  const [a, b] = lines(d);
+  assert.equal(a.event, 'StopFailure');
+  assert.equal(a.msg, 'API error: unknown | socket hang up | API Error: Connection lost');
+  assert.equal(b.msg, 'API error: rate_limit');
+});
