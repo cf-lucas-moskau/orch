@@ -6,6 +6,7 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   calendar [days]       events from today for N days (default 1)
   mail [n] [query]      newest n messages (default 10), optional $search query
   read <message id>     one message as text
+  --box <address>       any command on a shared mailbox, e.g. --box loesungen@tiki-institut.com (Lösungen)
 The token cache lives in ~/.local/share/orch-m365/cache.json (mode 600) and never leaves this Mac."""
 import json, os, sys, datetime as dt
 import msal, requests
@@ -15,6 +16,7 @@ TENANT = '302b5895-5a1e-4209-a37f-aee8ac9cf8b7'
 SCOPES = ['User.Read', 'Mail.Read', 'Mail.Read.Shared', 'Calendars.Read', 'Calendars.Read.Shared']
 CACHE = os.path.expanduser('~/.local/share/orch-m365/cache.json')
 G = 'https://graph.microsoft.com/v1.0'
+ME = '/me'
 
 
 def app():
@@ -109,6 +111,15 @@ def login_web(port=8400):
 
 
 def main(argv):
+    # --box <address>: a shared mailbox Lucas can open (e.g. loesungen@tiki-institut.com) instead of his own.
+    global ME
+    if '--box' in argv:
+        i = argv.index('--box')
+        if i + 1 >= len(argv):
+            sys.exit('usage: --box <mailbox address>')
+        from urllib.parse import quote as q
+        ME = '/users/' + q(argv[i + 1], safe='@')
+        argv = argv[:i] + argv[i + 2:]
     cmd = argv[0] if argv else 'me'
     if cmd == 'login':
         return login()
@@ -121,7 +132,7 @@ def main(argv):
         days = int(argv[1]) if len(argv) > 1 else 1
         start = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + dt.timedelta(days=days)
-        ev = get('/me/calendarView', {'startDateTime': start.isoformat(), 'endDateTime': end.isoformat(),
+        ev = get(f'{ME}/calendarView', {'startDateTime': start.isoformat(), 'endDateTime': end.isoformat(),
                                        '$orderby': 'start/dateTime', '$top': 100,
                                        '$select': 'subject,start,end,location,organizer,attendees,isOnlineMeeting'},
                  {'Prefer': 'outlook.timezone="Europe/Berlin"'}, all_pages=True)
@@ -137,7 +148,7 @@ def main(argv):
             p['$search'] = '"' + q.replace('"', ' ') + '"'
         else:
             p['$orderby'] = 'receivedDateTime desc'
-        for m in get('/me/messages', p, {'ConsistencyLevel': 'eventual'} if q else None).get('value', []):
+        for m in get(f'{ME}/messages', p, {'ConsistencyLevel': 'eventual'} if q else None).get('value', []):
             f = (m.get('from') or {}).get('emailAddress', {}).get('name', '?')
             print(f"{m['receivedDateTime'][:16]}  {f}: {m['subject']}\n  id {m['id']}")
         return
@@ -145,7 +156,7 @@ def main(argv):
         if len(argv) < 2:
             sys.exit('usage: read <message id>')
         from urllib.parse import quote
-        m = get(f'/me/messages/{quote(argv[1], safe="")}', {'$select': 'subject,from,toRecipients,receivedDateTime,body'},
+        m = get(f'{ME}/messages/{quote(argv[1], safe="")}', {'$select': 'subject,from,toRecipients,receivedDateTime,body'},
                 {'Prefer': 'outlook.body-content-type="text"'})
         print(m['subject'], '\n', m['receivedDateTime'], (m.get('from') or {}).get('emailAddress'), '\n')
         return print(m['body']['content'])
