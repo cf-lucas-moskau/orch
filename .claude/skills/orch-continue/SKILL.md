@@ -14,4 +14,4 @@ continue <repo>:
 4. Dispatch each task in "dispatch next" with the orch-dispatch skill; a `(codex)` or `(both)` tag sets the kind. Tag new risky tasks `(both)` as `policies.md` describes. Anything touching push, merge, deploy, DB or outward actions becomes a decision instead.
 5. Commit nothing; report in three lines: moved, dispatched, waiting on the user.
 
-brief: run `npm run -s board`, then `npm run -s orch -- brief`, and turn its output into a phone-length message: decisions waiting first, then what moved, workers, plans, learned items to review (with the orch-learn skill). Push it once.
+brief: run `npm run -s board`, then `npm run -s orch -- brief`, and `~/.local/share/orch-m365/venv/bin/python scripts/m365.py calendar 1`, and turn its output into a phone-length message: decisions waiting first, then today's meetings (one line each, with what to prepare when the vault or mail has context for it), then what moved, workers, plans, learned items to review (with the orch-learn skill). Push it once.

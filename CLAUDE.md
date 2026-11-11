@@ -22,6 +22,10 @@ Routines are recurring tasks in `routines/`, started by launchd, not by you, so 
 
 After a reboot, `npm run -s orch -- restore` lists the sessions that died with it and the command to resume each; a lead's command is `lead start <name>`. Run them.
 
+## Lucas's mail, calendar and meetings
+
+Any question about a meeting, a person, a customer or "what did X say/write", and every meeting prep: look before answering, never ask Lucas first. Past meetings (transcripts): grep `~/code/audiohh-vault/Meetings`. Mail and calendar (TIKI Microsoft 365, read-only, signed in as Lucas): `~/.local/share/orch-m365/venv/bin/python scripts/m365.py calendar [days] | mail [n] [query] | read <id> | me`. The morning brief lists today's meetings from it. If it says "not signed in", run `scripts/m365.py login-web 8400` and have Lucas run `ssh -N -L 8400:localhost:8400 lucas@spare-mbp` on his work Mac and open the printed link there (device code sign-in is blocked by TIKI's Conditional Access).
+
 ## Answering "what's going on"
 
 Run `npm run -s board` in this directory. It rebuilds `board.md` and `sessions.json` from `herdr api snapshot` and the hook feed, and prints the board. Then answer in plain words, most urgent first:
