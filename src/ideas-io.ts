@@ -597,11 +597,17 @@ export async function idea(args: string[], d: Deps): Promise<string> {
     return `recorded in ${id}'s dossier (round ${roundOf(cur)})`;
   }
   const force = rest.includes('--force');
-  const text = textOf(d.root, rest.filter(a => a !== '--force'));
+  // --media <name>: one file from the idea's own progress folder, checked like a note's media. Lets orch show
+  // images in a thread that is not building (I-50, 2026-11-11: pnin could not see the pink options).
+  const mi = rest.indexOf('--media');
+  const media = mi < 0 ? undefined : rest[mi + 1];
+  const text = textOf(d.root, rest.filter((a, n) => a !== '--force' && (mi < 0 || (n !== mi && n !== mi + 1))));
   if (sub === 'say') {
     if (!text) throw new Error(USAGE);
+    const m = media ? mediaFile(d.root, id, media) : undefined;
+    if (m && 'refused' in m) fail(`media ${media} refused: ${m.refused}`);
     await flushNotes(d.root, chat(), d.log, id, now);
-    await post('say', text);
+    await post('say', text, i => i, m && 'file' in m ? [m.file] : []);
     d.log(`idea ${id} say: ${text.slice(0, 120)}`);
     return `posted in ${id}`;
   }
