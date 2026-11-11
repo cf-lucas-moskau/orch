@@ -37,7 +37,7 @@ export function latestWorkers(ws: Worker[]): Worker[] {
 }
 
 // Same reading as src/triage.ts, kept local so the mod has no imports outside its folder.
-const INTERIM = /still running|\bnow (re-?)?(checking|running|reviewing)\b|waiting on|remaining|reviewers? (is|are) (in|done)|lens (is in|finished)|\bis in\b/i;
+const INTERIM = /\bstill (running|waiting|working)\b|\bnow (re-?)?(checking|running|reviewing)\b|(^|[.!]\s+)waiting (on|for)\b/i;
 const QUESTION = /\?\s*(`{3}\s*)?$|\?\s*\n|\b(should I|want me to|do you want|shall I|which (one|option))\b/i;
 export function classify(e: FeedEvent): 'blocked' | 'question' | 'done' | 'skip' {
   if (e.event === 'Notification') return /waiting for your input/.test(e.msg) ? 'skip' : 'blocked';

@@ -17,7 +17,7 @@ in=$(cat)
   if .hook_event_name == "PermissionRequest" then
     .hook_event_name = "Notification" | .message = "Codex needs your permission: " + (.tool_input.description // .tool_name // "")
   elif .hook_event_name == "StopFailure" then
-    .last_assistant_message = (["API error: " + (.error // "unknown"), (.error_details // empty | tostring), (.last_assistant_message // empty)]
+    .last_assistant_message = (["API error: " + (.error // "unknown" | tostring),(.error_details // empty | tostring), (.last_assistant_message // empty)]
       | map(select(. != "")) | join(" | "))
   else . end | {
     ts: $ts, sid: .session_id, event: .hook_event_name, cwd: .cwd, agent: $agent,

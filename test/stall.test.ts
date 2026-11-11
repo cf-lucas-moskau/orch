@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from '../src/board.ts';
-import { stallLine, step, tick, type Stall, type Stalls } from '../src/stall.ts';
+import { replay, stallLine, step, tick, type Stall, type Stalls } from '../src/stall.ts';
 import { ownerOf } from '../src/lead.ts';
 
 const T0 = Date.parse('2026-11-10T12:00:00Z');
@@ -40,10 +40,36 @@ test('an interim Stop that goes idle stalls with its last words', () => {
     ['i 1: Still waiting on the two reviewers.']);
 });
 
-test('a DONE, a question or a block is an answer, not a stall', () => {
+test('a DONE or a question is an answer, not a stall; a finished summary naming reviewers is a DONE', () => {
   assert.deepEqual(run([ev(0, 'd', 'UserPromptSubmit'), ev(5, 'd', 'Stop', 'All tests green, committed.'), ev(6, 'd', 'Notification', IDLE)], 120), []);
   assert.deepEqual(run([ev(0, 'q', 'UserPromptSubmit'), ev(5, 'q', 'Stop', 'Should I push?'), ev(6, 'q', 'Notification', IDLE)], 120), []);
-  assert.deepEqual(run([ev(0, 'b', 'UserPromptSubmit'), ev(5, 'b', 'Notification', 'Claude needs your permission to use Bash'), ev(6, 'b', 'Notification', IDLE)], 120), []);
+  assert.deepEqual(run([ev(0, 'r', 'UserPromptSubmit'), ev(5, 'r', 'Stop', 'All five reviewers are in; 2 remaining nits fixed. Committed.'), ev(6, 'r', 'Notification', IDLE)], 120), []);
+});
+
+test('a permission block holds the clock but a StopFailure after approval still stalls', () => {
+  const perm = 'Claude needs your permission to use Bash';
+  assert.deepEqual(run([ev(0, 'b', 'UserPromptSubmit'), ev(5, 'b', 'Notification', perm), ev(6, 'b', 'Notification', IDLE)], 120), []);
+  assert.deepEqual(run([ev(0, 'b', 'UserPromptSubmit'), ev(5, 'b', 'Notification', perm), ev(20, 'b', 'StopFailure', 'API error: server_error')]),
+    ['b 1: API error: server_error']);
+});
+
+test('a resume that arrives without a prompt (SendMessage) and stalls again counts as again', () => {
+  assert.deepEqual(run([
+    ev(0, 's', 'UserPromptSubmit'), ev(1, 's', 'StopFailure', 'API error: unknown'),
+    ev(10, 's', 'Stop', 'Picking up: still running the e2e.'), ev(11, 's', 'Notification', IDLE),
+  ], 60), ['s 1: API error: unknown', 's 2: Picking up: still running the e2e.']);
+  assert.deepEqual(run([ev(0, 's', 'UserPromptSubmit'), ev(1, 's', 'StopFailure', 'API error: unknown'), ev(10, 's', 'StopFailure', 'API error: overloaded')]),
+    ['s 1: API error: unknown', 's 2: API error: overloaded']);
+});
+
+test('a replay reports only the stalls still current at its end', () => {
+  const feed = [
+    ev(0, 'r', 'UserPromptSubmit', '', 'go'), ev(2, 'r', 'Notification', IDLE), ev(60, 'r', 'UserPromptSubmit', '', 'resume'), ev(70, 'r', 'Stop', 'Done, committed.'),
+    ev(0, 'x', 'UserPromptSubmit'), ev(1, 'x', 'StopFailure', 'API error: rate_limit'), ev(30, 'x', 'Stop', 'Finished after all, committed.'),
+    ev(0, 'z', 'UserPromptSubmit'), ev(1, 'z', 'StopFailure', 'API error: rate_limit'),
+  ].sort((a, b) => a.ts.localeCompare(b.ts));
+  const { current } = replay(feed, T0 + 120 * 60_000);
+  assert.deepEqual(current.map(s => `${s.sid} ${s.streak}: ${s.text}`), ['z 1: API error: rate_limit']);
 });
 
 test('a session that keeps working is no stall, and a new prompt restarts the clock', () => {
@@ -98,7 +124,7 @@ test('the watcher says each stalled worker once across re-arms, and a second sta
   const stub = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
   writeFileSync(join(stub, 'herdr'), '#!/bin/sh\necho \'{"error":{"code":"stub"}}\'\n', { mode: 0o755 });
   const worker = (name: string, sid: string) => ({ name, repo: 'netto', sid, pane: `${name}:p1`, worktree: join(root, name), status: 'running', branch: `orch/${name}`, task: 't', workspace: 'w', started: '' });
-  writeFileSync(join(root, 'workers.json'), JSON.stringify([worker('netto-proto', 'net00001'), worker('api-hit', 'api00001'), worker('finished', 'fin00001')]));
+  writeFileSync(join(root, 'workers.json'), JSON.stringify([worker('netto-proto', 'net00001'), worker('api-hit', 'api00001'), worker('finished', 'fin00001'), worker('recovered', 'rec00001')]));
   const feed = join(root, 'feed', `${new Date().toLocaleDateString('sv-SE')}.jsonl`);
   const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
   const add = (ts: string, sid: string, cwd: string, event: string, msg = '', prompt = '') =>
@@ -112,6 +138,14 @@ test('the watcher says each stalled worker once across re-arms, and a second sta
   add(ago(39), 'fin00001', 'finished', 'Notification', IDLE);
   add(ago(30), 'someone1', 'not-a-worker', 'UserPromptSubmit', '', 'hi');
   add(ago(29), 'someone1', 'not-a-worker', 'StopFailure', 'API error: rate_limit');
+  // Another session in a worker's worktree: the worker has a session id, so the folder does not make it the worker.
+  add(ago(30), 'helper01', 'finished', 'UserPromptSubmit', '', 'hi');
+  add(ago(29), 'helper01', 'finished', 'StopFailure', 'API error: rate_limit');
+  // Stalled (idle at -100) and recovered later in the same replay: nothing to say.
+  add(ago(102), 'rec00001', 'recovered', 'UserPromptSubmit', '', 'go');
+  add(ago(100), 'rec00001', 'recovered', 'Notification', IDLE);
+  add(ago(20), 'rec00001', 'recovered', 'UserPromptSubmit', '', 'resume');
+  add(ago(10), 'rec00001', 'recovered', 'Stop', 'Done, committed.');
 
   const first = watcher(root, stub);
   await first.until(ls => stalled(ls).length >= 2);

@@ -11,7 +11,7 @@ import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
-import { stallLine, step as stepStall, tick as tickStalls, type Stall, type Stalls } from './stall.ts';
+import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -90,23 +90,27 @@ function follow(d: string) {
 
 // herdr follows the workers that send no hook events (herdrFollowed), one follower per pane. hooked holds every
 // folder a hook event came from, today's and yesterday's feed at start, then each new line.
+// Stalled workers (src/stall.ts) are rebuilt from the same two days of feed on every arm; only the stalls still current
+// after the whole replay are said. stalled.json holds the turns already said, so a re-arm says each stall once; entries
+// older than three days are dropped.
 const hooked = new Set<string>();
-const startFeed: FeedEvent[] = [];
-for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
-  let text = '';
-  try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
-  for (const line of text.split('\n')) {
-    try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { startFeed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
+const { stalls, current: startStalls } = (() => {
+  const feed: FeedEvent[] = [];
+  for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
+    let text = '';
+    try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
+    for (const line of text.split('\n')) {
+      try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { if (e.sid !== self) feed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
+    }
   }
-}
-
-// Stalled workers (src/stall.ts), rebuilt from the same two days of feed on every arm. stalled.json holds the turns
-// already said, so a re-arm says each stall once; entries older than three days are dropped.
-const stalls: Stalls = new Map();
+  return replayStalls(feed, Date.now());
+})();
+// A worker with a known session id matches by it alone; its folder only when it has none (Codex).
+const workerOf = (st: Stall) => json('workers.json', []).find((x: any) => x.status === 'running'
+  && (x.sid ? x.sid === st.sid : !!x.worktree && (st.cwd === x.worktree || st.cwd.startsWith(x.worktree + '/'))));
 function sayStalls(found: Stall[]) {
   for (const st of found) {
-    const w = json('workers.json', []).find((x: any) => x.status === 'running'
-      && (x.sid === st.sid || (x.worktree && (st.cwd === x.worktree || st.cwd.startsWith(x.worktree + '/')))));
+    const w = workerOf(st);
     if (!w) continue;
     const said: Record<string, number> = json('stalled.json', {});
     if (said[st.key]) continue;
@@ -210,8 +214,7 @@ function startOrchSide() {
   setInterval(() => { try { checkLeads(); } catch (e) { inboxError(e); } }, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
   syncFollowers();
   setInterval(syncFollowers, 30_000);
-  for (const e of startFeed) if (e.sid && e.sid !== self) sayStalls(stepStall(stalls, e));
-  sayStalls(tickStalls(stalls, Date.now()));
+  sayStalls(startStalls);
   setInterval(() => sayStalls(tickStalls(stalls, Date.now())), Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
   follow(day());
   refresh();

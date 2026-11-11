@@ -89,4 +89,6 @@ test('a turn that ends on an API error keeps the error, its details and the show
   assert.equal(a.event, 'StopFailure');
   assert.equal(a.msg, 'API error: unknown | socket hang up | API Error: Connection lost');
   assert.equal(b.msg, 'API error: rate_limit');
+  run(d, { session_id: 's9', hook_event_name: 'StopFailure', cwd: '/x', error: 529 });
+  assert.equal(lines(d)[2].msg, 'API error: 529', 'an error that is no string still lands');
 });

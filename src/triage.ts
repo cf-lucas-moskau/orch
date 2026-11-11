@@ -4,7 +4,8 @@ import type { FeedEvent } from './board.ts';
 // done is FYI unless orch finds a question on the pane, skip is noise.
 export type Kind = 'blocked' | 'question' | 'done' | 'skip';
 
-const INTERIM = /still running|\bnow (re-?)?(checking|running|reviewing)\b|waiting on|remaining|reviewers? (is|are) (in|done)|lens (is in|finished)|\bis in\b/i;
+// Only clear progress wording: a finished summary that mentions remaining nits or reviewers being in is done.
+const INTERIM = /\bstill (running|waiting|working)\b|\bnow (re-?)?(checking|running|reviewing)\b|(^|[.!]\s+)waiting (on|for)\b/i;
 const QUESTION = /\?\s*(`{3}\s*)?$|\?\s*\n|\b(should I|want me to|do you want|shall I|which (one|option))\b/i;
 
 export function classify(e: FeedEvent): Kind {
