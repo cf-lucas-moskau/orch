@@ -1,21 +1,20 @@
 import type { FeedEvent } from './board.ts';
-import { classify } from './triage.ts';
 
-// Stalled turns: a session's turn that ended on an API error (the StopFailure hook) or that has sat idle for IDLE_MS
-// since its last prompt without a DONE or QUESTION line. Built by replaying the feed in order, so a watcher re-armed
-// every 30 minutes finds the same stalls again; the caller remembers which ones it already said.
+// Stalled turns: a session's turn that ended on an API error (the StopFailure hook), or a prompt whose turn went idle
+// (Claude's idle ping) without any Stop and stayed so IDLE_MS. Any Stop ends a turn: what it says is triage's call.
+// Built by replaying the feed in order, so a watcher re-armed every 30 minutes finds the same stalls again; the
+// caller remembers which ones it already said.
 export const IDLE_MS = 30 * 60_000;
 
-// open: working or idle; answered: ended on DONE or QUESTION; stalled: s.stall says why.
-// blocked: on a permission prompt, so idle is no stall; any later turn event clears it.
-type Turn = { since: string; cwd: string; prompt: string; last: string; idleAt?: number; blocked: boolean; state: 'open' | 'answered' | 'stalled' };
-// streak: stalls since the session last answered. orch resumes on the first only.
+// blocked: on a permission prompt, so idle is no stall; a StopFailure after approval still is.
+type Turn = { since: string; cwd: string; prompt: string; idleAt?: number; blocked: boolean; state: 'open' | 'ended' | 'stalled' };
+// streak: stalls since the session's last Stop. orch resumes on the first only.
 type Session = { turn?: Turn; streak: number; stall?: Stall };
 export type Stall = { sid: string; cwd: string; key: string; text: string; streak: number };
 export type Stalls = Map<string, Session>;
 
 const line = (s: string) => s.replace(/\s+/g, ' ').trim();
-const open = (e: FeedEvent, prompt: string): Turn => ({ since: e.ts, cwd: e.cwd, prompt, last: '', blocked: false, state: 'open' });
+const open = (e: FeedEvent, prompt: string): Turn => ({ since: e.ts, cwd: e.cwd, prompt, blocked: false, state: 'open' });
 
 function stall(sid: string, s: Session, text: string): Stall {
   const t = s.turn!;
@@ -31,21 +30,14 @@ export function step(m: Stalls, e: FeedEvent): Stall[] {
   if (!e.sid) return out;
   const s = m.get(e.sid) ?? { streak: 0 };
   m.set(e.sid, s);
-  if (e.event === 'UserPromptSubmit') { s.turn = open(e, e.prompt ?? ''); return out; }
-  if (e.event === 'SessionEnd') { s.turn = undefined; return out; }
-  // A turn can start without a prompt (a background completion, a SendMessage): a Stop or StopFailure after the
-  // last turn ended opens a new one, so a resumed worker that stalls again counts as again.
-  if ((e.event === 'Stop' || e.event === 'StopFailure') && s.turn?.state !== 'open') s.turn = open(e, '');
   const t = s.turn;
-  if (!t || t.state !== 'open') return out;
-  if (e.event === 'StopFailure') out.push(stall(e.sid, s, e.msg || 'API error'));
-  else if (e.event === 'Stop') {
-    t.blocked = false;
-    t.idleAt = undefined;
-    if (classify(e) === 'skip') t.last = e.tail || e.msg;
-    else { t.state = 'answered'; s.streak = 0; }
-  } else if (e.event === 'Notification') {
-    if (classify(e) === 'blocked') t.blocked = true;
+  if (e.event === 'UserPromptSubmit') s.turn = open(e, e.prompt ?? '');
+  else if (e.event === 'SessionEnd') s.turn = undefined;
+  else if (e.event === 'Stop') { if (t) t.state = 'ended'; s.streak = 0; }
+  // A turn can start without a prompt (a SendMessage resume): a StopFailure after the last turn ended is a new stall.
+  else if (e.event === 'StopFailure') { if (t?.state !== 'open') s.turn = open(e, ''); out.push(stall(e.sid, s, e.msg || 'API error')); }
+  else if (e.event === 'Notification' && t?.state === 'open') {
+    if (!/waiting for your input/.test(e.msg)) t.blocked = true;
     else if (!t.blocked) t.idleAt ??= Date.parse(e.ts);
   }
   return out;
@@ -57,13 +49,13 @@ export function tick(m: Stalls, now: number): Stall[] {
   for (const [sid, s] of m) {
     const t = s.turn;
     if (t?.state === 'open' && !t.blocked && t.idleAt !== undefined && now - t.idleAt >= IDLE_MS)
-      out.push(stall(sid, s, t.last ? t.last : `idle 30 min, no reply to: ${line(t.prompt).slice(0, 150)}`));
+      out.push(stall(sid, s, `idle 30 min, no reply to: ${line(t.prompt).slice(0, 150)}`));
   }
   return out;
 }
 
 // The stalls still current after a replay: sessions whose latest turn is stalled. Earlier stalls the feed shows were
-// recovered from (a later prompt or answer) are not.
+// recovered from (a later prompt or Stop) are not.
 export function replay(feed: FeedEvent[], now: number): { stalls: Stalls; current: Stall[] } {
   const m: Stalls = new Map();
   for (const e of feed) step(m, e);

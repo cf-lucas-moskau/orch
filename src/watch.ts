@@ -54,18 +54,21 @@ const names = (): Record<string, { name: string; pane: string }> => {
 
 // Every tail this watcher runs, killed when it exits so no tail outlives it.
 const tails = new Set<ChildProcess>();
-function tailF(file: string) {
-  const t = spawn('tail', ['-n0', '-F', file]);
+// from: the byte offset to start at, so no line written since the file was last read is missed.
+function tailF(file: string, from: number) {
+  const t = spawn('tail', ['-c', `+${from + 1}`, '-F', file]);
   tails.add(t);
   t.on('exit', () => tails.delete(t));
   return t;
 }
 
-function follow(d: string) {
+function follow(d: string, from: number) {
   const file = join(root, 'feed', `${d}.jsonl`);
   if (!existsSync(file)) writeFileSync(file, '', { flag: 'a' });
-  const tail = tailF(file);
+  const tail = tailF(file, from);
+  let pos = from;
   createInterface({ input: tail.stdout }).on('line', line => {
+    pos += Buffer.byteLength(line) + 1;
     let e: FeedEvent; try { e = JSON.parse(line); } catch { return; }
     if (!e.sid || e.sid === self) return;
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
@@ -84,8 +87,8 @@ function follow(d: string) {
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.
   let switching = false;
-  const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day()); } }, 60_000);
-  tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => follow(day()), 1000); } });
+  const t = setInterval(() => { if (day() !== d) { switching = true; clearInterval(t); tail.kill(); follow(day(), 0); } }, 60_000);
+  tail.on('exit', () => { if (!switching) { clearInterval(t); setTimeout(() => day() === d ? follow(d, pos) : follow(day(), 0), 1000); } });
 }
 
 // herdr follows the workers that send no hook events (herdrFollowed), one follower per pane. hooked holds every
@@ -94,11 +97,16 @@ function follow(d: string) {
 // after the whole replay are said. stalled.json holds the turns already said, so a re-arm says each stall once; entries
 // older than three days are dropped.
 const hooked = new Set<string>();
+// The feed's tail starts where this read of today's file ended (its last whole line), so nothing falls between them.
+const startDay = day();
+let startBytes = 0;
 const { stalls, current: startStalls } = (() => {
   const feed: FeedEvent[] = [];
-  for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), day()]) {
+  for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), startDay]) {
     let text = '';
     try { text = readFileSync(join(root, 'feed', `${d}.jsonl`), 'utf8'); } catch {}
+    text = text.slice(0, text.lastIndexOf('\n') + 1);
+    if (d === startDay) startBytes = Buffer.byteLength(text);
     for (const line of text.split('\n')) {
       try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { if (e.sid !== self) feed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
     }
@@ -216,7 +224,7 @@ function startOrchSide() {
   setInterval(syncFollowers, 30_000);
   sayStalls(startStalls);
   setInterval(() => sayStalls(tickStalls(stalls, Date.now())), Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
-  follow(day());
+  follow(startDay, startBytes);
   refresh();
   setInterval(refresh, 10 * 60_000);
   checkOverlap();

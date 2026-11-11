@@ -35,15 +35,9 @@ test('the netto-proto case: a steer, an idle ping and no Stop stalls 30 minutes 
   assert.equal(long, `n 1: idle 30 min, no reply to: ${'x'.repeat(150)}`, 'a long prompt keeps the reason');
 });
 
-test('an interim Stop that goes idle stalls with its last words', () => {
-  assert.deepEqual(run([ev(0, 'i', 'UserPromptSubmit'), ev(5, 'i', 'Stop', 'Still waiting on the two reviewers.'), ev(6, 'i', 'Notification', IDLE)], 40),
-    ['i 1: Still waiting on the two reviewers.']);
-});
-
-test('a DONE or a question is an answer, not a stall; a finished summary naming reviewers is a DONE', () => {
-  assert.deepEqual(run([ev(0, 'd', 'UserPromptSubmit'), ev(5, 'd', 'Stop', 'All tests green, committed.'), ev(6, 'd', 'Notification', IDLE)], 120), []);
-  assert.deepEqual(run([ev(0, 'q', 'UserPromptSubmit'), ev(5, 'q', 'Stop', 'Should I push?'), ev(6, 'q', 'Notification', IDLE)], 120), []);
-  assert.deepEqual(run([ev(0, 'r', 'UserPromptSubmit'), ev(5, 'r', 'Stop', 'All five reviewers are in; 2 remaining nits fixed. Committed.'), ev(6, 'r', 'Notification', IDLE)], 120), []);
+test('any Stop ends the turn, whatever it says: no stall', () => {
+  for (const said of ['All tests green, committed.', 'Should I push?', 'Still waiting on the two reviewers.'])
+    assert.deepEqual(run([ev(0, 'd', 'UserPromptSubmit'), ev(5, 'd', 'Stop', said), ev(6, 'd', 'Notification', IDLE)], 120), [], said);
 });
 
 test('a permission block holds the clock but a StopFailure after approval still stalls', () => {
@@ -54,10 +48,6 @@ test('a permission block holds the clock but a StopFailure after approval still 
 });
 
 test('a resume that arrives without a prompt (SendMessage) and stalls again counts as again', () => {
-  assert.deepEqual(run([
-    ev(0, 's', 'UserPromptSubmit'), ev(1, 's', 'StopFailure', 'API error: unknown'),
-    ev(10, 's', 'Stop', 'Picking up: still running the e2e.'), ev(11, 's', 'Notification', IDLE),
-  ], 60), ['s 1: API error: unknown', 's 2: Picking up: still running the e2e.']);
   assert.deepEqual(run([ev(0, 's', 'UserPromptSubmit'), ev(1, 's', 'StopFailure', 'API error: unknown'), ev(10, 's', 'StopFailure', 'API error: overloaded')]),
     ['s 1: API error: unknown', 's 2: API error: overloaded']);
 });
@@ -76,10 +66,10 @@ test('a session that keeps working is no stall, and a new prompt restarts the cl
   assert.deepEqual(run([ev(0, 'w', 'UserPromptSubmit')], 120), [], 'never went idle');
   assert.deepEqual(run([ev(0, 'w', 'UserPromptSubmit'), ev(2, 'w', 'Notification', IDLE), ev(20, 'w', 'UserPromptSubmit'), ev(22, 'w', 'Notification', IDLE)], 40), []);
   assert.deepEqual(run([ev(0, 'w', 'UserPromptSubmit'), ev(2, 'w', 'Notification', IDLE), ev(10, 'w', 'Stop', 'Now running the e2e.')], 60), [],
-    'a Stop after the idle ping means it was working again');
+    'a Stop after the idle ping ends the turn');
 });
 
-test('each stall is reported once; a stall right after a resume counts up, an answer resets the count', () => {
+test('each stall is reported once; a stall right after a resume counts up, a Stop resets the count', () => {
   const feed = [
     ev(0, 'a', 'UserPromptSubmit'), ev(1, 'a', 'StopFailure', 'API error: rate_limit'), ev(40, 'a', 'Notification', IDLE),
     ev(50, 'a', 'UserPromptSubmit', '', 'resume'), ev(51, 'a', 'Notification', IDLE),
@@ -169,4 +159,12 @@ test('the watcher says each stalled worker once across re-arms, and a second sta
   await second.until(ls => stalled(ls).length >= 1);
   assert.deepEqual(stalled(second.lines), ['STALLED worker api-hit [api-hit:p1] api00001 (again, 2 in a row): API error: overloaded']);
   await kill(second.p);
+
+  // A line written while the watcher starts lands in its replay or its tail, never in neither or both.
+  const third = watcher(root, stub);
+  add(new Date().toISOString(), 'net00001', 'netto-proto', 'StopFailure', 'API error: server_error');
+  await third.until(ls => stalled(ls).length >= 1);
+  await new Promise(r => setTimeout(r, 1500));
+  assert.deepEqual(stalled(third.lines), ['STALLED worker netto-proto [netto-proto:p1] net00001 (again, 2 in a row): API error: server_error']);
+  await kill(third.p);
 });

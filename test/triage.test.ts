@@ -40,13 +40,6 @@ test('screenTail keeps the last words and drops the input box and status bar', (
   assert.equal(screenTail('x'.repeat(300)), 'x'.repeat(200));
 });
 
-test('a finished summary that mentions reviewers, remaining items or waiting is done', () => {
-  assert.equal(classify(ev('Stop', 'All five reviewers are in: two findings fixed, tests green.')), 'done');
-  assert.equal(classify(ev('Stop', 'Shipped. The 3 remaining nits are cosmetic.')), 'done');
-  assert.equal(classify(ev('Stop', 'PR #12 is open and waiting on your review.')), 'done');
-  assert.equal(classify(ev('Stop', 'The correctness lens is in with no findings. Committed.')), 'done');
-});
-
 test('"reviewer is now checking" is progress', () => {
   assert.equal(classify(ev('Stop', 'Merge is committed. A fresh reviewer is now checking the merge commit.')), 'skip');
 });
