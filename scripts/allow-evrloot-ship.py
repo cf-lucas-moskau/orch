@@ -13,6 +13,9 @@ rules = [
     "Evrloot merges: orch may run `npm run -s orch -- merge evrloot-next <n>` for PRs in cf-lucas-moskau/evrloot-next that "
     "passed orch's gates and Claude+Codex review, including PRs orch's own workers pushed. Lucas's standing approval, "
     "not self-approval.",
+    "orch merges: orch may run `npm run -s orch -- merge orch <n>` for PRs in cf-lucas-moskau/orch that passed orch's "
+    "gates (npm test) and Claude+Codex review, including PRs orch or its workers pushed, and then run `npm run setup` in "
+    "~/orch to install the hooks they add. Lucas's standing approval (2026-11-11: \"Add orch\"), not self-approval.",
 ]
 added = [r for r in rules if r not in allow]
 allow.extend(added)
