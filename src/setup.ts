@@ -77,7 +77,7 @@ function installHooks(file: string, events: string[], command: string, label: st
   say(`  + ${label} feed hook on ${missing.join(', ')}${existed ? ` (backup: ${file}.bak-orch)` : ''}`);
 }
 say('\nHooks');
-installHooks(join(home, '.claude', 'settings.json'), ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'SessionEnd'],
+installHooks(join(home, '.claude', 'settings.json'), ['SessionStart', 'UserPromptSubmit', 'Notification', 'Stop', 'StopFailure', 'SessionEnd'],
   `ORCH_DIR=${q(root)} bash ${q(hook)}; exit 0`, 'Claude');
 if (has('codex')) installHooks(join(home, '.codex', 'hooks.json'), ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Stop', 'SessionEnd'],
   `ORCH_DIR=${q(root)} ORCH_AGENT=codex /bin/bash ${q(hook)}`, 'Codex');
