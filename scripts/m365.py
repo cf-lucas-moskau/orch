@@ -4,7 +4,7 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   login                 device code sign-in (prints the code; waits until Lucas signs in)
   me                    who is signed in
   calendar [days]       events from today for N days (default 1)
-  calendar [days] --since <d>  events from date d (past included) until today + N days
+  calendar [days] --since <d>  events from date d (past included) until N days after today, or after d if d is later
   mail [n] [query]      newest n messages (default 10), optional $search query
   mail [n] --since <d>  messages received since date d (YYYY-MM-DD or ISO time), all of them unless n is given
   read <message id>     one message with its full body as text
@@ -72,6 +72,7 @@ class GraphError(Exception):
 def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCOPES, until=None):
     # Follows @odata.nextLink while all_pages is set, until limit items are collected
     # or until(item) holds for a page's last item (lists ordered newest first stop at a cutoff).
+    # With a limit, out['truncated'] says whether items before the cutoff were left unread.
     h = {'Authorization': f'Bearer {token(scopes)}', **(headers or {})}
     url, out = (path if path.startswith('https://') else G + path), None
     while url:
@@ -84,12 +85,20 @@ def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCO
             out = j
         else:
             out['value'] += page
-        done = (not all_pages or (limit is not None and len(out.get('value', [])) >= limit)
-                or bool(until and page and until(page[-1])))
+        full = limit is not None and len(out.get('value', [])) >= limit
+        cut = bool(until and page and until(page[-1]))
+        done = not all_pages or full or cut
         url, params = (None if done else j.get('@odata.nextLink')), None
     if limit is not None and 'value' in out:
+        dropped = out['value'][limit:]
         out['value'] = out['value'][:limit]
+        out['truncated'] = bool(full and ((j.get('@odata.nextLink') and not cut)
+                                          or (dropped and not (until and until(dropped[0])))))
     return out
+
+
+def now():
+    return dt.datetime.now().astimezone()
 
 
 def ts(s):
@@ -309,8 +318,9 @@ def command(argv):
         return print(m.get('displayName'), m.get('userPrincipalName'))
     if cmd == 'calendar':
         days = int(argv[1]) if len(argv) > 1 else 1
-        today = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        start, end = since or today, today + dt.timedelta(days=days)
+        today = now().replace(hour=0, minute=0, second=0, microsecond=0)
+        start = since or today
+        end = max(today, start) + dt.timedelta(days=days)
         ev = get(f'{ME}/calendarView', {'startDateTime': start.isoformat(), 'endDateTime': end.isoformat(),
                                        '$orderby': 'start/dateTime', '$top': 100,
                                        '$select': 'id,subject,start,end,location,organizer,attendees,isOnlineMeeting,'
@@ -368,20 +378,22 @@ def command(argv):
         out = []
         for c in (c for c in cs if fresh(chat_time(c))):
             # Graph has no createdDateTime gt filter on chat messages: page newest first and cut locally.
+            truncated = {'members': False, 'messages': False}
             try:
                 if len(c.get('members', [])) >= 25:  # $expand=members stops at 25
-                    c['members'] = get(f"/chats/{c['id']}/members", all_pages=True, limit=CHAT_MEMBERS_CAP,
-                                       scopes=CHAT)['value']
-                msgs = get(f"/chats/{c['id']}/messages", {'$top': 50, '$orderby': 'createdDateTime desc'},
-                           all_pages=bool(since), limit=CHAT_MESSAGES_CAP, scopes=CHAT,
-                           until=since and (lambda m: not fresh(m.get('createdDateTime')))).get('value', [])
+                    ms = get(f"/chats/{c['id']}/members", all_pages=True, limit=CHAT_MEMBERS_CAP, scopes=CHAT)
+                    c['members'], truncated['members'] = ms['value'], ms['truncated']
+                ms = get(f"/chats/{c['id']}/messages", {'$top': 50, '$orderby': 'createdDateTime desc'},
+                         all_pages=bool(since), limit=CHAT_MESSAGES_CAP, scopes=CHAT,
+                         until=since and (lambda m: not fresh(m.get('createdDateTime'))))
+                msgs, truncated['messages'] = ms.get('value', []), ms.get('truncated', False)
             except GraphError as e:
                 print(f"skipped chat {c['id']}: {e}", file=sys.stderr)
                 continue
-            for what, got, cap in (('members', c.get('members', []), CHAT_MEMBERS_CAP), ('messages', msgs, CHAT_MESSAGES_CAP)):
-                if len(got) >= cap:
+            for what, cap in (('members', CHAT_MEMBERS_CAP), ('messages', CHAT_MESSAGES_CAP)):
+                if truncated[what]:
                     print(f"chat {c['id']}: stopped at {cap} {what}", file=sys.stderr)
-            out.append(chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]))
+            out.append({**chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]), 'truncated': truncated})
         if as_json:
             return dump(out)
         for c in out:

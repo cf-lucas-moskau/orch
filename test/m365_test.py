@@ -90,6 +90,8 @@ class M365(unittest.TestCase):
         fake.routes, fake.calls = {}, []
         fake.granted = set(Fake.granted)
         fake.accounts = Fake.accounts
+        berlin = m365.ZoneInfo('Europe/Berlin')
+        m365.now = lambda: m365.dt.datetime(2026, 11, 12, 15, 30, tzinfo=berlin)
 
     def test_calendar_text_is_unchanged_and_pages(self):
         fake.routes = {G + '/me/calendarView': (200, 'calendar.json'),
@@ -120,9 +122,8 @@ class M365(unittest.TestCase):
                        G + '/me/calendarView?$skip=1': (200, 'calendar-2.json')}
         got = json.loads(run('calendar', '7', '--since', '2025-12-01', '--json'))
         url, params, headers = fake.calls[0]
-        today = m365.dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         self.assertEqual((params['startDateTime'], params['endDateTime']),
-                         ('2025-11-30T23:00:00+00:00', (today + m365.dt.timedelta(days=7)).isoformat()))
+                         ('2025-11-30T23:00:00+00:00', '2026-11-19T00:00:00+01:00'))
         self.assertEqual(headers['Prefer'], 'outlook.timezone="Europe/Berlin"')
         self.assertEqual([c[1] for c in fake.calls[1:]], [{}, {}], 'nextLinks carry their own query')
         self.assertEqual([e['id'] for e in got], ['AAMkPAST1', 'AAMkEV1', 'AAMkEV2'])
@@ -131,6 +132,12 @@ class M365(unittest.TestCase):
             'organizer': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'},
             'attendees': [{'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'type': 'required',
                            'response': 'accepted'}]})
+
+    def test_calendar_since_after_today_ends_days_after_since(self):
+        fake.routes = {G + '/me/calendarView': (200, {'value': []})}
+        run('calendar', '2', '--since', '2026-12-24')
+        self.assertEqual((fake.calls[0][1]['startDateTime'], fake.calls[0][1]['endDateTime']),
+                         ('2026-12-23T23:00:00+00:00', '2026-12-25T23:00:00+00:00'))
 
     def test_calendar_since_text(self):
         fake.routes = {G + '/me/calendarView': (200, 'calendar-past.json'),
@@ -248,14 +255,16 @@ class M365(unittest.TestCase):
                  'from': {'name': 'Erika Muster', 'email': 'erika.muster@netto.example'},
                  'text': 'Passt der Termin am Freitag?\nGrüße'},
                 {'id': '1731319000000', 'created': '2026-11-11T09:55:00.000Z',
-                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example'}, 'text': 'Hi Erika'}]})
+                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example'}, 'text': 'Hi Erika'}],
+            'truncated': {'members': False, 'messages': False}})
         self.assertEqual(got[1], {
             'id': '19:revived@thread.v2', 'topic': 'Zollner Rahmenvertrag', 'type': 'group',
             'updated': '2026-11-05T12:00:00.000Z',
             'link': 'https://teams.microsoft.com/l/chat/19%3Arevived%40thread.v2/0',
             'members': [{'name': 'Hans Zoll', 'email': 'hans@zollner.example', 'userId': 'u-hans'}],
             'messages': [{'id': '1730800000000', 'created': '2026-11-05T12:00:00.000Z',
-                          'from': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'}, 'text': 'Neue Version anbei'}]})
+                          'from': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'}, 'text': 'Neue Version anbei'}],
+            'truncated': {'members': False, 'messages': False}})
         self.assertEqual(len(got), 2, '19:old was renamed recently but has no message since the cutoff')
 
     def test_chats_page_on_while_every_chat_is_newer(self):
@@ -336,7 +345,7 @@ class M365(unittest.TestCase):
         fake.routes[G + '/chats/19:revived@thread.v2/members'] = (
             200, {'value': [member(i) for i in range(25)], '@odata.nextLink': G + '/chats/19:revived@thread.v2/members?p=2'})
         caps = m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP
-        m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP = 20, 2
+        m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP = 20, 1
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err):
@@ -348,7 +357,11 @@ class M365(unittest.TestCase):
         self.assertNotIn(G + '/chats/19:revived@thread.v2/members?p=2', urls)
         self.assertEqual([[m['id'] for m in c['messages']] for c in got], [['1731319200000'], ['1730800000000'], []])
         self.assertEqual(len(got[1]['members']), 20)
-        self.assertEqual(err.getvalue(), 'chat 19:abc@thread.v2: stopped at 2 messages\n'
+        self.assertEqual([c['truncated'] for c in got], [
+            {'members': False, 'messages': True},
+            {'members': True, 'messages': False},
+            {'members': False, 'messages': False}], 'revived has exactly 1 message and no nextLink: not truncated')
+        self.assertEqual(err.getvalue(), 'chat 19:abc@thread.v2: stopped at 1 messages\n'
                                          'chat 19:revived@thread.v2: stopped at 20 members\n')
 
     def test_graph_error_exits_with_status(self):
