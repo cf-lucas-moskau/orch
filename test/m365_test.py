@@ -21,7 +21,7 @@ class Resp:
 
 
 class Fake:
-    """Graph and msal stand-ins: routes maps a URL to (status, fixture name); calls records every request."""
+    """Graph and msal stand-ins: routes maps a URL to (status, fixture name or body); calls records every request."""
     granted = {'User.Read', 'Mail.Read', 'Mail.Read.Shared', 'Calendars.Read', 'Calendars.Read.Shared'}
     accounts = [{'username': 'lucas@tiki.example'}]
 
@@ -30,8 +30,8 @@ class Fake:
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append((url, dict(params or {}), dict(headers or {})))
-        status, name = self.routes[url]
-        return Resp(status, fixture(name) if name else {'error': {'code': 'Forbidden'}})
+        status, body = self.routes[url]
+        return Resp(status, fixture(body) if isinstance(body, str) else body or {'error': {'code': 'Forbidden'}})
 
 
 fake = Fake()
@@ -200,14 +200,22 @@ class M365(unittest.TestCase):
             run('chats')
         self.assertEqual(e.exception.code, 'not signed in: run login')
 
-    def test_chats_json_since(self):
+    def chat_routes(self):
         fake.granted.add('Chat.Read')
         fake.routes = {G + '/me/chats': (200, 'chats.json'),
-                       G + '/chats/19:abc@thread.v2/messages': (200, 'chat-messages.json')}
+                       G + '/chats/19:abc@thread.v2/messages': (200, 'chat-messages.json'),
+                       G + '/chats/19:revived@thread.v2/messages': (200, 'chat-messages-revived.json')}
+
+    def test_chats_json_since_cuts_on_message_activity(self):
+        self.chat_routes()
         got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
-        self.assertEqual([u for u, _, _ in fake.calls], [G + '/me/chats', G + '/chats/19:abc@thread.v2/messages'])
-        self.assertEqual(fake.calls[1][1]['$filter'], 'createdDateTime gt 2026-10-31T23:00:00Z')
-        self.assertEqual(got, [{
+        self.assertEqual([u for u, _, _ in fake.calls], [
+            G + '/me/chats', G + '/chats/19:abc@thread.v2/messages', G + '/chats/19:revived@thread.v2/messages'],
+            'no second page of chats or messages: both stop at the first item older than --since')
+        self.assertEqual(fake.calls[0][1]['$expand'], 'members,lastMessagePreview')
+        self.assertEqual(fake.calls[0][1]['$orderby'], 'lastMessagePreview/createdDateTime desc')
+        self.assertEqual(fake.calls[1][1], {'$top': 50, '$orderby': 'createdDateTime desc'})
+        self.assertEqual(got[0], {
             'id': '19:abc@thread.v2', 'topic': None, 'type': 'oneOnOne', 'updated': '2026-11-11T10:00:00.000Z',
             'link': 'https://teams.microsoft.com/l/chat/19%3Aabc%40thread.v2/0',
             'members': [{'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'userId': 'u-lucas'},
@@ -217,16 +225,80 @@ class M365(unittest.TestCase):
                  'from': {'name': 'Erika Muster', 'email': 'erika.muster@netto.example'},
                  'text': 'Passt der Termin am Freitag?\nGrüße'},
                 {'id': '1731319000000', 'created': '2026-11-11T09:55:00.000Z',
-                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example'}, 'text': 'Hi Erika'}]}])
+                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example'}, 'text': 'Hi Erika'}]})
+        self.assertEqual(got[1], {
+            'id': '19:revived@thread.v2', 'topic': 'Zollner Rahmenvertrag', 'type': 'group',
+            'updated': '2026-11-05T12:00:00.000Z',
+            'link': 'https://teams.microsoft.com/l/chat/19%3Arevived%40thread.v2/0',
+            'members': [{'name': 'Hans Zoll', 'email': 'hans@zollner.example', 'userId': 'u-hans'}],
+            'messages': [{'id': '1730800000000', 'created': '2026-11-05T12:00:00.000Z',
+                          'from': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'}, 'text': 'Neue Version anbei'}]})
+        self.assertEqual(len(got), 2, '19:old was renamed recently but has no message since the cutoff')
+
+    def test_chats_page_on_while_every_chat_is_newer(self):
+        self.chat_routes()
+        fake.routes[G + '/me/chats?$skiptoken=page2'] = (200, {'value': []})
+        fake.routes[G + '/chats/19:old@thread.v2/messages'] = (200, {'value': []})
+        fake.routes[G + '/chats/19:abc@thread.v2/messages?$skiptoken=page2'] = (200, {'value': []})
+        got = json.loads(run('chats', '--since', '2026-01-01', '--json'))
+        self.assertIn(G + '/me/chats?$skiptoken=page2', [u for u, _, _ in fake.calls])
+        self.assertIn(G + '/chats/19:abc@thread.v2/messages?$skiptoken=page2', [u for u, _, _ in fake.calls])
+        self.assertEqual([c['id'] for c in got], ['19:abc@thread.v2', '19:revived@thread.v2', '19:old@thread.v2'])
+        self.assertEqual(len(got[0]['messages']), 3)
 
     def test_chats_text(self):
-        fake.granted.add('Chat.Read')
-        fake.routes = {G + '/me/chats': (200, 'chats.json'),
-                       G + '/chats/19:abc@thread.v2/messages': (200, 'chat-messages.json')}
+        self.chat_routes()
         self.assertEqual(run('chats', '1'),
                          '2026-11-11T10:00  Lucas Moskau, Erika Muster  (oneOnOne)\n'
                          '  2026-11-11T10:00  Erika Muster: Passt der Termin am Freitag? Grüße\n'
-                         '  2026-11-11T09:55  Lucas Moskau: Hi Erika\n')
+                         '  2026-11-11T09:55  Lucas Moskau: Hi Erika\n'
+                         '  2026-10-20T08:00  Lucas Moskau: Kurze Frage\n')
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_one_failing_chat_is_skipped_and_reported(self):
+        for status in (500, 403):
+            self.chat_routes()
+            fake.routes[G + '/chats/19:revived@thread.v2/messages'] = (status, {'error': {'code': 'Boom'}})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
+            self.assertEqual([c['id'] for c in got], ['19:abc@thread.v2'])
+            self.assertEqual(err.getvalue(), f'skipped chat 19:revived@thread.v2: {status}: {{"error": {{"code": "Boom"}}}}\n')
+
+    def test_chats_with_25_members_fetch_the_full_list(self):
+        self.chat_routes()
+        member = lambda i: {'displayName': f'P{i}', 'userId': f'u{i}', 'email': f'p{i}@zollner.example'}
+        chats = fixture('chats.json')
+        chats['value'][1]['members'] = [member(i) for i in range(25)]
+        fake.routes[G + '/me/chats'] = (200, chats)
+        fake.routes[G + '/chats/19:revived@thread.v2/members'] = (200, {'value': [member(i) for i in range(30)]})
+        got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
+        self.assertEqual(len(got[1]['members']), 30)
+        self.assertEqual(got[1]['members'][29], {'name': 'P29', 'email': 'p29@zollner.example', 'userId': 'u29'})
+        self.assertNotIn(G + '/chats/19:abc@thread.v2/members', [u for u, _, _ in fake.calls])
+
+    def test_flags_only_on_commands_that_take_them(self):
+        for argv, msg in [(('me', '--json'), '--json: not supported by me (only calendar, mail, read, chats)'),
+                          (('calendar', '--since', '2026-11-01'), '--since: not supported by calendar (only mail, chats)'),
+                          (('read', 'x', '--since', '2026-11-01'), '--since: not supported by read (only mail, chats)')]:
+            with self.assertRaises(SystemExit) as e:
+                run(*argv)
+            self.assertEqual(e.exception.code, msg)
+        self.assertEqual(fake.calls, [])
+
+    def test_windows_zone_name_falls_back_to_utc(self):
+        page = fixture('calendar-2.json')
+        for t in ('start', 'end'):
+            page['value'][0][t]['timeZone'] = 'W. Europe Standard Time'
+        fake.routes = {G + '/me/calendarView': (200, page)}
+        got = json.loads(run('calendar', '--json'))
+        self.assertEqual((got[0]['start'], got[0]['end']), ('2026-11-12T14:00:00+00:00', '2026-11-12T15:00:00+00:00'))
+
+    def test_graph_error_exits_with_status(self):
+        fake.routes = {G + '/me/messages': (500, {'error': 'down'})}
+        with self.assertRaises(SystemExit) as e:
+            run('mail')
+        self.assertEqual(e.exception.code, '500: {"error": "down"}')
 
     def test_chat_scope_only_behind_env_flag(self):
         self.assertNotIn('Chat.Read', m365.SCOPES)

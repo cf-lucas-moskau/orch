@@ -12,7 +12,7 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   --box <address>       any command on a shared mailbox, e.g. --box loesungen@tiki-institut.com (Lösungen)
 The token cache lives in ~/.local/share/orch-m365/cache.json (mode 600) and never leaves this Mac."""
 import html, json, os, re, sys, datetime as dt
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import msal, requests
 
 CLIENT = '1bb52e3f-209c-4d5f-89f8-dc8095c34432'
@@ -62,36 +62,55 @@ def token(scopes=SCOPES):
     return r['access_token']
 
 
-def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCOPES):
-    # Follows @odata.nextLink while all_pages is set, until limit items are collected.
+class GraphError(Exception):
+    def __init__(self, status, text):
+        super().__init__(f'{status}: {text[:300]}')
+        self.status = status
+
+
+def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCOPES, until=None):
+    # Follows @odata.nextLink while all_pages is set, until limit items are collected
+    # or until(item) holds for a page's last item (lists ordered newest first stop at a cutoff).
     h = {'Authorization': f'Bearer {token(scopes)}', **(headers or {})}
     url, out = (path if path.startswith('https://') else G + path), None
     while url:
         r = requests.get(url, params=params, headers=h, timeout=30)
-        if r.status_code == 403 and scopes is not SCOPES:
-            not_granted(scopes)
         if r.status_code >= 400:
-            sys.exit(f'{r.status_code}: {r.text[:300]}')
+            raise GraphError(r.status_code, r.text)
         j = r.json()
+        page = j.get('value', [])
         if out is None:
             out = j
         else:
-            out['value'] += j.get('value', [])
-        done = not all_pages or (limit is not None and len(out.get('value', [])) >= limit)
+            out['value'] += page
+        done = (not all_pages or (limit is not None and len(out.get('value', [])) >= limit)
+                or bool(until and page and until(page[-1])))
         url, params = (None if done else j.get('@odata.nextLink')), None
     if limit is not None and 'value' in out:
         out['value'] = out['value'][:limit]
     return out
 
 
-def since_utc(s):
+def ts(s):
+    return dt.datetime.fromisoformat(s) if s else None
+
+
+def parse_since(s):
     try:
-        d = dt.datetime.fromisoformat(s.replace('Z', '+00:00'))
+        d = dt.datetime.fromisoformat(s)
     except ValueError:
         sys.exit(f'--since: not a date: {s}')
     if d.tzinfo is None:
         d = d.replace(tzinfo=ZoneInfo(TZ))
-    return d.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return d.astimezone(dt.timezone.utc)
+
+
+def zone(name):
+    # Graph can answer with a Windows zone name ("W. Europe Standard Time") that zoneinfo does not know.
+    try:
+        return ZoneInfo(name or TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        return dt.timezone.utc
 
 
 def person(r):
@@ -102,7 +121,7 @@ def person(r):
 def local_time(t):
     # Graph returns calendar times in the Prefer timezone without an offset; attach it.
     d = dt.datetime.fromisoformat(t['dateTime'][:19])
-    return d.replace(tzinfo=ZoneInfo(t.get('timeZone') or TZ)).isoformat()
+    return d.replace(tzinfo=zone(t.get('timeZone'))).isoformat()
 
 
 def event(e):
@@ -149,6 +168,11 @@ def text_of(body):
     return s.strip()
 
 
+def chat_time(c):
+    # lastUpdatedDateTime moves on renames and member changes, not on messages; the last message's time is the activity.
+    return (c.get('lastMessagePreview') or {}).get('createdDateTime') or c.get('lastUpdatedDateTime')
+
+
 def chat(c, msgs):
     members = [{'name': m.get('displayName'), 'email': (m.get('email') or '').lower() or None, 'userId': m.get('userId')}
                for m in c.get('members', [])]
@@ -162,7 +186,7 @@ def chat(c, msgs):
                     'from': {'name': u.get('displayName'), 'email': email.get(u.get('id'))},
                     'text': text_of(m.get('body'))})
     return {'id': c['id'], 'topic': c.get('topic'), 'type': c.get('chatType'),
-            'updated': c.get('lastUpdatedDateTime'), 'link': c.get('webUrl'), 'members': members, 'messages': out}
+            'updated': chat_time(c), 'link': c.get('webUrl'), 'members': members, 'messages': out}
 
 
 def dump(x):
@@ -226,7 +250,17 @@ def flag(argv, name, has_value=True):
     return argv[:i] + argv[i + 2:], argv[i + 1]
 
 
+JSON_CMDS, SINCE_CMDS = ('calendar', 'mail', 'read', 'chats'), ('mail', 'chats')
+
+
 def main(argv):
+    try:
+        return command(argv)
+    except GraphError as e:
+        sys.exit(str(e))
+
+
+def command(argv):
     # --box <address>: a shared mailbox Lucas can open (e.g. loesungen@tiki-institut.com) instead of his own.
     global ME
     ME = '/me'
@@ -236,8 +270,13 @@ def main(argv):
     if box:
         from urllib.parse import quote as q
         ME = '/users/' + q(box, safe='@')
-    since = since and since_utc(since)
     cmd = argv[0] if argv else 'me'
+    if as_json and cmd not in JSON_CMDS:
+        sys.exit(f'--json: not supported by {cmd} (only {", ".join(JSON_CMDS)})')
+    if since and cmd not in SINCE_CMDS:
+        sys.exit(f'--since: not supported by {cmd} (only {", ".join(SINCE_CMDS)})')
+    since = since and parse_since(since)
+    fresh = lambda s: since is None or (s is not None and ts(s) >= since)
     if cmd == 'login':
         return login()
     if cmd == 'login-web':
@@ -272,7 +311,7 @@ def main(argv):
         else:
             p['$orderby'] = 'receivedDateTime desc'
         if since:
-            p['$filter'] = f'receivedDateTime ge {since}'
+            p['$filter'] = f"receivedDateTime ge {since.strftime('%Y-%m-%dT%H:%M:%SZ')}"
         ms = get(f'{ME}/messages', p, {'ConsistencyLevel': 'eventual'} if q else None, all_pages=True, limit=n).get('value', [])
         if as_json:
             return dump([message(m) for m in ms])
@@ -293,18 +332,29 @@ def main(argv):
         return print(m['body']['content'])
     if cmd == 'chats':
         n = int(argv[1]) if len(argv) > 1 else (None if since else 20)
-        cs = get('/me/chats', {'$expand': 'members', '$top': min(n or 50, 50),
-                               '$orderby': 'lastMessagePreview/createdDateTime desc'},
-                 all_pages=True, limit=None if since else n, scopes=CHAT).get('value', [])
-        if since:
-            cs = [c for c in cs if (c.get('lastUpdatedDateTime') or '') >= since][:n]
+        # Newest activity first, so paging stops at the first chat older than --since.
+        try:
+            cs = get('/me/chats', {'$expand': 'members,lastMessagePreview', '$top': min(n or 50, 50),
+                                   '$orderby': 'lastMessagePreview/createdDateTime desc'},
+                     all_pages=True, limit=n, scopes=CHAT,
+                     until=since and (lambda c: not fresh(chat_time(c)))).get('value', [])
+        except GraphError as e:
+            if e.status == 403:
+                not_granted(CHAT)
+            raise
         out = []
-        for c in cs:
-            p = {'$top': 50, '$orderby': 'createdDateTime desc'}
-            if since:
-                p['$filter'] = f'createdDateTime gt {since}'
-            msgs = get(f"/chats/{c['id']}/messages", p, all_pages=bool(since), scopes=CHAT).get('value', [])
-            out.append(chat(c, msgs))
+        for c in (c for c in cs if fresh(chat_time(c))):
+            # Graph has no createdDateTime gt filter on chat messages: page newest first and cut locally.
+            try:
+                if len(c.get('members', [])) >= 25:  # $expand=members stops at 25
+                    c['members'] = get(f"/chats/{c['id']}/members", all_pages=True, scopes=CHAT)['value']
+                msgs = get(f"/chats/{c['id']}/messages", {'$top': 50, '$orderby': 'createdDateTime desc'},
+                           all_pages=bool(since), scopes=CHAT,
+                           until=since and (lambda m: not fresh(m.get('createdDateTime')))).get('value', [])
+            except GraphError as e:
+                print(f"skipped chat {c['id']}: {e}", file=sys.stderr)
+                continue
+            out.append(chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]))
         if as_json:
             return dump(out)
         for c in out:
