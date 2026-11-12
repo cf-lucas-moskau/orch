@@ -1,0 +1,58 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#chats(members(),lastMessagePreview())",
+ "@odata.count": 3,
+ "value": [
+  {
+   "id": "19:abc@thread.v2",
+   "topic": null,
+   "createdDateTime": "2026-10-01T09:00:00.000Z",
+   "lastUpdatedDateTime": "2026-11-11T10:00:00.000Z",
+   "chatType": "oneOnOne",
+   "webUrl": "https://teams.microsoft.com/l/chat/19%3Aabc%40thread.v2/0",
+   "tenantId": "302b5895-5a1e-4209-a37f-aee8ac9cf8b7",
+   "members": [
+    {"@odata.type": "#microsoft.graph.aadUserConversationMember", "id": "m1", "roles": ["owner"],
+     "displayName": "Lucas Moskau", "userId": "u-lucas", "email": "lucas@tiki.example"},
+    {"@odata.type": "#microsoft.graph.aadUserConversationMember", "id": "m2", "roles": ["owner"],
+     "displayName": "Erika Muster", "userId": "u-erika", "email": "Erika.Muster@netto.example"}
+   ],
+   "lastMessagePreview": {
+    "id": "1731319200000", "createdDateTime": "2026-11-11T10:00:00.000Z", "isDeleted": false, "messageType": "message",
+    "body": {"contentType": "text", "content": "Passt der Termin am Freitag?"},
+    "from": {"user": {"id": "u-erika", "displayName": "Erika Muster", "userIdentityType": "aadUser"}}
+   }
+  },
+  {
+   "id": "19:revived@thread.v2",
+   "topic": "Zollner Rahmenvertrag",
+   "createdDateTime": "2025-12-01T09:00:00.000Z",
+   "lastUpdatedDateTime": "2026-02-01T09:00:00.000Z",
+   "chatType": "group",
+   "webUrl": "https://teams.microsoft.com/l/chat/19%3Arevived%40thread.v2/0",
+   "members": [
+    {"@odata.type": "#microsoft.graph.aadUserConversationMember", "id": "m3", "roles": ["owner"],
+     "displayName": "Hans Zoll", "userId": "u-hans", "email": "hans@zollner.example"}
+   ],
+   "lastMessagePreview": {
+    "id": "1730800000000", "createdDateTime": "2026-11-05T12:00:00.000Z", "isDeleted": false, "messageType": "message",
+    "body": {"contentType": "text", "content": "Neue Version anbei"},
+    "from": {"user": {"id": "u-hans", "displayName": "Hans Zoll", "userIdentityType": "aadUser"}}
+   }
+  },
+  {
+   "id": "19:old@thread.v2",
+   "topic": "Altes Projekt",
+   "createdDateTime": "2026-01-01T09:00:00.000Z",
+   "lastUpdatedDateTime": "2026-11-10T09:00:00.000Z",
+   "chatType": "group",
+   "webUrl": "https://teams.microsoft.com/l/chat/19%3Aold%40thread.v2/0",
+   "members": [],
+   "lastMessagePreview": {
+    "id": "1706000000000", "createdDateTime": "2026-02-01T09:00:00.000Z", "isDeleted": false, "messageType": "message",
+    "body": {"contentType": "text", "content": "Danke allen"},
+    "from": {"user": {"id": "u-lucas", "displayName": "Lucas Moskau", "userIdentityType": "aadUser"}}
+   }
+  }
+ ],
+ "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=page2"
+}

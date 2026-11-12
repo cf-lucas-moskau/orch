@@ -1,0 +1,17 @@
+{
+ "value": [
+  {
+   "id": "AAMkEV2",
+   "subject": "Jour fixe",
+   "bodyPreview": "",
+   "isCancelled": true,
+   "isOnlineMeeting": false,
+   "webLink": "https://outlook.office365.com/owa/?itemid=AAMkEV2",
+   "start": {"dateTime": "2026-11-12T14:00:00.0000000", "timeZone": "Europe/Berlin"},
+   "end": {"dateTime": "2026-11-12T15:00:00.0000000", "timeZone": "Europe/Berlin"},
+   "location": {"displayName": "", "locationType": "default"},
+   "organizer": {"emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}},
+   "attendees": []
+  }
+ ]
+}

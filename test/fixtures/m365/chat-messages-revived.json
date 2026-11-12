@@ -1,0 +1,13 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#chats('19%3Arevived%40thread.v2')/messages",
+ "value": [
+  {
+   "id": "1730800000000",
+   "messageType": "message",
+   "createdDateTime": "2026-11-05T12:00:00.000Z",
+   "deletedDateTime": null,
+   "from": {"user": {"id": "u-hans", "displayName": "Hans Zoll", "userIdentityType": "aadUser"}},
+   "body": {"contentType": "text", "content": "Neue Version anbei"}
+  }
+ ]
+}

@@ -1,0 +1,13 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('lucas')/messages(id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body,webLink)/$entity",
+ "id": "AAMkMSG1",
+ "conversationId": "AAQkCONV1",
+ "subject": "Angebot KI-Schulung",
+ "receivedDateTime": "2026-11-11T08:15:00Z",
+ "sentDateTime": "2026-11-11T08:14:58Z",
+ "webLink": "https://outlook.office365.com/owa/?ItemID=AAMkMSG1",
+ "body": {"contentType": "text", "content": "Hallo Lucas,\r\n\r\nanbei unser Feedback zum Angebot.\r\n\r\nViele Grüße\r\nErika"},
+ "from": {"emailAddress": {"name": "Erika Muster", "address": "Erika.Muster@netto.example"}},
+ "toRecipients": [{"emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}}],
+ "ccRecipients": []
+}

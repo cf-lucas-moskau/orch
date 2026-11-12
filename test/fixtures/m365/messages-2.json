@@ -1,0 +1,16 @@
+{
+ "value": [
+  {
+   "id": "AAMkMSG2",
+   "conversationId": "AAQkCONV2",
+   "subject": "Re: Termin",
+   "bodyPreview": "Passt",
+   "receivedDateTime": "2026-11-10T16:02:00Z",
+   "sentDateTime": "2026-11-10T16:01:00Z",
+   "webLink": "https://outlook.office365.com/owa/?ItemID=AAMkMSG2",
+   "from": {"emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}},
+   "toRecipients": [{"emailAddress": {"name": "Hans Zoll", "address": "hans@zollner.example"}}],
+   "ccRecipients": []
+  }
+ ]
+}
