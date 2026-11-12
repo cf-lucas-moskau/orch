@@ -94,14 +94,14 @@ const said = (by: string, text: string, ts: string, media?: string) => (i: Idea)
 export const progressDir = (root: string, id: string) => join(dir(root), 'progress', id);
 const readNotes = (root: string, id: string) => { try { return parseNotes(readFileSync(join(progressDir(root, id), 'notes.jsonl'), 'utf8')); } catch { return []; } };
 
-// A note's media, read once through one file descriptor, or why it stays out: the folder must resolve to exactly
-// ideas/progress/<id>, the file opens without following a symlink, is regular, at most 8 MB, and a png, jpg, gif,
+// Media read once through one file descriptor, or why it stays out: the folder must resolve to exactly
+// ideas/<sub>, the file opens without following a symlink, is regular, at most 8 MB, and a png, jpg, gif,
 // mp4 or webm by extension and by its bytes. The bytes checked are the bytes sent.
-export function mediaFile(root: string, id: string, name: string): { file: Attachment } | { refused: string } {
+export function mediaIn(root: string, sub: string, name: string): { file: Attachment } | { refused: string } {
   let fd: number | undefined;
   try {
-    const folder = realpathSync(progressDir(root, id));
-    if (folder !== join(realpathSync(dir(root)), 'progress', id)) return { refused: 'outside its progress folder' };
+    const folder = realpathSync(join(dir(root), sub));
+    if (folder !== join(realpathSync(dir(root)), sub)) return { refused: `outside ideas/${sub}` };
     try { fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
     catch (e: any) { return { refused: e?.code === 'ELOOP' ? 'not a regular file' : 'not found' }; }
     const st = fstatSync(fd);
@@ -115,6 +115,8 @@ export function mediaFile(root: string, id: string, name: string): { file: Attac
   } catch { return { refused: 'not found' }; }
   finally { if (fd !== undefined) closeSync(fd); }
 }
+// A note's media comes from the idea's own progress folder.
+export const mediaFile = (root: string, id: string, name: string) => mediaIn(root, join('progress', id), name);
 import type { Download, InboxPick } from './ideas.ts';
 
 // Images the team posted for an idea, kept for orch and its workers. Files land under their final name only once

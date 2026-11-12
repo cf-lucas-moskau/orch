@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DiscordChat, MockChat, PinRefused } from '../src/discord.ts';
@@ -137,6 +137,52 @@ test('team say, impl say and impl raise post scrubbed text in their channels', a
   await idea(['off'], w.d);
   await assert.rejects(team(['say', 'hi'], w.d), /the idea bridge is off/);
   await assert.rejects(impl(['say', 'hi'], w.d), /the idea bridge is off/);
+});
+
+test('team say --media posts one checked file from ideas/drafts/ or a progress folder, and refuses the rest', async () => {
+  const w = world();
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const at = (...p: string[]) => join(w.root, ...p);
+  mkdirSync(at('ideas', 'drafts'));
+  mkdirSync(at('ideas', 'progress', 'I-50'), { recursive: true });
+  mkdirSync(at('secrets'));
+  writeFileSync(at('ideas', 'drafts', 'map.png'), PNG);
+  writeFileSync(at('ideas', 'drafts', 'note.md'), 'Pink Mansion, option two.');
+  writeFileSync(at('ideas', 'progress', 'I-50', 'pink.png'), PNG);
+  writeFileSync(at('ideas', 'drafts', 'fake.png'), 'not a png');
+  writeFileSync(at('ideas', 'drafts', 'notes.txt'), 'plain text');
+  writeFileSync(at('ideas', 'drafts', 'big.png'), PNG);
+  truncateSync(at('ideas', 'drafts', 'big.png'), 8 * 1024 * 1024 + 1);
+  mkdirSync(at('ideas', 'drafts', 'dir.png'));
+  writeFileSync(at('secrets', 'shot.png'), PNG);
+  writeFileSync(at('ideas', 'shot.png'), PNG);
+  symlinkSync(at('secrets', 'shot.png'), at('ideas', 'drafts', 'link.png'));
+  symlinkSync(at('secrets'), at('ideas', 'progress', 'I-9'));
+
+  assert.equal(await team(['say', 'The map', '--media', 'ideas/drafts/map.png'], w.d), 'posted in team-general');
+  assert.equal(await team(['say', 'ideas/drafts/note.md', '--media', 'ideas/progress/I-50/pink.png'], w.d), 'posted in team-general');
+  assert.deepEqual(w.sent().filter(o => o.kind === 'reply').map(o => [(o as any).text, (o as any).files]), [
+    ['The map', ['map.png']],
+    ['Pink Mansion, option two.', ['pink.png']],
+  ]);
+  assert.deepEqual(w.stored().map(r => [r.text, r.files]), [['The map', ['map.png']], ['Pink Mansion, option two.', ['pink.png']]]);
+
+  const refusals: [string, string][] = [
+    ['ideas/drafts/fake.png', 'media ideas/drafts/fake.png refused: not a png, jpg, gif, mp4 or webm file'],
+    ['ideas/drafts/notes.txt', 'media ideas/drafts/notes.txt refused: not a png, jpg, gif, mp4 or webm file'],
+    ['ideas/drafts/big.png', 'media ideas/drafts/big.png refused: 8.0 MB is over 8 MB'],
+    ['ideas/drafts/dir.png', 'media ideas/drafts/dir.png refused: not a regular file'],
+    ['ideas/drafts/link.png', 'media ideas/drafts/link.png refused: not a regular file'],
+    ['ideas/drafts/gone.png', 'media ideas/drafts/gone.png refused: not found'],
+    ['ideas/progress/I-9/shot.png', 'media ideas/progress/I-9/shot.png refused: outside ideas/progress/I-9'],
+    ['ideas/shot.png', 'media ideas/shot.png refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/'],
+    ['secrets/shot.png', 'media secrets/shot.png refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/'],
+    ['ideas/drafts/../shot.png', 'media ideas/drafts/../shot.png refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/'],
+    [at('ideas', 'drafts', 'map.png'), `media ${at('ideas', 'drafts', 'map.png')} refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/`],
+  ];
+  for (const [path, why] of refusals) await assert.rejects(team(['say', 'hi', '--media', path], w.d), { message: why }, path);
+  await assert.rejects(team(['say', 'hi', '--media'], w.d), { message: 'media (none given) refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/' });
+  assert.equal(w.sent().filter(o => o.kind === 'reply').length, 2, 'a refused media posts nothing');
 });
 
 test('end to end on mocks: impl title names an implementer-discussions thread and keeps one keywords message', async () => {

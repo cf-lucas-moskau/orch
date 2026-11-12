@@ -1022,7 +1022,7 @@ test('note media must be a real file of its type inside its own progress folder'
   assert.deepEqual(mediaFile(w.root, 'I-1', 'fake.png'), { refused: 'not a png, jpg, gif, mp4 or webm file' });
   assert.deepEqual(mediaFile(w.root, 'I-1', 'dir.png'), { refused: 'not a regular file' });
   assert.deepEqual(mediaFile(w.root, 'I-1', 'gone.png'), { refused: 'not found' });
-  assert.deepEqual(mediaFile(w.root, 'I-9', 'b.png'), { refused: 'outside its progress folder' });
+  assert.deepEqual(mediaFile(w.root, 'I-9', 'b.png'), { refused: 'outside ideas/progress/I-9' });
 
   appendFileSync(join(folder, 'notes.jsonl'), JSON.stringify({ ts: LATER(1), text: 'Look at this.', media: 'link.png' }) + '\n');
   w.setNow(LATER(3)); await tick(w.d);

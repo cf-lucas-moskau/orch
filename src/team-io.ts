@@ -2,9 +2,9 @@
 // `orch team` / `orch impl`. team-general is kept in ideas/team/<date>.jsonl; only messages for orch and suggestions
 // about the bridge reach the watcher.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { chatFor, MockChat, PinRefused, writeAtomic, type Chat } from './discord.ts';
-import { draftText, feed, isOff, loadConfig, loadIdeas, locked, retitle, textOf, type Deps } from './ideas-io.ts';
+import { isAbsolute, join, normalize } from 'node:path';
+import { chatFor, MockChat, PinRefused, writeAtomic, type Attachment, type Chat } from './discord.ts';
+import { draftText, feed, isOff, loadConfig, loadIdeas, locked, mediaIn, retitle, textOf, type Deps } from './ideas-io.ts';
 import { parseTitle, type Incoming, type Title } from './ideas.ts';
 import { backlogPage, CHANNELS, classify, outward, raisePost, teamLine, teamRecord, type Channel, type TeamRecord } from './team.ts';
 
@@ -39,7 +39,7 @@ export function teamMessage(d: Deps, m: Incoming, me: string) {
   if (r.kind !== 'other') feed(d.root, teamLine(r), now, 'Team');
 }
 
-const TEAM_USAGE = `usage: orch team backlog [n] | say <text|file>
+const TEAM_USAGE = `usage: orch team backlog [n] | say <text|file> [--media <path>]
        orch team fake "<text>" --as <user> [--reply-to <user>]   (mock adapter only)
        files are read only from ideas/drafts/`;
 const IMPL_USAGE = `usage: orch impl say <text|file> | raise <idea id> <text|file> | pin <file>
@@ -62,10 +62,19 @@ const now = (d: Deps) => (d.now ?? (() => new Date().toISOString()))();
 const notOff = (d: Deps) => { if (isOff(d.root)) fail('the idea bridge is off (ideas/off); orch posts nothing in Discord while it is'); };
 const nonEmpty = (text: string) => text || fail('nothing left to post once links, mentions, paths and tokens are taken out');
 
-async function say(d: Deps, chat: Chat, which: Channel, text: string) {
+// `team say --media <path>`: one file from ideas/drafts/ or an ideas/progress/<id>/ folder, checked like a note's media.
+const MEDIA_PATH = /^ideas\/(drafts|progress\/[^/]+)\/([^/]+)$/;
+function media(root: string, path: string): Attachment {
+  const m = path && !isAbsolute(path) && !path.split(/[\\/]/).includes('..') ? MEDIA_PATH.exec(normalize(path)) : null;
+  if (!m) return fail(`media ${path || '(none given)'} refused: it must be a file in ideas/drafts/ or ideas/progress/<id>/`);
+  const r = mediaIn(root, m[1], m[2]);
+  return 'file' in r ? r.file : fail(`media ${path} refused: ${r.refused}`);
+}
+
+async function say(d: Deps, chat: Chat, which: Channel, text: string, files: Attachment[] = []) {
   notOff(d);
   const id = await channelId(d.root, chat, which);
-  const posted = await chat.reply(id, nonEmpty(text));
+  const posted = await chat.reply(id, nonEmpty(text), files.length ? { files } : {});
   d.log(`${which} say: ${text.replace(/\s+/g, ' ').slice(0, 120)}`);
   return { id, posted };
 }
@@ -81,9 +90,11 @@ export async function team(args: string[], d: Deps): Promise<string> {
     return `wrote ideas/team/backlog.md (${msgs.length} messages)`;
   }
   if (sub === 'say') {
-    const text = outward(textOf(d.root, rest));
-    const { posted } = await say(d, chat, 'team', text);
-    store(d.root, { id: posted.ids[0] ?? '', ts: posted.ts ?? now(d), author: { id: 'orch', name: 'orch' }, text, kind: 'sent' });
+    const mi = rest.indexOf('--media');
+    const files = mi < 0 ? [] : [media(d.root, rest[mi + 1] ?? '')];
+    const text = outward(textOf(d.root, rest.filter((_, n) => mi < 0 || (n !== mi && n !== mi + 1))));
+    const { posted } = await say(d, chat, 'team', text, files);
+    store(d.root, { id: posted.ids[0] ?? '', ts: posted.ts ?? now(d), author: { id: 'orch', name: 'orch' }, text, kind: 'sent', ...(files.length ? { files: files.map(f => f.name) } : {}) });
     return `posted in ${CHANNELS.team}`;
   }
   if (sub === 'fake') {
