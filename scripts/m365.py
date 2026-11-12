@@ -4,6 +4,7 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   login                 device code sign-in (prints the code; waits until Lucas signs in)
   me                    who is signed in
   calendar [days]       events from today for N days (default 1)
+  calendar [days] --since <d>  events from date d (past included) until today + N days
   mail [n] [query]      newest n messages (default 10), optional $search query
   mail [n] --since <d>  messages received since date d (YYYY-MM-DD or ISO time), all of them unless n is given
   read <message id>     one message with its full body as text
@@ -105,10 +106,30 @@ def parse_since(s):
     return d.astimezone(dt.timezone.utc)
 
 
+# Windows zone names Graph can answer with despite the Prefer header, mapped to IANA (CLDR windowsZones, territory 001).
+WINDOWS_ZONES = {
+    'UTC': 'UTC', 'tzone://Microsoft/Utc': 'UTC', 'Coordinated Universal Time': 'UTC',
+    'W. Europe Standard Time': 'Europe/Berlin', 'Central Europe Standard Time': 'Europe/Budapest',
+    'Central European Standard Time': 'Europe/Warsaw', 'Romance Standard Time': 'Europe/Paris',
+    'GMT Standard Time': 'Europe/London', 'Greenwich Standard Time': 'Atlantic/Reykjavik',
+    'E. Europe Standard Time': 'Europe/Chisinau', 'FLE Standard Time': 'Europe/Kiev', 'GTB Standard Time': 'Europe/Bucharest',
+    'Russian Standard Time': 'Europe/Moscow', 'Turkey Standard Time': 'Europe/Istanbul', 'Israel Standard Time': 'Asia/Jerusalem',
+    'South Africa Standard Time': 'Africa/Johannesburg', 'Arabian Standard Time': 'Asia/Dubai',
+    'India Standard Time': 'Asia/Calcutta', 'China Standard Time': 'Asia/Shanghai', 'Singapore Standard Time': 'Asia/Singapore',
+    'Tokyo Standard Time': 'Asia/Tokyo', 'Korea Standard Time': 'Asia/Seoul', 'AUS Eastern Standard Time': 'Australia/Sydney',
+    'New Zealand Standard Time': 'Pacific/Auckland', 'Eastern Standard Time': 'America/New_York',
+    'Central Standard Time': 'America/Chicago', 'Mountain Standard Time': 'America/Denver',
+    'US Mountain Standard Time': 'America/Phoenix', 'Pacific Standard Time': 'America/Los_Angeles',
+    'Alaskan Standard Time': 'America/Anchorage', 'Hawaiian Standard Time': 'Pacific/Honolulu',
+    'Atlantic Standard Time': 'America/Halifax', 'E. South America Standard Time': 'America/Sao_Paulo',
+}
+
+
 def zone(name):
-    # Graph can answer with a Windows zone name ("W. Europe Standard Time") that zoneinfo does not know.
+    # Unknown names fall back to UTC rather than failing the whole listing.
+    name = name or TZ
     try:
-        return ZoneInfo(name or TZ)
+        return ZoneInfo(WINDOWS_ZONES.get(name, name))
     except (ZoneInfoNotFoundError, ValueError):
         return dt.timezone.utc
 
@@ -250,7 +271,9 @@ def flag(argv, name, has_value=True):
     return argv[:i] + argv[i + 2:], argv[i + 1]
 
 
-JSON_CMDS, SINCE_CMDS = ('calendar', 'mail', 'read', 'chats'), ('mail', 'chats')
+JSON_CMDS, SINCE_CMDS = ('calendar', 'mail', 'read', 'chats'), ('calendar', 'mail', 'chats')
+# Per chat, so one huge group chat cannot make chats --since page for minutes.
+CHAT_MEMBERS_CAP, CHAT_MESSAGES_CAP = 250, 1000
 
 
 def main(argv):
@@ -286,8 +309,8 @@ def command(argv):
         return print(m.get('displayName'), m.get('userPrincipalName'))
     if cmd == 'calendar':
         days = int(argv[1]) if len(argv) > 1 else 1
-        start = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + dt.timedelta(days=days)
+        today = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        start, end = since or today, today + dt.timedelta(days=days)
         ev = get(f'{ME}/calendarView', {'startDateTime': start.isoformat(), 'endDateTime': end.isoformat(),
                                        '$orderby': 'start/dateTime', '$top': 100,
                                        '$select': 'id,subject,start,end,location,organizer,attendees,isOnlineMeeting,'
@@ -347,13 +370,17 @@ def command(argv):
             # Graph has no createdDateTime gt filter on chat messages: page newest first and cut locally.
             try:
                 if len(c.get('members', [])) >= 25:  # $expand=members stops at 25
-                    c['members'] = get(f"/chats/{c['id']}/members", all_pages=True, scopes=CHAT)['value']
+                    c['members'] = get(f"/chats/{c['id']}/members", all_pages=True, limit=CHAT_MEMBERS_CAP,
+                                       scopes=CHAT)['value']
                 msgs = get(f"/chats/{c['id']}/messages", {'$top': 50, '$orderby': 'createdDateTime desc'},
-                           all_pages=bool(since), scopes=CHAT,
+                           all_pages=bool(since), limit=CHAT_MESSAGES_CAP, scopes=CHAT,
                            until=since and (lambda m: not fresh(m.get('createdDateTime')))).get('value', [])
             except GraphError as e:
                 print(f"skipped chat {c['id']}: {e}", file=sys.stderr)
                 continue
+            for what, got, cap in (('members', c.get('members', []), CHAT_MEMBERS_CAP), ('messages', msgs, CHAT_MESSAGES_CAP)):
+                if len(got) >= cap:
+                    print(f"chat {c['id']}: stopped at {cap} {what}", file=sys.stderr)
             out.append(chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]))
         if as_json:
             return dump(out)
