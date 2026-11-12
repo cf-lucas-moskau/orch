@@ -1,0 +1,32 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#chats('19%3Aabc%40thread.v2')/messages",
+ "@odata.count": 3,
+ "value": [
+  {
+   "id": "1731319200000",
+   "messageType": "message",
+   "createdDateTime": "2026-11-11T10:00:00.000Z",
+   "deletedDateTime": null,
+   "chatId": "19:abc@thread.v2",
+   "from": {"application": null, "device": null,
+            "user": {"id": "u-erika", "displayName": "Erika Muster", "userIdentityType": "aadUser"}},
+   "body": {"contentType": "html", "content": "<p>Passt der Termin am Freitag?</p><p>Gr&uuml;&szlig;e</p>"}
+  },
+  {
+   "id": "1731319100000",
+   "messageType": "systemEventMessage",
+   "createdDateTime": "2026-11-11T09:58:00.000Z",
+   "deletedDateTime": null,
+   "from": null,
+   "body": {"contentType": "html", "content": "<systemEventMessage/>"}
+  },
+  {
+   "id": "1731319000000",
+   "messageType": "message",
+   "createdDateTime": "2026-11-11T09:55:00.000Z",
+   "deletedDateTime": null,
+   "from": {"user": {"id": "u-lucas", "displayName": "Lucas Moskau", "userIdentityType": "aadUser"}},
+   "body": {"contentType": "text", "content": "Hi Erika"}
+  }
+ ]
+}

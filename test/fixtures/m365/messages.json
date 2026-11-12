@@ -1,0 +1,19 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('lucas')/messages",
+ "value": [
+  {
+   "@odata.etag": "W/\"m1\"",
+   "id": "AAMkMSG1",
+   "conversationId": "AAQkCONV1",
+   "subject": "Angebot KI-Schulung",
+   "bodyPreview": "Hallo Lucas, anbei unser Feedback",
+   "receivedDateTime": "2026-11-11T08:15:00Z",
+   "sentDateTime": "2026-11-11T08:14:58Z",
+   "webLink": "https://outlook.office365.com/owa/?ItemID=AAMkMSG1",
+   "from": {"emailAddress": {"name": "Erika Muster", "address": "Erika.Muster@netto.example"}},
+   "toRecipients": [{"emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}}],
+   "ccRecipients": [{"emailAddress": {"name": "Max Beispiel", "address": "max@netto.example"}}]
+  }
+ ],
+ "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skip=1"
+}

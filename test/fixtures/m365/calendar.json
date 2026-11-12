@@ -1,0 +1,25 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('lucas')/calendarView(id,subject,start,end,location,organizer,attendees,isOnlineMeeting,isCancelled,bodyPreview,webLink)",
+ "value": [
+  {
+   "@odata.etag": "W/\"abc\"",
+   "id": "AAMkEV1",
+   "subject": "Netto Abstimmung",
+   "bodyPreview": "Agenda: Angebot Q1",
+   "isCancelled": false,
+   "isOnlineMeeting": true,
+   "webLink": "https://outlook.office365.com/owa/?itemid=AAMkEV1",
+   "start": {"dateTime": "2026-11-12T09:00:00.0000000", "timeZone": "Europe/Berlin"},
+   "end": {"dateTime": "2026-11-12T09:30:00.0000000", "timeZone": "Europe/Berlin"},
+   "location": {"displayName": "Microsoft Teams-Besprechung", "locationType": "default"},
+   "organizer": {"emailAddress": {"name": "Erika Muster", "address": "Erika.Muster@netto.example"}},
+   "attendees": [
+    {"type": "required", "status": {"response": "accepted", "time": "2026-11-10T10:00:00Z"},
+     "emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}},
+    {"type": "optional", "status": {"response": "none", "time": "0001-01-01T00:00:00Z"},
+     "emailAddress": {"name": "Max Beispiel", "address": "max@netto.example"}}
+   ]
+  }
+ ],
+ "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendarView?$skip=1"
+}
