@@ -43,7 +43,7 @@ All of these run as `npm run -s orch -- <team|impl> <sub>`. Everything posted lo
 | Command | What |
 | --- | --- |
 | `team backlog [n]` | One-off catch-up: the last n messages (default 200, at most 1000), oldest first, written to `ideas/team/backlog.md` with author, time, text and attachment names. Every message is quoted line by line. |
-| `team say <text\|file>` | Post in team-general. Files only from `ideas/drafts/`. |
+| `team say <text\|file> [--media <path>]` | Post in team-general. Files only from `ideas/drafts/`. `--media` attaches one file from `ideas/drafts/` or any `ideas/progress/<id>/` folder, given as `ideas/drafts/<name>` or `ideas/progress/<id>/<name>` and checked like a note's media (no symlink, a regular file, at most 8 MB, png, jpg, gif, mp4 or webm by extension and first bytes). Any other path or file is refused with the reason and nothing is posted. |
 | `team fake "<text>" --as <user> [--reply-to <user>]` | Mock only: post in team-general as someone; `<@orch>` mentions the bot, `--reply-to orch` replies to it. |
 | `impl say <text\|file>` | Post in implementer-discussions. |
 | `impl raise <id> <text\|file>` | Post in implementer-discussions led by the idea's id, with the `Related:` line linking its thread (and any other idea named). |
