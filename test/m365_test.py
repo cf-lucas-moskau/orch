@@ -114,6 +114,29 @@ class M365(unittest.TestCase):
         self.assertEqual([(e['id'], e['start'], e['location'], e['cancelled'], e['attendees']) for e in got[1:]],
                          [('AAMkEV2', '2026-11-12T14:00:00+01:00', None, True, [])])
 
+    def test_calendar_since_reads_past_events_across_pages(self):
+        fake.routes = {G + '/me/calendarView': (200, 'calendar-past.json'),
+                       G + '/me/calendarView?$skiptoken=past2': (200, 'calendar.json'),
+                       G + '/me/calendarView?$skip=1': (200, 'calendar-2.json')}
+        got = json.loads(run('calendar', '7', '--since', '2025-12-01', '--json'))
+        url, params, headers = fake.calls[0]
+        today = m365.dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        self.assertEqual((params['startDateTime'], params['endDateTime']),
+                         ('2025-11-30T23:00:00+00:00', (today + m365.dt.timedelta(days=7)).isoformat()))
+        self.assertEqual(headers['Prefer'], 'outlook.timezone="Europe/Berlin"')
+        self.assertEqual([c[1] for c in fake.calls[1:]], [{}, {}], 'nextLinks carry their own query')
+        self.assertEqual([e['id'] for e in got], ['AAMkPAST1', 'AAMkEV1', 'AAMkEV2'])
+        self.assertEqual({k: got[0][k] for k in ('start', 'end', 'organizer', 'attendees')}, {
+            'start': '2025-12-03T10:00:00+01:00', 'end': '2025-12-03T11:30:00+01:00',
+            'organizer': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'},
+            'attendees': [{'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'type': 'required',
+                           'response': 'accepted'}]})
+
+    def test_calendar_since_text(self):
+        fake.routes = {G + '/me/calendarView': (200, 'calendar-past.json'),
+                       G + '/me/calendarView?$skiptoken=past2': (200, {'value': []})}
+        self.assertEqual(run('calendar', '--since', '2025-12-01'), '2025-12-03T10:00–11:30  Zollner Kickoff  [Lucas Moskau]\n')
+
     def test_mail_text_is_unchanged_one_page(self):
         fake.routes = {G + '/me/messages': (200, 'messages.json')}
         self.assertEqual(run('mail', '1'),
@@ -279,20 +302,54 @@ class M365(unittest.TestCase):
 
     def test_flags_only_on_commands_that_take_them(self):
         for argv, msg in [(('me', '--json'), '--json: not supported by me (only calendar, mail, read, chats)'),
-                          (('calendar', '--since', '2026-11-01'), '--since: not supported by calendar (only mail, chats)'),
-                          (('read', 'x', '--since', '2026-11-01'), '--since: not supported by read (only mail, chats)')]:
+                          (('me', '--since', '2026-11-01'), '--since: not supported by me (only calendar, mail, chats)'),
+                          (('read', 'x', '--since', '2026-11-01'), '--since: not supported by read (only calendar, mail, chats)')]:
             with self.assertRaises(SystemExit) as e:
                 run(*argv)
             self.assertEqual(e.exception.code, msg)
         self.assertEqual(fake.calls, [])
 
-    def test_windows_zone_name_falls_back_to_utc(self):
+    def test_windows_zone_names_map_to_iana(self):
+        page = fixture('calendar-2.json')
+        page['value'][0]['start'] = {'dateTime': '2026-07-01T14:00:00.0000000', 'timeZone': 'W. Europe Standard Time'}
+        page['value'][0]['end'] = {'dateTime': '2026-07-01T15:00:00.0000000', 'timeZone': 'Pacific Standard Time'}
+        fake.routes = {G + '/me/calendarView': (200, page)}
+        got = json.loads(run('calendar', '--json'))
+        self.assertEqual((got[0]['start'], got[0]['end']), ('2026-07-01T14:00:00+02:00', '2026-07-01T15:00:00-07:00'))
+
+    def test_unknown_zone_name_falls_back_to_utc(self):
         page = fixture('calendar-2.json')
         for t in ('start', 'end'):
-            page['value'][0][t]['timeZone'] = 'W. Europe Standard Time'
+            page['value'][0][t]['timeZone'] = 'Mars Standard Time'
         fake.routes = {G + '/me/calendarView': (200, page)}
         got = json.loads(run('calendar', '--json'))
         self.assertEqual((got[0]['start'], got[0]['end']), ('2026-11-12T14:00:00+00:00', '2026-11-12T15:00:00+00:00'))
+
+    def test_chats_since_caps_messages_and_members_per_chat(self):
+        self.chat_routes()
+        member = lambda i: {'displayName': f'P{i}', 'userId': f'u{i}', 'email': f'p{i}@zollner.example'}
+        chats = fixture('chats.json')
+        chats['value'][1]['members'] = [member(i) for i in range(25)]
+        fake.routes[G + '/me/chats'] = (200, chats)
+        fake.routes[G + '/me/chats?$skiptoken=page2'] = (200, {'value': []})
+        fake.routes[G + '/chats/19:old@thread.v2/messages'] = (200, {'value': []})
+        fake.routes[G + '/chats/19:revived@thread.v2/members'] = (
+            200, {'value': [member(i) for i in range(25)], '@odata.nextLink': G + '/chats/19:revived@thread.v2/members?p=2'})
+        caps = m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP
+        m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP = 20, 2
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                got = json.loads(run('chats', '--since', '2026-01-01', '--json'))
+        finally:
+            m365.CHAT_MEMBERS_CAP, m365.CHAT_MESSAGES_CAP = caps
+        urls = [u for u, _, _ in fake.calls]
+        self.assertNotIn(G + '/chats/19:abc@thread.v2/messages?$skiptoken=page2', urls, 'stops paging at the cap')
+        self.assertNotIn(G + '/chats/19:revived@thread.v2/members?p=2', urls)
+        self.assertEqual([[m['id'] for m in c['messages']] for c in got], [['1731319200000'], ['1730800000000'], []])
+        self.assertEqual(len(got[1]['members']), 20)
+        self.assertEqual(err.getvalue(), 'chat 19:abc@thread.v2: stopped at 2 messages\n'
+                                         'chat 19:revived@thread.v2: stopped at 20 members\n')
 
     def test_graph_error_exits_with_status(self):
         fake.routes = {G + '/me/messages': (500, {'error': 'down'})}

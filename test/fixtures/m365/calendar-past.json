@@ -1,0 +1,22 @@
+{
+ "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('lucas')/calendarView(id,subject,start,end,location,organizer,attendees,isOnlineMeeting,isCancelled,bodyPreview,webLink)",
+ "value": [
+  {
+   "id": "AAMkPAST1",
+   "subject": "Zollner Kickoff",
+   "bodyPreview": "Rahmenvertrag",
+   "isCancelled": false,
+   "isOnlineMeeting": false,
+   "webLink": "https://outlook.office365.com/owa/?itemid=AAMkPAST1",
+   "start": {"dateTime": "2025-12-03T10:00:00.0000000", "timeZone": "W. Europe Standard Time"},
+   "end": {"dateTime": "2025-12-03T11:30:00.0000000", "timeZone": "W. Europe Standard Time"},
+   "location": {"displayName": "Zollner, Zandt", "locationType": "default"},
+   "organizer": {"emailAddress": {"name": "Hans Zoll", "address": "Hans@Zollner.example"}},
+   "attendees": [
+    {"type": "required", "status": {"response": "accepted", "time": "2025-11-20T10:00:00Z"},
+     "emailAddress": {"name": "Lucas Moskau", "address": "lucas@tiki.example"}}
+   ]
+  }
+ ],
+ "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendarView?$skiptoken=past2"
+}
