@@ -163,10 +163,29 @@ export function trustKeys(screen: string): string[] | null {
 export const isTrustDialog = (screen: string) => trustKeys(screen) !== null;
 
 // Worktree removal needs a clean checkout and nothing unpushed, otherwise it is the user's call.
-export function cleanupBlocker(porcelain: string, unpushed: string): string | null {
+export function cleanupBlocker(porcelain: string, unpushed: string, unsaved: string[] = []): string | null {
   if (porcelain.trim()) return `uncommitted changes:\n${porcelain.trim()}`;
   if (unpushed.trim()) return `commits on no other branch or remote:\n${unpushed.trim()}`;
+  if (unsaved.length) return `gitignored files that exist only in this worktree:\n${unsaved.join('\n')}`;
   return null;
+}
+
+const REBUILDABLE_DIRS = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.turbo', '.cache', 'test-results', 'playwright-report', '__pycache__', '.venv']);
+const rebuildableFile = (base: string) => base === '.DS_Store' || base === 'tsconfig.tsbuildinfo' || base.endsWith('.log');
+
+// Gitignored paths a worktree removal would lose for good: `git ls-files -z --others --ignored --exclude-standard --directory`
+// minus build output and caches, minus what --keep saves (a kept folder covers everything listed under it).
+// git also lists a folder that holds only ignored files (deploy/) before its contents; that container is not itself at risk.
+export function unsavedIgnored(lsFilesZ: string, kept: string[] = []): string[] {
+  const keep = kept.map(k => k.replace(/\/+$/, ''));
+  const all = lsFilesZ.split('\0').filter(Boolean);
+  const container = (p: string) => p.endsWith('/') && all.some(q => q !== p && q.startsWith(p));
+  return all.filter(p => !container(p)).filter(p => {
+    const parts = p.replace(/\/+$/, '').split('/');
+    if (parts.some(s => REBUILDABLE_DIRS.has(s)) || rebuildableFile(parts.at(-1)!)) return false;
+    const path = parts.join('/');
+    return !keep.some(k => path === k || path.startsWith(`${k}/`));
+  });
 }
 
 // Claude workers do serious work, so with pstack installed they start in poteto-mode. It cannot be invoked by a model,

@@ -1,7 +1,7 @@
 // orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, routines and ideas.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FeedEvent } from './board.ts';
@@ -9,7 +9,7 @@ import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseL
 import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, type LeadRecord } from './lead.ts';
 import { read as readInbox, readBeat } from './lead-inbox.ts';
 import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
-  canDispatch, canSteer, cleanupBlocker, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
+  canDispatch, canSteer, cleanupBlocker, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
@@ -360,14 +360,24 @@ function gates([name, flag, title]: string[]) {
   process.exit(r.passed ? 0 : 1);
 }
 
-function cleanup([name, flag]: string[]) {
+// cleanup <name> [--abandon] [--keep <path>]...: --keep copies a gitignored path to saved/<name>/ before the worktree goes.
+function cleanup([name, ...flags]: string[]) {
   const w = worker(name);
-  const abandon = flag === '--abandon';
+  const abandon = flags.includes('--abandon');
+  const kept = flags.flatMap((f, i) => f === '--keep' && flags[i + 1] ? [flags[i + 1]] : []);
+  const saved = join(root, 'saved', name);
   if (existsSync(w.worktree)) {
+    const missing = kept.filter(k => !existsSync(join(w.worktree, k)));
+    if (missing.length) die(`not cleaned: --keep paths not in ${w.worktree}: ${missing.join(', ')}`);
+    const unsaved = unsavedIgnored(git(w.worktree, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'), kept);
     const blocker = cleanupBlocker(
       git(w.worktree, 'status', '--porcelain'),
-      git(w.worktree, 'rev-list', '--oneline', w.branch, '--not', `--exclude=${w.branch}`, '--branches', '--remotes'));
-    if (blocker && !abandon) die(`not cleaned: ${blocker}\nFile a decision; after the user agrees, rerun with --abandon.`);
+      git(w.worktree, 'rev-list', '--oneline', w.branch, '--not', `--exclude=${w.branch}`, '--branches', '--remotes'),
+      unsaved);
+    if (blocker && !abandon) die(`not cleaned: ${blocker}\n${blocker.startsWith('gitignored')
+      ? `Copy them out, or rerun with --keep <path> for each to save it to ${saved}/.`
+      : 'File a decision; after the user agrees, rerun with --abandon.'}`);
+    for (const k of kept) cpSync(join(w.worktree, k), join(saved, k), { recursive: true });
   }
   if (findLive(live(), w.pane)) herdr('pane', 'close', w.pane);
   if (existsSync(w.worktree)) {
@@ -383,7 +393,7 @@ function cleanup([name, flag]: string[]) {
   const hadScratch = existsSync(scratch);
   rmSync(scratch, { recursive: true, force: true });
   saveWorkers(loadWorkers().map(x => x.name === name && x.status === 'running' ? { ...x, status: 'closed' } : x));
-  const extra = [downed.length ? `compose ${downed.join(', ')} down -v` : '', hadScratch ? 'scratch folder deleted' : ''].filter(Boolean).join(', ');
+  const extra = [kept.length ? `${kept.join(', ')} saved to ${saved}` : '', downed.length ? `compose ${downed.join(', ')} down -v` : '', hadScratch ? 'scratch folder deleted' : ''].filter(Boolean).join(', ');
   log(`cleanup ${name}${abandon ? ' (abandoned, the user decided)' : ''}: pane ${w.pane} closed, worktree removed${extra ? `, ${extra}` : ''}, branch ${w.branch} kept`);
   console.log(`${name} cleaned up${extra ? ` (${extra})` : ''}; branch ${w.branch} kept`);
 }

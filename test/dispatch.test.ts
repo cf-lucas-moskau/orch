@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, unsavedIgnored, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -80,6 +80,18 @@ test('cleanup is blocked by dirty or unpushed work', () => {
   assert.match(cleanupBlocker(' M src/a.ts\n', '')!, /uncommitted/);
   assert.match(cleanupBlocker('', 'abc123 wip\n')!, /no other branch or remote/);
   assert.equal(cleanupBlocker('', ''), null);
+  assert.equal(cleanupBlocker('', '', ['deploy/basic-auth.passwort']), 'gitignored files that exist only in this worktree:\ndeploy/basic-auth.passwort');
+});
+
+test('cleanup lists gitignored files that cannot be rebuilt, minus kept ones', () => {
+  const ls = ['node_modules/', 'web/', 'web/.next/', 'dist/', 'deploy/', 'deploy/basic-auth.passwort', 'data/', 'api/__pycache__/', '.venv/',
+    'server.log', 'web/.DS_Store', 'tsconfig.tsbuildinfo', 'coverage/', 'test-results/', 'playwright-report/', '.turbo/', '.cache/', 'build/',
+    '.env.local', 'my file.txt', ''].join('\0');
+  assert.deepEqual(unsavedIgnored(ls), ['deploy/basic-auth.passwort', 'data/', '.env.local', 'my file.txt']);
+  assert.deepEqual(unsavedIgnored(ls, ['deploy/basic-auth.passwort', 'data']), ['.env.local', 'my file.txt']);
+  assert.deepEqual(unsavedIgnored(ls, ['deploy/']), ['data/', '.env.local', 'my file.txt'], 'a kept folder covers what is under it');
+  assert.deepEqual(unsavedIgnored(ls, ['data/sub']), ['deploy/basic-auth.passwort', 'data/', '.env.local', 'my file.txt'], 'part of a folder is not the folder');
+  assert.deepEqual(unsavedIgnored(''), []);
 });
 
 test('trust dialog is recognised', () => {
