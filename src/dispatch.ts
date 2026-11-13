@@ -171,21 +171,44 @@ export function cleanupBlocker(porcelain: string, unpushed: string, unsaved: str
 }
 
 const REBUILDABLE_DIRS = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.turbo', '.cache', 'test-results', 'playwright-report', '__pycache__', '.venv']);
-const rebuildableFile = (base: string) => base === '.DS_Store' || base === 'tsconfig.tsbuildinfo' || base.endsWith('.log');
+const rebuildable = (base: string) => REBUILDABLE_DIRS.has(base) || base === '.DS_Store' || base === 'tsconfig.tsbuildinfo' || base.endsWith('.log');
 
 // Gitignored paths a worktree removal would lose for good: `git ls-files -z --others --ignored --exclude-standard --directory`
 // minus build output and caches, minus what --keep saves (a kept folder covers everything listed under it).
-// git also lists a folder that holds only ignored files (deploy/) before its contents; that container is not itself at risk.
+// --directory collapses an ignored folder to one entry, so each entry is its own top ignored ancestor: only its own name
+// decides whether it is rebuildable (data/build/x.csv is not). git also lists a folder that holds only ignored files
+// (deploy/) before its contents; that container is not itself at risk.
 export function unsavedIgnored(lsFilesZ: string, kept: string[] = []): string[] {
   const keep = kept.map(k => k.replace(/\/+$/, ''));
   const all = lsFilesZ.split('\0').filter(Boolean);
   const container = (p: string) => p.endsWith('/') && all.some(q => q !== p && q.startsWith(p));
   return all.filter(p => !container(p)).filter(p => {
-    const parts = p.replace(/\/+$/, '').split('/');
-    if (parts.some(s => REBUILDABLE_DIRS.has(s)) || rebuildableFile(parts.at(-1)!)) return false;
-    const path = parts.join('/');
+    const path = p.replace(/\/+$/, '');
+    if (rebuildable(path.split('/').at(-1)!)) return false;
     return !keep.some(k => path === k || path.startsWith(`${k}/`));
   });
+}
+
+// cleanup's flags. --keep needs a path after it, not another flag.
+export function cleanupFlags(flags: string[]): { abandon: boolean; kept: string[] } | string {
+  const kept: string[] = [];
+  let abandon = false;
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i] === '--abandon') abandon = true;
+    else if (flags[i] === '--keep') {
+      const p = flags[++i];
+      if (!p || p.startsWith('-')) return 'usage: cleanup <name> [--abandon] [--keep <path>]...: --keep needs a path';
+      kept.push(p);
+    } else return `usage: cleanup <name> [--abandon] [--keep <path>]...: unknown argument ${flags[i]}`;
+  }
+  return { abandon, kept };
+}
+
+// A --keep path relative to the worktree, or null when it is the worktree itself or outside it. Both arguments come
+// resolved (.. and linked folders followed), so a path that leaves the worktree that way is refused.
+export function keepTarget(worktree: string, resolved: string): string | null {
+  const rel = resolved.startsWith(`${worktree}/`) ? resolved.slice(worktree.length + 1) : '';
+  return rel || null;
 }
 
 // Claude workers do serious work, so with pstack installed they start in poteto-mode. It cannot be invoked by a model,

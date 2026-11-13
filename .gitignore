@@ -27,3 +27,6 @@ ideas/*
 !ideas/README.md
 .playwright-mcp/
 secrets/
+
+# Copies --keep saved before orch cleanup removed a worktree
+saved/

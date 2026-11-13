@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, unsavedIgnored, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -92,6 +96,69 @@ test('cleanup lists gitignored files that cannot be rebuilt, minus kept ones', (
   assert.deepEqual(unsavedIgnored(ls, ['deploy/']), ['data/', '.env.local', 'my file.txt'], 'a kept folder covers what is under it');
   assert.deepEqual(unsavedIgnored(ls, ['data/sub']), ['deploy/basic-auth.passwort', 'data/', '.env.local', 'my file.txt'], 'part of a folder is not the folder');
   assert.deepEqual(unsavedIgnored(''), []);
+  assert.deepEqual(unsavedIgnored(['data/build/x.csv', 'data/build/', 'web/node_modules/'].join('\0')), ['data/build/x.csv'],
+    'only the entry\'s own name counts as rebuildable, not a folder above it');
+});
+
+test('cleanup flags: --keep needs a path', () => {
+  assert.deepEqual(cleanupFlags([]), { abandon: false, kept: [] });
+  assert.deepEqual(cleanupFlags(['--keep', 'a', '--abandon', '--keep', 'b/']), { abandon: true, kept: ['a', 'b/'] });
+  assert.match(cleanupFlags(['--keep']) as string, /^usage: .*--keep needs a path/);
+  assert.match(cleanupFlags(['--keep', '--abandon']) as string, /--keep needs a path/);
+  assert.match(cleanupFlags(['--force']) as string, /unknown argument --force/);
+});
+
+test('a --keep path must be inside the worktree, not the worktree itself', () => {
+  assert.equal(keepTarget('/w/t', '/w/t/deploy/pw'), 'deploy/pw');
+  assert.equal(keepTarget('/w/t', '/w/t'), null);
+  assert.equal(keepTarget('/w/t', '/w/t2/x'), null);
+  assert.equal(keepTarget('/w/t', '/etc/passwd'), null);
+});
+
+// The real command on a real worktree; herdr and docker are stubs that fail, so git removes the worktree.
+test('cleanup --keep copies into saved/ before it removes the worktree', () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'orch-cleanup-')));
+  const repo = join(base, 'repo'), wt = join(base, 'wt'), orch = join(base, 'orch'), bin = join(base, 'bin');
+  for (const d of [repo, orch, bin]) mkdirSync(d);
+  writeFileSync(join(bin, 'herdr'), '#!/bin/sh\necho \'{"error":{"code":"stub","message":"stub"}}\'\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'docker'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const env = { ...process.env, ORCH_DIR: orch, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const sh = (cwd: string, cmd: string) => execFileSync('/bin/sh', ['-c', cmd], { cwd, env, encoding: 'utf8' });
+  sh(repo, 'git init -q -b main && printf "deploy/*.passwort\\nnode_modules/\\n" > .gitignore && git add . && git commit -qm init');
+  sh(repo, `git worktree add -q -b orch/wk "${wt}" && git update-ref refs/remotes/origin/orch/wk orch/wk`);
+  mkdirSync(join(wt, 'deploy')); mkdirSync(join(wt, 'node_modules'));
+  writeFileSync(join(wt, 'deploy', 'basic-auth.passwort'), 'secret\n');
+  symlinkSync('basic-auth.passwort', join(wt, 'deploy', 'current.passwort'));
+  writeFileSync(join(orch, 'workers.json'), JSON.stringify([{ name: 'wk', repo: 't', branch: 'orch/wk', worktree: wt, pane: 'p', workspace: 'ws', status: 'running', task: 't' }]));
+  const orchTs = join(import.meta.dirname, '..', 'src', 'orch.ts');
+  const cleanup = (...a: string[]) => spawnSync(process.execPath, ['--experimental-strip-types', '--no-warnings', orchTs, 'cleanup', 'wk', ...a], { cwd: orch, env, encoding: 'utf8' });
+  try {
+    let r = cleanup();
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /gitignored files that exist only in this worktree:\ndeploy\/basic-auth\.passwort\ndeploy\/current\.passwort\nCopy them out, or rerun with --keep/);
+    assert.match(cleanup('--keep', '.').stderr, /--keep \. is not a path inside/);
+    assert.match(cleanup('--keep', '../repo/.gitignore').stderr, /is not a path inside/);
+    assert.match(cleanup('--keep').stderr, /--keep needs a path/);
+    assert.match(cleanup('--keep', 'deploy/basic-auth.passwort').stderr, /exist only in this worktree:\ndeploy\/current\.passwort\n/);
+    writeFileSync(join(orch, 'saved'), 'a file, so the copy fails');
+    r = cleanup('--keep', 'deploy/basic-auth.passwort', '--keep', 'deploy/current.passwort');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /copying deploy\/basic-auth\.passwort to .* failed, worktree left as it was/);
+    assert.ok(existsSync(join(wt, 'deploy', 'basic-auth.passwort')), 'a failed copy leaves the worktree');
+    rmSync(join(orch, 'saved'));
+    r = cleanup('--keep', 'deploy/basic-auth.passwort', '--keep', 'deploy/current.passwort');
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!existsSync(wt), 'worktree removed');
+    const [folder] = readdirSync(join(orch, 'saved'));
+    assert.match(folder, /^wk-\d{8}-\d{4}$/);
+    assert.equal(readFileSync(join(orch, 'saved', folder, 'deploy', 'basic-auth.passwort'), 'utf8'), 'secret\n');
+    const link = join(orch, 'saved', folder, 'deploy', 'current.passwort');
+    assert.ok(!lstatSync(link).isSymbolicLink(), 'a kept symlink is saved as a file');
+    assert.equal(readFileSync(link, 'utf8'), 'secret\n');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('trust dialog is recognised', () => {

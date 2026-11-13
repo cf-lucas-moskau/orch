@@ -1,15 +1,15 @@
 // orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, routines and ideas.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
 import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, type LeadRecord } from './lead.ts';
 import { read as readInbox, readBeat } from './lead-inbox.ts';
 import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
-  canDispatch, canSteer, cleanupBlocker, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
+  canDispatch, canSteer, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
 import { nextTasks, parsePlan, setTaskState } from './plan.ts';
@@ -360,15 +360,23 @@ function gates([name, flag, title]: string[]) {
   process.exit(r.passed ? 0 : 1);
 }
 
-// cleanup <name> [--abandon] [--keep <path>]...: --keep copies a gitignored path to saved/<name>/ before the worktree goes.
-function cleanup([name, ...flags]: string[]) {
+// cleanup <name> [--abandon] [--keep <path>]...: --keep copies a gitignored path to saved/<name>-<stamp>/ before the worktree goes.
+function cleanup([name, ...args]: string[]) {
   const w = worker(name);
-  const abandon = flags.includes('--abandon');
-  const kept = flags.flatMap((f, i) => f === '--keep' && flags[i + 1] ? [flags[i + 1]] : []);
-  const saved = join(root, 'saved', name);
+  const flags = cleanupFlags(args);
+  if (typeof flags === 'string') return die(flags);
+  const { abandon } = flags;
+  let kept: string[] = [];
+  // A fresh folder per cleanup, so a rerun never overwrites an earlier backup.
+  const saved = join(root, 'saved', `${name}-${stamp().replace(/[-:]/g, '').replace(' ', '-')}`);
   if (existsSync(w.worktree)) {
-    const missing = kept.filter(k => !existsSync(join(w.worktree, k)));
-    if (missing.length) die(`not cleaned: --keep paths not in ${w.worktree}: ${missing.join(', ')}`);
+    const top = realpathSync(w.worktree);
+    kept = flags.kept.map(k => {
+      const p = resolve(w.worktree, k);
+      if (!existsSync(p)) return die(`not cleaned: --keep ${k} does not exist in ${w.worktree}`);
+      // The parent's real path plus the leaf's own name: a kept symlink keeps its name and is copied as the file it points to.
+      return keepTarget(top, join(realpathSync(dirname(p)), basename(p))) ?? die(`not cleaned: --keep ${k} is not a path inside ${w.worktree}`);
+    });
     const unsaved = unsavedIgnored(git(w.worktree, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'), kept);
     const blocker = cleanupBlocker(
       git(w.worktree, 'status', '--porcelain'),
@@ -377,7 +385,10 @@ function cleanup([name, ...flags]: string[]) {
     if (blocker && !abandon) die(`not cleaned: ${blocker}\n${blocker.startsWith('gitignored')
       ? `Copy them out, or rerun with --keep <path> for each to save it to ${saved}/.`
       : 'File a decision; after the user agrees, rerun with --abandon.'}`);
-    for (const k of kept) cpSync(join(w.worktree, k), join(saved, k), { recursive: true });
+    for (const k of kept) {
+      try { cpSync(join(top, k), join(saved, k), { recursive: true, dereference: true, force: false, errorOnExist: true }); }
+      catch (e: any) { die(`not cleaned: copying ${k} to ${saved} failed, worktree left as it was: ${e.message}`); }
+    }
   }
   if (findLive(live(), w.pane)) herdr('pane', 'close', w.pane);
   if (existsSync(w.worktree)) {
