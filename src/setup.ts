@@ -27,6 +27,8 @@ const tools: [string, boolean, string][] = [
 const optional: [string, boolean, string][] = [
   ['gh', has('gh'), 'brew install gh; needed for the PR routine'],
   ['codex', has('codex'), 'npm i -g @openai/codex; needed for Codex workers and bimodel reviews'],
+  ['pstack', spawnSync('/bin/sh', ['-c', `ls ${join(home, '.claude/plugins/cache')}/*/pstack/*/skills/poteto-mode/SKILL.md`]).status === 0,
+    'claude plugin marketplace add cf-lucas-moskau/pstack-claude && claude plugin install pstack@pstack-claude && claude plugin install pstack-team-kit@pstack-claude; Claude workers refuse to start without it'],
 ];
 say('Tools');
 for (const [name, ok, hint] of tools) say(`  ${ok ? '✓' : '✗'} ${name}${ok ? '' : `  -> ${hint}`}`);

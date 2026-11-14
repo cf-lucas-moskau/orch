@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, parseAutonomy, type Worker } from '../src/dispatch.ts';
+import { herdrCaps, promptOutcome, readyStep, submitStep,isGarbledPrompt, prTitle, promptVerdict, pickWinner, resolveProject, score, canDispatch, canSteer, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, isTrustDialog, trustKeys, parseCap, parseProjects, workerBrief, workerPrompt, potetoLine, potetoMissing, parseAutonomy, type Worker } from '../src/dispatch.ts';
 
 const md = `# projects
 
@@ -185,6 +185,18 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.equal(potetoLine({ kind: 'claude' }, '/p/SKILL.md'), 'First read /p/SKILL.md in full and work by it (poteto-mode).\n\n');
   assert.equal(potetoLine({ kind: 'codex' }, '/p/SKILL.md'), '');
   assert.equal(potetoLine({ kind: 'claude' }, false), '');
+});
+
+test('a Claude worker without pstack is refused with the install command; Codex needs none', () => {
+  assert.equal(potetoMissing(['claude'], '/p/SKILL.md'), undefined);
+  assert.equal(potetoMissing(['codex'], false), undefined);
+  for (const kinds of [['claude'], ['claude', 'codex']]) {
+    const msg = potetoMissing(kinds, false) ?? '';
+    assert.match(msg, /^pstack is not installed: Claude workers start in poteto-mode \(\/pstack:poteto-mode/);
+    for (const line of ['claude plugin marketplace add cf-lucas-moskau/pstack-claude', 'claude plugin install pstack@pstack-claude',
+      'claude plugin install pstack-team-kit@pstack-claude']) assert.ok(msg.includes(`\n  ${line}\n`), line);
+    assert.match(msg, /--kind codex/);
+  }
 });
 
 test('restore list keeps recent sessions that died without SessionEnd', async () => {

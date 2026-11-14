@@ -253,6 +253,15 @@ export const workerPrompt = (briefPath: string) => `Read ${briefPath} and follow
 // poteto-mode can't be loaded through the Skill tool (disable-model-invocation), so the brief points at its SKILL.md.
 export const potetoLine = (w: Pick<Worker, 'kind'>, skill: string | false) =>
   w.kind === 'codex' || !skill ? '' : `First read ${skill} in full and work by it (poteto-mode).\n\n`;
+// A Claude worker without pstack would silently skip poteto-mode, so orch refuses to start one. Codex needs none.
+export const potetoMissing = (kinds: string[], skill: string | false): string | undefined =>
+  skill || kinds.every(k => k === 'codex') ? undefined
+    : `pstack is not installed: Claude workers start in poteto-mode (${SERIOUS}, policies.md) and orch found no `
+      + `~/.claude/plugins/cache/*/pstack/*/skills/poteto-mode/SKILL.md. Install it:\n`
+      + `  claude plugin marketplace add cf-lucas-moskau/pstack-claude\n`
+      + `  claude plugin install pstack@pstack-claude\n`
+      + `  claude plugin install pstack-team-kit@pstack-claude\n`
+      + `then restart Claude and run /pstack:setup-pstack. Or start a Codex worker with --kind codex.`;
 
 export function findLive(live: Live[], target: string): Live | undefined {
   return live.find(a => a.name === target || a.pane_id === target);
