@@ -65,9 +65,7 @@ if [ "$role" = host ]; then
   echo "Agent host services"
   chk "herdr server running" sh -c 'herdr status server | grep -q "status: running"'
   chk "job agent-host.herdr-server" job agent-host.herdr-server
-  chk "job agent-host.rc-bootstrap" job agent-host.rc-bootstrap
-  chk "job agent-host.orch-bootstrap" job agent-host.orch-bootstrap
-  chk "deck-to-pdf installed" test -d "$HOME/.local/share/deck-to-pdf/node_modules/playwright-core"
+  chk "job agent-host.rc-bootstrap" job agent-host.rc-bootstrap  chk "deck-to-pdf installed" test -d "$HOME/.local/share/deck-to-pdf/node_modules/playwright-core"
   echo "orch"
   chk "repo at $ORCH" test -f "$ORCH/package.json"
   chk "local.md" test -f "$ORCH/local.md"

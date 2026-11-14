@@ -11,7 +11,7 @@ test('replicate kit: bus-autorun rejects malformed envelopes and keeps scanning 
 });
 
 test('replicate kit: every shell script parses', () => {
-  for (const f of ['check.sh', 'host-services.sh', 'orch-bootstrap.sh', 'remote-control/rc-loop.sh', 'remote-control/rc-bootstrap.sh', 'agent-bus/bus-setup']) {
+  for (const f of ['check.sh', 'host-services.sh','remote-control/rc-loop.sh', 'remote-control/rc-bootstrap.sh', 'agent-bus/bus-setup']) {
     const r = spawnSync('bash', ['-n', join(kit, f)], { encoding: 'utf8' });
     assert.equal(r.status, 0, `${f}: ${r.stderr}`);
   }

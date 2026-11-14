@@ -2,10 +2,7 @@
 # Agent host only. Installs two launchd jobs so the host comes back by itself after a reboot or power loss:
 #   agent-host.herdr-server   keeps the herdr server running (KeepAlive)
 #   agent-host.rc-bootstrap   every 5 min: makes sure herdr has a "remote-control" workspace running rc-loop.sh,
-#                             which keeps `claude remote-control` up so you can start sessions from your phone.
-#   agent-host.orch-bootstrap every 5 min: if herdr's "orch" workspace runs no claude, resumes orch's last
-#                             conversation there and prompts it to re-arm its watcher (and with it the queue page).
-# Safe to re-run. Usage: bash host-services.sh [--dry-run]
+#                             which keeps `claude remote-control` up so you can start sessions from your phone.# Safe to re-run. Usage: bash host-services.sh [--dry-run]
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
@@ -17,8 +14,6 @@ run() { if [ $DRY = 1 ]; then echo "would run: $*"; else "$@"; fi; }
 run mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs" "$HOME/code"
 run install -m 755 "$KIT/remote-control/rc-loop.sh" "$HOME/.local/bin/rc-loop.sh"
 run install -m 755 "$KIT/remote-control/rc-bootstrap.sh" "$HOME/.local/bin/rc-bootstrap.sh"
-run install -m 755 "$KIT/orch-bootstrap.sh" "$HOME/.local/bin/orch-bootstrap.sh"
-
 plist() { # label, program-args xml, extra keys xml
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,6 +52,4 @@ load() { # label, plist text
 load agent-host.herdr-server "$(plist agent-host.herdr-server "<string>$HERDR</string><string>server</string>" \
   '<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Interactive</string>')"
 load agent-host.rc-bootstrap "$(plist agent-host.rc-bootstrap "<string>$HOME/.local/bin/rc-bootstrap.sh</string>" \
-  '<key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer>')"
-load agent-host.orch-bootstrap "$(plist agent-host.orch-bootstrap "<string>$HOME/.local/bin/orch-bootstrap.sh</string>" \
   '<key>RunAtLoad</key><true/><key>StartInterval</key><integer>300</integer>')"

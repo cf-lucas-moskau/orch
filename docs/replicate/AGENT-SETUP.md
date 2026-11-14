@@ -12,7 +12,7 @@ You are a Claude Code agent setting up your human's two Macs so they work like L
 | 2 | main | S0.1 to S4.2 (S3.3 gives main SSH to the host; S4.2 pairs both Syncthings) | hand over to host |
 | 3 | host | S4.3, S5.1, S5.2, S5.3 | hand over to main |
 | 4 | main | S4.4, S4.5, S5.2, S5.3, S5.4, S6.4 | hand over to host |
-| 5 | host | S6.1 to S8.6 | hand over to main |
+| 5 | host | S6.1 to S8.7 | hand over to main |
 | 6 | main | S9.1, S9.2, S10.1, S10.2 (and S10.1 on the host over SSH) | done |
 
 S5.1 runs on the host before S4.4 so that main's first sync of `~/.claude` already carries the agent-bus code and skill.
@@ -390,13 +390,14 @@ Lucas runs workers in pstack's poteto-mode (`/pstack:poteto-mode`) and has compo
 bash "$KIT/host-services.sh"
 ```
 
-This installs three launchd jobs, so the host comes back after a reboot with nobody attaching to herdr:
+This installs two launchd jobs:
 
 - `agent-host.herdr-server` keeps the herdr server running.
 - `agent-host.rc-bootstrap` (every 5 min) makes sure herdr's `remote-control` workspace runs `claude remote-control`, so the human can start sessions on the host from the Claude app or claude.ai/code.
-- `agent-host.orch-bootstrap` (every 5 min) makes sure herdr's `orch` workspace runs orch. If it doesn't, it resumes orch's last conversation there (it records orch's session id while orch runs; a fresh orch when there is none) and prompts it to re-arm its watcher, which brings back the queue page and routines. It does nothing until `~/orch` exists (S8). Log: `~/Library/Logs/agent-host.orch-bootstrap.log`.
 
-Verify: `herdr status server | grep "status: running" && herdr workspace list | grep -q '"label":"remote-control"' && launchctl print gui/$(id -u)/agent-host.orch-bootstrap >/dev/null && echo services`
+orch itself is not started by launchd; after a reboot it comes back through one human step (S8.7).
+
+Verify: `herdr status server | grep "status: running" && herdr workspace list | grep -q '"label":"remote-control"' && echo services`
 
 HUMAN, once: in the Claude app on the phone, open Code and check that the host shows up as an environment.
 
@@ -448,26 +449,34 @@ Verify: every repo row's path exists: `grep '^|' ~/orch/projects.md | tail -n +3
 `cd ~/orch && npm run setup -- --nightly` adds a 23:40 job that reads the day's corrections and proposes memory and rule updates, applied only after the human says yes. Offer it in one line.
 
 ### S8.5 [host] Start orch in herdr
-The `agent-host.orch-bootstrap` job from S7.1 starts orch within 5 minutes of S8.1. Start it now instead of waiting:
-
 ```bash
-~/.local/bin/orch-bootstrap.sh
+herdr workspace list | grep -q '"label":"orch"' || {
+  pane=$(herdr workspace create --cwd "$HOME/orch" --label orch --no-focus | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
+  sleep 2
+  herdr pane run "$pane" "cd ~/orch && npm start"
+}
 ```
 
-It creates herdr's workspace `orch`, starts orch in `~/orch` and sends it its first prompt. The same happens after every reboot or crash.
+HUMAN, once: attach (`herdr --remote <HOST_NAME>` from main after S9.1, or `herdr` in Terminal on the host), switch to workspace `orch`, accept the folder trust prompt if Claude shows one, and send the first prompt: "what's going on". The answer lists the sessions herdr shows. Detach; herdr keeps running.
 
-HUMAN, only if Claude shows a folder trust prompt on this first start (orch then stays silent and Verify fails): attach (`herdr` in Terminal on the host, or `herdr --remote <HOST_NAME>` from main), switch to workspace `orch`, accept it and say "what's going on". Detach; herdr keeps running.
-
-orch runs as `claude -n orch --remote-control orch --plugin-dir ./mod` (what `npm start` runs): orch with Remote Control on (reachable as "orch" from the phone and claude.ai/code) and the deck mod (`/deck`). The deck is an early-access Claude Code mod; if `/deck` is unknown, skip it, nothing else depends on it.
+`npm start` runs `claude -n orch --remote-control orch --plugin-dir ./mod`: orch with Remote Control on (reachable as "orch" from the phone and claude.ai/code) and the deck mod (`/deck`). The deck is an early-access Claude Code mod; if `/deck` is unknown, skip it, nothing else depends on it.
 
 On its first turn orch arms its watcher (feed, herdr state, the decision queue page on port 7390) and adds the `morning-brief` routine; that is in orch's own `CLAUDE.md`.
 
-Verify: `herdr workspace list | grep -q '"label":"orch"' && nc -z -G 2 127.0.0.1 7390 && test -f ~/orch/routines/morning-brief.md && echo orch-up` (allow two minutes after the start).
+Verify: `herdr workspace list | grep -q '"label":"orch"' && nc -z -G 2 127.0.0.1 7390 && test -f ~/orch/routines/morning-brief.md && echo orch-up` (allow a minute after the first prompt).
 
 ### S8.6 [host] The decision queue page
 The page serves every open decision on `http://127.0.0.1:7390` and on the host's tailnet name. From the tailnet it needs a one-time login link per device; orch relays it from the watcher's `QUEUE started` line, and it is also in `~/Library/Logs/orch.queue.log`. The phone (with the Tailscale app) is the natural place for it.
 
 Verify: `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7390/` prints `200`.
+
+### S8.7 [host] After a reboot: one human step
+launchd brings back the herdr server and Remote Control by itself; orch comes back when someone attaches to herdr. HUMAN, after every reboot or power loss of the host:
+
+1. Attach to herdr: `herdr --remote <HOST_NAME>` from main, or `herdr` in Terminal on the host (Screen Sharing), or open the orch pane via Remote Control. herdr restores orch's session in workspace `orch`.
+2. Tell orch: `restore`. It re-arms its watcher (which brings back the queue page and the routine checks) and resumes the sessions that died with the reboot.
+
+Tell the human this once, in two lines, when phase 8 is done. Nothing to verify now; after the first real reboot, `bash "$KIT/check.sh" host` passes again.
 
 ## Phase 9: the main Mac
 Turn 6. Every earlier `[main]` and `[both]` step is done by now (turns 2 and 4). Then:
@@ -510,7 +519,6 @@ Found in review and left as they are. None blocks the setup; fix one when it bit
 - **bus-autorun closes waiting sessions.** A bus session older than an hour that is not `working` gets its tab closed, also when it is blocked on a question. Its request is already archived, so it is not retried. Answer bus sessions within the hour.
 - **Retry tabs are forgotten.** When a request is retried after 15 minutes, the first attempt's tab is no longer tracked for cleanup; close it in herdr by hand.
 - **rc-bootstrap can type twice.** In the 10 s while `rc-loop.sh` restarts `claude remote-control`, the 5-minute check may see no claude and type `rc-loop.sh` into the running loop. The pane then runs a second loop; closing the tab lets the job start a clean one.
-- **orch-bootstrap is not tested on a fresh reboot.** It was checked by dry run against a running orch. Two things are unverified: whether herdr, when a client attaches later, also restores the old agent in the pane orch-bootstrap already started; and that a first `claude --continue` with no conversation exits so the fresh start runs. Check once after the first reboot: `herdr agent list` shows one claude in workspace `orch`.
 - **image-gen errors.** An empty `candidates` list (some safety blocks) or a network error prints a Python traceback instead of "no image in response". Treat a traceback as the same thing: rephrase or retry.
 - **deck-to-pdf trailing page.** A deck with another `div` after the last slide inside `#deck` gets one blank last page. Delete it or move that element out of `#deck`.
 

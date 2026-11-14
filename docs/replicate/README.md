@@ -4,7 +4,7 @@ Hallo Tobi, dieser Ordner baut Lucas' Setup auf deinen beiden Macs nach. Dein Cl
 
 ## Was du bekommst
 
-Ein Mac wird zum **Host**: immer an, schläft nie, startet nach einem Neustart von selbst wieder. Auf ihm läuft **orch**, ein Claude-Code-Chat, der alle anderen Agent-Sessions beobachtet, Fragen an dich sammelt und für Coding-Aufgaben eigene Worker in eigenen Git-Worktrees startet. Der andere Mac bleibt dein **Arbeits-Mac** und bleibt ruhig: kein Agent öffnet dort Browser oder Apps.
+Ein Mac wird zum **Host**: immer an, schläft nie, kommt nach einem Neustart mit einem Handgriff von dir wieder hoch. Auf ihm läuft **orch**, ein Claude-Code-Chat, der alle anderen Agent-Sessions beobachtet, Fragen an dich sammelt und für Coding-Aufgaben eigene Worker in eigenen Git-Worktrees startet. Der andere Mac bleibt dein **Arbeits-Mac** und bleibt ruhig: kein Agent öffnet dort Browser oder Apps.
 
 Die beiden Macs reden über Tailscale miteinander (privates Netz, auch von unterwegs). Syncthing hält über dieses Netz vier Ordner synchron: deine Claude-Konfiguration samt Skills und Memory, die **agent-bus**-Mailbox (signierte Nachrichten zwischen den Agents beider Macs), einen Ausgangsordner `~/AgentOutbox` für fertige PDFs und Bilder und eine schreibgeschützte Kopie deines Obsidian-Vaults auf dem Host.
 
@@ -52,7 +52,7 @@ Der Agent führt ein Protokoll in `~/agent-setup-log.md` und macht nach einer Un
 | `PLAYBOOKS.md` | euch beide | Coding-Worker und lose Themen, einmal durchgespielt |
 | `templates/` | den Agent | `CLAUDE.md` (deine globalen Regeln), `local.md` für orch, Syncthing-Ignore für `~/.claude` |
 | `kit/agent-bus/` | den Agent | die Mailbox zwischen den Macs: `bus`, Watcher, Setup, Skill |
-| `kit/host-services.sh`, `kit/remote-control/`, `kit/orch-bootstrap.sh` | den Agent | herdr, Remote Control und orch per launchd, damit der Host nach einem Neustart von selbst hochkommt |
+| `kit/host-services.sh`, `kit/remote-control/` | den Agent | herdr und Remote Control per launchd, damit der Host nach einem Neustart von selbst hochkommt |
 | `kit/image-gen/` | den Agent | Bildgenerierung über Gemini |
 | `kit/deck-to-pdf.mjs` | den Agent | Präsentation zu PDF, unsichtbar im Hintergrund |
 | `kit/check.sh` | beide | Statusprüfung, ändert nichts |
@@ -63,6 +63,8 @@ Teile von orch sind auf Lucas zugeschnitten und bleiben bei dir aus: die Evrloot
 
 ## Gut zu wissen
 
-FileVault und „immer an“ vertragen sich nur halb: Nach einem Stromausfall wartet der Host am FileVault-Bildschirm auf dein Passwort. Ein MacBook als Host überbrückt kurze Ausfälle mit dem Akku. Geplante Neustarts machst du mit `sudo fdesetup authrestart` (auch per SSH vom Arbeits-Mac), dann startet alles von selbst.
+FileVault und „immer an“ vertragen sich nur halb: Nach einem Stromausfall wartet der Host am FileVault-Bildschirm auf dein Passwort. Ein MacBook als Host überbrückt kurze Ausfälle mit dem Akku. Geplante Neustarts machst du mit `sudo fdesetup authrestart` (auch per SSH vom Arbeits-Mac), dann starten herdr und Remote Control von selbst.
+
+Nach jedem Neustart des Hosts gibt es einen Handgriff für dich: dich mit herdr verbinden (`herdr --remote <host>` vom Arbeits-Mac) oder den orch-Pane per Remote Control öffnen. herdr stellt orch dann wieder her. Danach sagst du orch `restore`; es schaltet seinen Watcher wieder scharf und nimmt die unterbrochenen Sessions wieder auf. So macht es Lucas auch.
 
 orch tut nie von sich aus etwas nach außen: kein Push, kein Merge, kein PR-Kommentar, kein Deploy, keine Mail. Das kommt immer als Entscheidung zu dir, bis du es in `local.md` ausdrücklich freischaltest.
