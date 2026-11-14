@@ -55,9 +55,40 @@ const SRC = join(import.meta.dirname, '..', 'src');
 const spawned: ChildProcess[] = [];
 after(() => { for (const p of spawned) p.kill(); });
 
+// herdr agent get <pane> answers from state/<pane>: "<status> <session id>", "gone" (agent_not_found) or "hang"
+// (never answers); no file, an error that is no answer.
+function herdrStub() {
+  const stub = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
+  mkdirSync(join(stub, 'state'));
+  writeFileSync(join(stub, 'herdr'), `#!/bin/sh
+f="$(dirname "$0")/state/$3"
+[ "$1 $2" = "agent get" ] && [ -f "$f" ] || { echo '{"error":{"code":"stub"}}'; exit 0; }
+read st sid < "$f"
+case "$st" in
+  gone) echo '{"error":{"code":"agent_not_found"}}' ;;
+  hang) exec sleep 30 ;;
+  *) echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$st\\",\\"agent_session\\":{\\"value\\":\\"$sid\\"}}}}" ;;
+esac
+`, { mode: 0o755 });
+  return stub;
+}
+function ledger(names: string[]) {
+  const root = mkdtempSync(join(tmpdir(), 'orch-finish-'));
+  for (const d of ['feed', 'leads', 'ideas']) mkdirSync(join(root, d));
+  writeFileSync(join(root, 'ideas', 'off'), '');
+  writeFileSync(join(root, 'ideas', 'config.json'), '{"adapter":"mock"}');
+  const worker = (name: string) => ({ name, repo: 'netto', sid: `${name.slice(0, 3)}00001`, pane: `${name}:p1`, worktree: join(root, name), status: 'running', branch: `orch/${name}`, task: 't', workspace: 'w', started: '' });
+  writeFileSync(join(root, 'workers.json'), JSON.stringify(names.map(worker)));
+  const feed = join(root, 'feed', `${new Date().toLocaleDateString('sv-SE')}.jsonl`);
+  const add = (ts: string, sid: string, cwd: string, event: string, msg = '') =>
+    appendFileSync(feed, JSON.stringify({ ts, sid, event, cwd: join(root, cwd), prompt: '', msg, tail: msg }) + '\n');
+  return { root, add };
+}
+const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString().replace(/\.\d+Z$/, 'Z');
+
 function watcher(root: string, stub: string) {
   const p = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', join(SRC, 'watch.ts')],
-    { env: { ...process.env, ORCH_DIR: root, ORCH_SID: 'orch0001', ORCH_QUEUE: 'off', ORCH_STALL_CHECK_MS: '300', PATH: `${stub}:${process.env.PATH}` } });
+    { env: { ...process.env, ORCH_DIR: root, ORCH_SID: 'orch0001', ORCH_QUEUE: 'off', ORCH_STALL_CHECK_MS: '300', ORCH_HERDR_MS: '500', PATH: `${stub}:${process.env.PATH}` } });
   spawned.push(p);
   const lines: string[] = [];
   createInterface({ input: p.stdout }).on('line', l => lines.push(l));
@@ -72,25 +103,9 @@ async function until(lines: string[], n: number) {
 }
 
 test('the watcher says every finished or blocked worker once, as herdr shows it now', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'orch-finish-'));
-  for (const d of ['feed', 'leads', 'ideas']) mkdirSync(join(root, d));
-  writeFileSync(join(root, 'ideas', 'off'), '');
-  writeFileSync(join(root, 'ideas', 'config.json'), '{"adapter":"mock"}');
-  // herdr agent get <pane> answers with the status in state/<pane>; no file, no answer.
-  const stub = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
-  mkdirSync(join(stub, 'state'));
-  writeFileSync(join(stub, 'herdr'), `#!/bin/sh
-f="$(dirname "$0")/state/$3"
-if [ "$1 $2" = "agent get" ] && [ -f "$f" ]; then echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "$f")\\"}}}"; else echo '{"error":{"code":"stub"}}'; fi
-`, { mode: 0o755 });
-  const pane = (name: string, status: string) => writeFileSync(join(stub, 'state', `${name}:p1`), status);
-  const worker = (name: string, sid: string) => ({ name, repo: 'netto', sid, pane: `${name}:p1`, worktree: join(root, name), status: 'running', branch: `orch/${name}`, task: 't', workspace: 'w', started: '' });
-  writeFileSync(join(root, 'workers.json'), JSON.stringify(['perf-q3', 'quiet', 'steered', 'asks', 'approved', 'cleared', 'twin']
-    .map(n => worker(n, `${n.slice(0, 3)}00001`))));
-  const feed = join(root, 'feed', `${new Date().toLocaleDateString('sv-SE')}.jsonl`);
-  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString().replace(/\.\d+Z$/, 'Z');
-  const add = (ts: string, sid: string, cwd: string, event: string, msg = '') =>
-    appendFileSync(feed, JSON.stringify({ ts, sid, event, cwd: join(root, cwd), prompt: '', msg, tail: msg }) + '\n');
+  const { root, add } = ledger(['perf-q3', 'quiet', 'steered', 'asks', 'approved', 'cleared', 'twin']);
+  const stub = herdrStub();
+  const pane = (name: string, status: string, sid = '') => writeFileSync(join(stub, 'state', `${name}:p1`), `${status} ${sid}`);
   add(ago(60), 'per00001', 'perf-q3', 'UserPromptSubmit');
   add(ago(50), 'qui00001', 'quiet', 'UserPromptSubmit');
   add(ago(50), 'ste00001', 'steered', 'Stop', 'Round 1 done.');
@@ -149,4 +164,36 @@ if [ "$1 $2" = "agent get" ] && [ -f "$f" ]; then echo "{\\"result\\":{\\"agent\
   assert.deepEqual(turnEnds(third.lines), ['BLOCKED worker twin [twin:p1] twi00001: Claude needs your permission to use Edit'],
     'a re-arm says nothing it already said or dropped, and a same-second event is its own');
   await kill(third.p);
+});
+
+test('a hung herdr holds up nothing and a worker after /clear gets its DONE', async () => {
+  const { root, add } = ledger(['hung', 'asks', 'cleared', 'helped']);
+  writeFileSync(join(root, 'done.json'), '{}');
+  const stub = herdrStub();
+  const pane = (name: string, state: string) => writeFileSync(join(stub, 'state', `${name}:p1`), state);
+  const perm = 'Claude needs your permission to use Bash';
+  add(ago(2), 'hun00001', 'hung', 'Notification', perm);
+  pane('hung', 'hang');
+  add(ago(1), 'ask00001', 'asks', 'Notification', perm);
+  pane('asks', 'blocked ask00001');
+  // cleared ran /clear: its pane now runs new00001. helped's worktree has a helper session; its pane runs the worker.
+  add(ago(1), 'new00001', 'cleared', 'Stop', 'All green, committed.');
+  pane('cleared', 'idle new00001');
+  add(ago(1), 'hlp00009', 'helped', 'Stop', 'Review written.');
+  pane('helped', 'working hel00001');
+
+  const w = watcher(root, stub);
+  await until(w.lines, 2);
+  assert.deepEqual(turnEnds(w.lines).sort(), [
+    'BLOCKED worker asks [asks:p1] ask00001: Claude needs your permission to use Bash',
+    'DONE worker cleared [cleared:p1] new00001: All green, committed.',
+  ], 'the hung pane first in line did not hold these up');
+  // Live: cleared runs /clear again and finishes.
+  pane('cleared', 'idle new00002');
+  add(new Date().toISOString(), 'new00002', 'cleared', 'Stop', 'Round 2 done.');
+  await until(w.lines, 3);
+  await pause(2000);
+  assert.deepEqual(turnEnds(w.lines).slice(2), ['DONE worker cleared [cleared:p1] new00002: Round 2 done.'],
+    'each said once; the helper in helped\'s worktree never; the hung pane is unknown, never said');
+  await kill(w.p);
 });
