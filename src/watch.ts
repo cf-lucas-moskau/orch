@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { classify, feedLine, screenTail, speaker, workerFor } from './triage.ts';
+import { feedLine, screenTail, workerFor } from './triage.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
@@ -76,8 +76,6 @@ function inboxError(e: unknown) {
 const safeRead = (name: string, emit: (l: string) => void) => { try { read(root, name, emit); } catch (e) { inboxError(e); } };
 // Sessions that are leads: their turns end all day and they escalate through decisions/, so orch skips their DONE lines.
 const leadSids = () => new Set(Object.keys(LEADS).flatMap(n => json(`leads/${n}.json`, null)?.sid ?? []));
-// Unknown session ids that already triggered a sessions.json rebuild, so a chatty one-off run triggers one at most.
-const rebuilt = new Set<string>();
 
 // Every tail this watcher runs, killed when it exits so no tail outlives it.
 const tails = new Set<ChildProcess>();
@@ -102,13 +100,7 @@ function follow(d: string, from: number) {
     if (e.event === 'Idea' || e.event === 'Team') return say(e.msg);
     sayStalls(stepStall(stalls, e));
     if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
-    const workers = json('workers.json', []);
-    // sessions.json is rebuilt every 10 minutes: a session that ends a turn before its first rebuild gets one now.
-    if (classify(e) !== 'skip' && !speaker(e, workers, json('sessions.json', {})) && !rebuilt.has(e.sid)) {
-      rebuilt.add(e.sid);
-      spawnSync(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, 'cli.ts')], { stdio: 'ignore', timeout: 10_000 });
-    }
-    const l = feedLine(e, workers, json('sessions.json', {}), leadSids());
+    const l = feedLine(e, json('workers.json', []), json('sessions.json', {}), leadSids());
     if (l) say(l);
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.

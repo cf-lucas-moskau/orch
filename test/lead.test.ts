@@ -183,7 +183,7 @@ function watcher(root: string, env: Record<string, string>) {
     for (const end = Date.now() + 15_000; Date.now() < end; await new Promise(r => setTimeout(r, 200))) {
       if (env.ORCH_LEAD) { try { if (readFileSync(join(root, 'leads', `${env.ORCH_LEAD}.beat`), 'utf8').trim() === env.ORCH_SID) return; } catch {} continue; }
       if (probed) return;
-      appendFileSync(feed, JSON.stringify({ ts: new Date().toISOString(), sid: 'probe000', event: 'Notification', cwd: '/probe', prompt: '', msg: 'watcher-probe' }) + '\n');
+      appendFileSync(feed, JSON.stringify({ ts: new Date().toISOString(), sid: 'probe000', event: 'Stop', cwd: '/probe', prompt: '', msg: 'watcher-probe' }) + '\n');
     }
     assert.fail('watcher never became ready');
   };

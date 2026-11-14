@@ -23,24 +23,22 @@ export type WorkerRec = { name: string; pane: string; sid?: string; worktree?: s
 // A worker with a session id is that session alone: anything else in its worktree (a headless claude -p, a helper)
 // is not the worker. Its folder counts only while it has no session id (Codex, or herdr has not named it yet).
 export const workerFor = (workers: WorkerRec[], sid: string, cwd: string) => workers.find(w => w.status === 'running'
-  && (w.sid ? w.sid === sid : !!w.worktree && !!cwd && (cwd === w.worktree || cwd.startsWith(w.worktree + '/'))));
+  && (w.sid ? w.sid === sid : inside(cwd, w.worktree)));
 
-// Who a feed event is from: a running worker, else a session herdr shows (sessions.json). Undefined: orch knows no such session.
-export function speaker(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>): Speaker | undefined {
-  const w = workerFor(workers, e.sid, e.cwd);
-  return w ? { name: `worker ${w.name}`, pane: w.pane } : sessions[e.sid];
-}
+const inside = (cwd: string, dir?: string) => !!dir && !!cwd && (cwd === dir || cwd.startsWith(dir + '/'));
 
 // The watcher line for a feed event, or undefined when it needs nobody. Leads' turns end all day and they escalate
-// through decisions/, so their DONE says nothing. A session orch does not know is a one-off run (a critic's
-// claude -p, a script): its turns ending say nothing either; only a permission prompt, which a person must answer, is said.
+// through decisions/, so their DONE says nothing. Another session in a worker's worktree (a critic's claude -p, a
+// helper) is not the worker and its events say nothing. Any other session is named from sessions.json or its id.
 export function feedLine(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>, leads: Set<string>): string | undefined {
   const kind = classify(e);
   if (kind === 'skip' || (kind === 'done' && leads.has(e.sid))) return;
-  const s = speaker(e, workers, sessions);
-  if (!s && kind !== 'blocked') return;
-  const { name, pane } = s ?? { name: e.sid.slice(0, 8), pane: '?' };
+  const w = workerFor(workers, e.sid, e.cwd);
+  if (!w && workers.some(x => x.status === 'running' && x.sid && inside(e.cwd, x.worktree))) return;
+  const { name, pane } = w ? { name: `worker ${w.name}`, pane: w.pane } : sessions[e.sid] ?? { name: e.sid.slice(0, 8), pane: '?' };
   const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
+  // Workers' helper subagents end with an empty DONE from a session orch doesn't know; nothing to act on.
+  if (kind === 'done' && !text.trim() && pane === '?') return;
   return `${kind.toUpperCase()} ${name} [${pane}] ${e.sid.slice(0, 8)}: ${text}`;
 }
 

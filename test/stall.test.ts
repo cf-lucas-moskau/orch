@@ -151,7 +151,7 @@ test('the watcher says each stalled worker once across re-arms, and a second sta
   // Ready once its tail prints a probe, so the lines written next cannot land before it.
   for (const end = Date.now() + 15_000; !second.lines.some(l => l.includes('watcher-probe')); await new Promise(r => setTimeout(r, 200))) {
     if (Date.now() > end) assert.fail('watcher never became ready');
-    add(new Date().toISOString(), 'probe000', 'probe', 'Notification', 'watcher-probe');
+    add(new Date().toISOString(), 'probe000', 'probe', 'Stop', 'watcher-probe');
   }
   assert.deepEqual(stalled(second.lines), [], 'a re-arm says nothing it already said');
   add(new Date().toISOString(), 'api00001', 'api-hit', 'UserPromptSubmit', '', 'Your last turn broke off; continue.');
