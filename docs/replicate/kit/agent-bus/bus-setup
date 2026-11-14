@@ -1,0 +1,65 @@
+#!/bin/bash
+# Sets up this Mac's end of the agent-bus. Safe to re-run.
+# 1. Syncthing folder "agent-bus" at ~/agent-bus, shared with every device this Syncthing knows
+#    (or only those sharing "claude-config", when that folder exists).
+# 2. launchd job agent-bus.watch: runs bus-autorun when ~/agent-bus/inbox/<me> changes, and every 10 min.
+# Signing keys are separate: `bus keygen` / `bus trust`.
+# AGENT_BUS_OWNER (default: your macOS full name) is the human the auto-started sessions work for.
+set -euo pipefail
+BIN="$HOME/.claude/agent-bus/bin"
+DATA="$HOME/agent-bus"
+LABEL="agent-bus.watch"
+OWNER="${AGENT_BUS_OWNER:-$(id -F 2>/dev/null || whoami)}"
+
+ME=$("$BIN/bus" whoami)
+mkdir -p "$DATA/inbox/$ME" "$DATA/archive/$ME" "$HOME/Library/Logs" "$HOME/.config/agent-bus" "$HOME/code"
+echo "$ME" > "$HOME/.config/agent-bus/me"
+
+# 1. Syncthing folder, through Syncthing's local REST API.
+ST=""
+for f in "$HOME/Library/Application Support/Syncthing/config.xml" "$HOME/.local/state/syncthing/config.xml" "$HOME/.config/syncthing/config.xml"; do
+  [ -f "$f" ] && { ST="$f"; break; }
+done
+[ -n "$ST" ] || { echo "Syncthing config not found; start Syncthing first (brew services start syncthing)"; exit 1; }
+K=$(grep -o '<apikey>[^<]*' "$ST" | sed 's/<apikey>//')
+api() { curl -sf -H "X-API-Key: $K" -H "Content-Type: application/json" "$@"; }
+if api http://127.0.0.1:8384/rest/config/folders/agent-bus >/dev/null 2>&1; then
+  echo "Syncthing folder agent-bus already exists"
+else
+  MYID=$(api http://127.0.0.1:8384/rest/system/status | python3 -c 'import json,sys;print(json.load(sys.stdin)["myID"])')
+  if api http://127.0.0.1:8384/rest/config/folders/claude-config >/dev/null 2>&1; then SRC=folders/claude-config; else SRC=devices; fi
+  DEVICES=$(api "http://127.0.0.1:8384/rest/config/$SRC" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); devs=d["devices"] if isinstance(d,dict) else d
+print(json.dumps([{"deviceID":x["deviceID"]} for x in devs]))')
+  [ "$DEVICES" != "[{\"deviceID\": \"$MYID\"}]" ] || echo "warning: no other device known yet; share the folder once the other Mac is paired"
+  api -X POST http://127.0.0.1:8384/rest/config/folders -d "{\"id\":\"agent-bus\",\"label\":\"agent-bus\",\"path\":\"$DATA\",\"type\":\"sendreceive\",\"fsWatcherEnabled\":true,\"fsWatcherDelayS\":1,\"rescanIntervalS\":3600,\"devices\":$DEVICES}" >/dev/null
+  echo "Syncthing folder agent-bus added"
+fi
+
+# 2. launchd job
+P="$HOME/Library/LaunchAgents/$LABEL.plist"
+cat > "$P" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>$BIN/bus-autorun</string></array>
+  <key>WatchPaths</key><array><string>$DATA/inbox/$ME</string></array>
+  <key>StartInterval</key><integer>600</integer>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AGENT_BUS_ME</key><string>$ME</string>
+    <key>AGENT_BUS_OWNER</key><string>$OWNER</string>
+  </dict>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/agent-bus-autorun.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/agent-bus-autorun.log</string>
+</dict>
+</plist>
+EOF
+plutil -lint "$P" >/dev/null
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$P"
+echo "watcher $LABEL watches $DATA/inbox/$ME for $OWNER"
