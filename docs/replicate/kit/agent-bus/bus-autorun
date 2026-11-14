@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""bus-autorun: started by launchd when this machine's agent-bus inbox changes (and every 10 min).
+
+For each unread request it starts a Claude session in its own herdr tab (workspace "agent-bus"),
+visible in herdr and via Remote Control in the Claude app, so the owner can watch or step in.
+Falls back to a headless `claude -p` when the herdr server isn't running.
+Sessions run in auto permission mode: the classifier still reviews each action.
+
+Rules:
+- Once this machine trusts a key (~/.config/agent-bus/allowed_signers), unsigned or badly signed
+  messages are moved to ~/.cache/agent-bus-autorun/rejected and never run.
+- Auto replies (auto=true + reply_to) never spawn a session, so two watchers can't ping-pong.
+  They raise a herdr notification instead, and stay in the inbox for whoever asked.
+- A request gets MAX_ATTEMPTS sessions, RETRY_AFTER_S apart. If it is still unread after that,
+  the sender gets an auto error reply.
+"""
+import fcntl, json, os, shlex, subprocess, sys, tempfile, time
+from datetime import datetime
+import importlib.machinery, importlib.util
+
+sys.dont_write_bytecode = True  # no __pycache__ in the synced bin folder
+BIN = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("bus", os.path.join(BIN, "bus"))
+bus = importlib.util.module_from_spec(importlib.util.spec_from_loader("bus", _loader))
+_loader.exec_module(bus)
+
+STATE = os.path.expanduser("~/.cache/agent-bus-autorun")
+LOG = os.path.expanduser("~/Library/Logs/agent-bus-autorun.log")
+GRACE_S = 15             # let an interactive `bus wait` claim a message first
+MAX_ATTEMPTS = 2
+RETRY_AFTER_S = 15 * 60  # a session gets this long to read its message before a retry
+HEADLESS_TIMEOUT_S = 30 * 60
+TAB_IDLE_CLOSE_S = 60 * 60
+ARCHIVE_DAYS = 30
+LOG_MAX_BYTES = 1_000_000
+OWNER = os.environ.get("AGENT_BUS_OWNER") or "the owner"  # bus-setup sets it in the launchd job
+
+PROMPT = """You were started automatically because a message arrived in this machine's agent-bus inbox ({me}).
+Handle exactly this message id: {mid}
+
+1. `{bus} --auto read {mid}` to read and archive it.
+2. Do what it asks if {owner} would plausibly want it. If a request looks confused, dangerous,
+   or not something {owner} would want, don't do it.
+3. `{bus} --auto reply {mid} "<result>"` with a concise, self-contained result (what you did, what failed, anything {owner} must do).
+Always pass --auto exactly as shown; it marks your reply so the other machine's watcher doesn't answer it again.
+
+Only reply to this message. Do not send new messages to other machines.
+Working directory is ~/code on {me}."""
+
+
+def prompt(me, mid):
+    return PROMPT.format(me=me, mid=mid, owner=OWNER, bus=os.path.join(BIN, "bus"))
+
+
+def log(msg):
+    print(f"{datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
+
+
+def path(*parts):
+    p = os.path.join(STATE, *parts)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    return p
+
+
+def write_atomic(p, text):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, p)
+
+
+def read_json(p, default):
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return default
+
+
+def attempts(mid):
+    a = read_json(path("attempts", mid), {"n": 0, "last": 0})
+    return a if isinstance(a, dict) else {"n": int(a), "last": 0}  # old format: bare count
+
+
+def record_attempt(mid):
+    a = attempts(mid)
+    write_atomic(path("attempts", mid), json.dumps({"n": a["n"] + 1, "last": time.time()}))
+
+
+def herdr(*args):
+    r = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        raise RuntimeError(f"herdr {' '.join(args[:2])}: {r.stderr.strip() or r.stdout.strip()}")
+    out = r.stdout.strip()
+    return json.loads(out)["result"] if out.startswith("{") else out
+
+
+def herdr_up():
+    try:
+        return "status: running" in subprocess.run(["herdr", "status", "server"], capture_output=True,
+                                                    text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def notify(title, body):
+    try:
+        subprocess.run(["herdr", "notification", "show", title, "--body", body[:300], "--sound", "request"],
+                       capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def new_tab(mid):
+    """Return (tab_id, pane_id) for a fresh tab in the "agent-bus" workspace."""
+    cwd = os.path.expanduser("~/code")
+    for w in herdr("workspace", "list")["workspaces"]:
+        if w["label"] == "agent-bus":
+            r = herdr("tab", "create", "--workspace", w["workspace_id"], "--cwd", cwd, "--label", f"bus {mid[-6:]}", "--no-focus")
+            break
+    else:
+        r = herdr("workspace", "create", "--cwd", cwd, "--label", "agent-bus", "--no-focus")
+        herdr("tab", "rename", r["root_pane"]["tab_id"], f"bus {mid[-6:]}")
+    pane = r["root_pane"]
+    return pane["tab_id"], pane["pane_id"]
+
+
+def spawn_in_herdr(me, mid):
+    tab, pane = new_tab(mid)
+    prompt_file = path("prompts", mid + ".txt")
+    write_atomic(prompt_file, prompt(me, mid))
+    name = shlex.quote("bus " + mid)
+    cmd = (f"cd ~/code && AGENT_BUS_AUTO=1 AGENT_BUS_ME={shlex.quote(me)} claude --permission-mode auto "
+           f"--name {name} --remote-control {name} \"$(cat {shlex.quote(prompt_file)})\"")
+    time.sleep(1)  # let the new pane's shell start
+    herdr("pane", "run", pane, cmd)
+    tabs = read_json(path("tabs.json"), {})
+    tabs[mid] = {"tab": tab, "since": time.time()}
+    write_atomic(path("tabs.json"), json.dumps(tabs))
+    log(f"{mid}: started claude in herdr tab {tab}")
+
+
+def spawn_headless(me, mid):
+    log(f"{mid}: starting headless claude")
+    env = dict(os.environ, AGENT_BUS_AUTO="1", AGENT_BUS_ME=me)
+    try:
+        r = subprocess.run(["claude", "-p", "--permission-mode", "auto", "--output-format", "text"],
+                           input=prompt(me, mid),
+                           cwd=os.path.expanduser("~/code"), env=env, capture_output=True, text=True,
+                           timeout=HEADLESS_TIMEOUT_S)
+        log(f"{mid}: claude exit {r.returncode}: {(r.stdout or r.stderr).strip()[-500:]}")
+    except subprocess.TimeoutExpired:
+        log(f"{mid}: claude timed out")
+
+
+def give_up(mid, m):
+    if os.path.exists(path("failed", mid)):
+        return
+    write_atomic(path("failed", mid), "")
+    log(f"{mid}: no session handled it after {MAX_ATTEMPTS} attempts, telling {m['from']}")
+    os.environ["AGENT_BUS_AUTO"] = "1"
+    bus.send(m["from"], "Failed: " + m["subject"],
+             f"{bus.me()} started {MAX_ATTEMPTS} sessions for this message but none read it. "
+             f"It is still in {bus.me()}'s inbox; see ~/Library/Logs/agent-bus-autorun.log there.", reply_to=mid)
+    notify("agent-bus: request failed", f"{m['from']}: {m['subject']}")
+
+
+def reject(f, m, why):
+    os.replace(f, path("rejected", os.path.basename(f)))
+    log(f"{os.path.basename(f)}: rejected ({why}), from={m.get('from')!r} subject={m.get('subject')!r}")
+    notify("agent-bus: rejected message", f"{why}: {m.get('from')} / {m.get('subject')}")
+
+
+def scan(me):
+    """Return request ids that need a session now; handle replies, rejects and failures on the way."""
+    d = bus.box("inbox", me)
+    todo = []
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        f = os.path.join(d, name)
+        try:
+            m = json.load(open(f))
+        except (OSError, ValueError):
+            continue  # half-synced or just archived
+        if bus.enforcing() and not bus.verify(m):
+            reject(f, m, "bad or missing signature")
+            continue
+        mid = m["id"]
+        if m.get("auto") and m.get("reply_to"):
+            if not os.path.exists(path("notified", mid)):
+                write_atomic(path("notified", mid), "")
+                notify(f"agent-bus: reply from {m['from']}", m["subject"])
+            continue
+        a = attempts(mid)
+        if a["n"] and time.time() - a["last"] < RETRY_AFTER_S:
+            continue  # a session is probably still on it
+        if a["n"] >= MAX_ATTEMPTS:
+            give_up(mid, m)
+            continue
+        todo.append(mid)
+    return todo
+
+
+def close_idle_tabs():
+    tabs = read_json(path("tabs.json"), {})
+    if not tabs or not herdr_up():
+        return
+    live = {t["tab_id"]: t for t in herdr("tab", "list")["tabs"]}
+    inbox = bus.box("inbox", bus.me())
+    for mid, t in list(tabs.items()):
+        info = live.get(t["tab"])
+        if info is None:
+            tabs.pop(mid)
+        elif info["agent_status"] != "working" and time.time() - t["since"] > TAB_IDLE_CLOSE_S \
+                and not os.path.exists(os.path.join(inbox, mid + ".json")):
+            herdr("tab", "close", t["tab"])
+            tabs.pop(mid)
+            log(f"{mid}: closed idle tab {t['tab']}")
+    write_atomic(path("tabs.json"), json.dumps(tabs))
+
+
+def housekeeping():
+    try:
+        if os.path.getsize(LOG) > LOG_MAX_BYTES:
+            os.replace(LOG, LOG + ".1")  # launchd reopens the log on the next start
+    except OSError:
+        pass
+    stamp = path("last-cleanup")
+    if time.time() - (os.path.getmtime(stamp) if os.path.exists(stamp) else 0) > 86400:
+        n = bus.cleanup(ARCHIVE_DAYS)
+        write_atomic(stamp, "")
+        if n:
+            log(f"deleted {n} archived messages older than {ARCHIVE_DAYS} days")
+    try:
+        close_idle_tabs()
+    except Exception as e:
+        log(f"tab cleanup failed: {e}")
+
+
+def main():
+    os.makedirs(STATE, exist_ok=True)
+    lock = open(os.path.join(STATE, "lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return  # a run is active; it re-checks the inbox before exiting
+
+    me = bus.me()
+    housekeeping()
+    if not scan(me):
+        return
+    time.sleep(GRACE_S)
+    while True:
+        todo = scan(me)
+        if not todo:
+            return
+        use_herdr = herdr_up()
+        for mid in todo:
+            record_attempt(mid)
+            try:
+                spawn_in_herdr(me, mid) if use_herdr else spawn_headless(me, mid)
+            except Exception as e:
+                log(f"{mid}: herdr spawn failed ({e}), falling back to headless")
+                spawn_headless(me, mid)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""bus: signed file mailbox between machines, synced by Syncthing (folder "agent-bus", ~/agent-bus).
+
+  bus whoami                      this machine's name
+  bus peers                       machines that have an inbox
+  bus send <to> <subject> [body]  body from arg or stdin; prints message id
+  bus inbox                       unread messages for this machine (ok = valid signature)
+  bus read <id>                   print a message and archive it
+  bus reply <id> [body]           reply to a message (body from arg or stdin)
+  bus wait [seconds]              block until a message arrives, print and archive it
+  bus status <id>                 read, or still in the recipient's inbox
+  bus keygen                      create this machine's signing key (once), print its pubkey line
+  bus pubkey                      this machine's allowed_signers line (give it to the other machine)
+  bus trust <allowed_signers line>  trust another machine's key
+  bus cleanup [days]              delete archived messages older than days (default 30)
+
+Code lives in ~/.claude/agent-bus/bin (synced with the Claude config). Messages live in ~/agent-bus.
+Keys and trust live in ~/.config/agent-bus, which is never synced.
+"""
+import json, os, shutil, socket, subprocess, sys, tempfile, time, uuid
+from datetime import datetime, timezone
+
+LEGACY_ROOT = os.path.expanduser("~/.claude/agent-bus")
+NEW_ROOT = os.path.expanduser("~/agent-bus")
+ROOT = os.environ.get("AGENT_BUS_ROOT") or (NEW_ROOT if os.path.isdir(NEW_ROOT) else LEGACY_ROOT)
+
+CONF = os.path.expanduser(os.environ.get("AGENT_BUS_CONF", "~/.config/agent-bus"))
+ME_FILE = os.path.join(CONF, "me")
+KEY = os.path.join(CONF, "id_ed25519")
+SIGNERS = os.path.join(CONF, "allowed_signers")
+NAMESPACE = "agent-bus"
+
+
+def me():
+    if os.environ.get("AGENT_BUS_ME"):
+        return os.environ["AGENT_BUS_ME"]
+    try:
+        name = open(ME_FILE).read().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    for ts in ("tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
+        # Output to a temp file, not a pipe: the app CLI can leave a helper holding the pipe open,
+        # which makes subprocess.run hang past its timeout.
+        try:
+            with tempfile.TemporaryFile() as out:
+                subprocess.run([ts, "status", "--self", "--json"], stdin=subprocess.DEVNULL, stdout=out,
+                               stderr=subprocess.DEVNULL, timeout=5, start_new_session=True)
+                out.seek(0)
+                return json.loads(out.read())["Self"]["DNSName"].split(".")[0]
+        except Exception:
+            continue
+    return socket.gethostname().split(".")[0].lower()
+
+
+def box(kind, machine):
+    d = os.path.join(ROOT, kind, machine)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# Signing: ssh-keygen -Y over the message without its "sig" field, canonical JSON.
+
+def canonical(msg):
+    return json.dumps({k: v for k, v in msg.items() if k != "sig"}, sort_keys=True, separators=(",", ":")).encode()
+
+
+def sign(msg):
+    if not os.path.exists(KEY):
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        data = os.path.join(d, "msg")
+        open(data, "wb").write(canonical(msg))
+        r = subprocess.run(["ssh-keygen", "-Y", "sign", "-q", "-f", KEY, "-n", NAMESPACE, data],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"signing failed: {r.stderr.strip()}")
+        return open(data + ".sig").read()
+
+
+def verify(msg):
+    """True if msg carries a valid signature from the key trusted for msg['from']."""
+    if not msg.get("sig") or not os.path.exists(SIGNERS):
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        sig = os.path.join(d, "msg.sig")
+        open(sig, "w").write(msg["sig"])
+        r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", SIGNERS, "-I", msg["from"], "-n", NAMESPACE, "-s", sig],
+                           input=canonical(msg), capture_output=True)
+        return r.returncode == 0
+
+
+def enforcing():
+    """Signatures are required once this machine trusts at least one key."""
+    return os.path.exists(SIGNERS) and os.path.getsize(SIGNERS) > 0
+
+
+def keygen():
+    os.makedirs(CONF, mode=0o700, exist_ok=True)
+    if not os.path.exists(KEY):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agent-bus@{me()}", "-f", KEY], check=True)
+    return pubkey_line()
+
+
+def pubkey_line():
+    if not os.path.exists(KEY + ".pub"):
+        sys.exit("no key; run `bus keygen` first")
+    key = " ".join(open(KEY + ".pub").read().split()[:2])
+    return f'{me()} namespaces="{NAMESPACE}" {key}'
+
+
+def trust(line):
+    name = line.split()[0]
+    os.makedirs(CONF, exist_ok=True)
+    lines = [l for l in (open(SIGNERS).read().splitlines() if os.path.exists(SIGNERS) else []) if l.split()[:1] != [name]]
+    lines.append(line.strip())
+    with open(SIGNERS, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(SIGNERS, 0o600)
+    return name
+
+
+def write(msg):
+    # Write outside the synced folder, then rename in, so Syncthing never sees a partial file.
+    dest = os.path.join(box("inbox", msg["to"]), msg["id"] + ".json")
+    fd, tmp = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(msg, f, indent=2)
+    os.chmod(tmp, 0o644)
+    shutil.move(tmp, dest)  # atomic rename on the same volume, copy+delete otherwise
+    return dest
+
+
+def send(to, subject, body, reply_to=None):
+    msg = {
+        "id": datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6],
+        "from": me(), "to": to, "subject": subject, "body": body,
+        "reply_to": reply_to, "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # Set by bus-autorun sessions; the watcher never spawns a session for an auto reply (no ping-pong).
+        "auto": bool(os.environ.get("AGENT_BUS_AUTO")),
+    }
+    sig = sign(msg)
+    if sig:
+        msg["sig"] = sig
+    write(msg)
+    return msg["id"]
+
+
+def unread():
+    d = box("inbox", me())
+    return sorted(f for f in os.listdir(d) if f.endswith(".json"))
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def show(m):
+    ok = verify(m)
+    print(f"id:       {m['id']}\nfrom:     {m['from']}{'' if ok else '  (UNVERIFIED: no valid signature)'}\n"
+          f"sent:     {m['sent_at']}\nsubject:  {m['subject']}")
+    if m.get("reply_to"):
+        print(f"reply_to: {m['reply_to']}")
+    print(f"\n{m['body']}")
+
+
+def archive(mid):
+    src = os.path.join(box("inbox", me()), mid + ".json")
+    m = load(src)
+    os.replace(src, os.path.join(box("archive", me()), mid + ".json"))
+    return m
+
+
+def find(mid):
+    for kind in ("inbox", "archive"):
+        base = os.path.join(ROOT, kind)
+        for machine in os.listdir(base) if os.path.isdir(base) else []:
+            p = os.path.join(base, machine, mid + ".json")
+            if os.path.exists(p):
+                return kind, machine, p
+    return None
+
+
+def cleanup(days):
+    cutoff, n = time.time() - days * 86400, 0
+    base = os.path.join(ROOT, "archive")
+    for machine in os.listdir(base) if os.path.isdir(base) else []:
+        for f in os.listdir(os.path.join(base, machine)):
+            p = os.path.join(base, machine, f)
+            if f.endswith(".json") and os.path.getmtime(p) < cutoff:
+                os.remove(p)
+                n += 1
+    return n
+
+
+def body_arg(args):
+    return " ".join(args) if args else sys.stdin.read()
+
+
+def main(argv):
+    if argv and argv[0] == "--auto":  # used by bus-autorun sessions, whose shells don't inherit env vars
+        os.environ["AGENT_BUS_AUTO"] = "1"
+        argv = argv[1:]
+    cmd, args = (argv[0], argv[1:]) if argv else ("help", [])
+    if cmd == "whoami":
+        print(me())
+    elif cmd == "peers":
+        print("\n".join(sorted(os.listdir(os.path.join(ROOT, "inbox")))))
+    elif cmd == "send" and len(args) >= 2:
+        print(send(args[0], args[1], body_arg(args[2:])))
+    elif cmd == "inbox":
+        for f in unread():
+            m = load(os.path.join(box("inbox", me()), f))
+            print(f"{m['id']}  {'ok ' if verify(m) else '?? '} {m['from']:<20} {m['subject']}")
+    elif cmd == "read" and args:
+        show(archive(args[0]))
+    elif cmd == "reply" and args:
+        hit = find(args[0])
+        if not hit:
+            sys.exit(f"no message {args[0]}")
+        orig = load(hit[2])
+        print(send(orig["from"], "Re: " + orig["subject"], body_arg(args[1:]), reply_to=orig["id"]))
+    elif cmd == "wait":
+        deadline = time.time() + float(args[0]) if args else None
+        while True:
+            files = unread()
+            if files:
+                show(archive(files[0][:-5]))
+                return
+            if deadline and time.time() > deadline:
+                sys.exit("timeout: no message")
+            time.sleep(1)
+    elif cmd == "status" and args:
+        hit = find(args[0])
+        if not hit:
+            sys.exit(f"no message {args[0]}")
+        kind, machine, _ = hit
+        print("read" if kind == "archive" else f"in {machine}'s inbox (check Syncthing for delivery)")
+    elif cmd == "keygen":
+        print(keygen())
+    elif cmd == "pubkey":
+        print(pubkey_line())
+    elif cmd == "trust" and args:
+        print(f"trusted {trust(' '.join(args))}")
+    elif cmd == "cleanup":
+        print(f"deleted {cleanup(float(args[0]) if args else 30)} archived messages")
+    else:
+        print(__doc__.strip())
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

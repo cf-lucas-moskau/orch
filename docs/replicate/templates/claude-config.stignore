@@ -1,0 +1,45 @@
+// Syncthing ignore rules for ~/.claude (first match wins). Copy to ~/.claude/.stignore on both Macs.
+// Synced: CLAUDE.md, settings.json, skills/, hooks/, agents/, commands/, plugins/, agent-bus/bin, per-project memory/.
+// Not synced: per-machine runtime state that Claude Code rewrites constantly.
+
+// Keep project memory, drop transcripts and everything else per project
+!/projects/*/memory
+/projects/*/*
+
+// Session and runtime state
+/history.jsonl
+/sessions
+/session-env
+/shell-snapshots
+/file-history
+/paste-cache
+/todos
+/jobs
+/daemon
+/daemon.*
+/ide
+/state
+/tmp
+/downloads
+/backups
+/feedback
+/telemetry
+/statsig
+/bridge-spawn
+/debug
+/uploads
+
+// Caches and machine-local flags (the signed policy files conflict when synced)
+/cache
+/stats-cache.json
+/gh-pr-status-cache.json
+/mcp-needs-auth-cache.json
+/policy-limits.json*
+/remote-settings.json*
+/.last-*
+*.sync-conflict-*
+
+// Python bytecode from the agent-bus scripts
+__pycache__
+
+(?d).DS_Store
