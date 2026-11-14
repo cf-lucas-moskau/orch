@@ -71,7 +71,7 @@ Teile von orch sind auf Lucas zugeschnitten und bleiben bei dir aus: die Evrloot
 
 ## Gut zu wissen
 
-Der Auto-Modus und die Hooks gelten auch auf deinem Arbeits-Mac, weil `~/.claude/settings.json` über Syncthing auf beiden Macs dieselbe ist. Das ist gewollt: Eine Einstellung pro Person ist einfacher als zwei, die auseinanderlaufen, und auch die agent-bus-Sessions auf dem Arbeits-Mac laufen unbeaufsichtigt. Im Auto-Modus prüft ein Klassifizierer jede Aktion, statt dich zu fragen. Die Hooks tun auf dem Arbeits-Mac nichts: orchs Feed-Hook findet dort kein `~/orch`, der Bilder-Hook keine Sender-Markierung, und der Screenshot-Hook meldet sich nur bei einem Bildpfad, der auf diesem Mac fehlt, was auf dem Arbeits-Mac bei eigenen Screenshots nicht vorkommt.
+Der Auto-Modus und die Hooks gelten auch auf deinem Arbeits-Mac, weil `~/.claude/settings.json` über Syncthing auf beiden Macs dieselbe ist. Das ist gewollt: Eine Einstellung pro Person ist einfacher als zwei, die auseinanderlaufen, und auch die agent-bus-Sessions auf dem Arbeits-Mac laufen unbeaufsichtigt. Im Auto-Modus prüft ein Klassifizierer jede Aktion, statt dich zu fragen. Die Hooks tun auf dem Arbeits-Mac nichts: orchs Feed-Hook findet dort kein `~/orch`, der Bilder-Hook keine Sender-Markierung, und der Screenshot-Hook reagiert nur auf den Temp-Pfad eines Screenshots vom anderen Mac, nie auf eigene.
 
 FileVault und „immer an“ vertragen sich nur halb: Nach einem Stromausfall wartet der Host am FileVault-Bildschirm auf dein Passwort. Ein MacBook als Host überbrückt kurze Ausfälle mit dem Akku. Geplante Neustarts machst du mit `sudo fdesetup authrestart` (auch per SSH vom Arbeits-Mac), dann starten herdr und Remote Control von selbst.
 

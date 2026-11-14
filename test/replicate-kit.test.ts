@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -28,27 +28,45 @@ function hook(script: string, event: object, env: Record<string, string>) {
   return { said: r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string : '', ms: Date.now() - t };
 }
 
-test('replicate kit: remote-paths only answers for pasted main-Mac paths, never for output targets or URLs', () => {
+test('replicate kit: remote-paths acts only on main-Mac screenshot temp paths, never waits on anything else', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rp-'));
-  const shots = join(dir, 'Screenshots'), home = join(dir, 'home');
-  mkdirSync(shots); mkdirSync(home);
+  const shots = join(dir, 'Screenshots');
+  mkdirSync(shots);
   writeFileSync(join(shots, 'a.png'), 'x');
-  writeFileSync(join(shots, 'b.png'), 'x');
-  const env = { REMOTE_PATHS_DIR: shots, REMOTE_PATHS_WAIT: '2', REMOTE_PATHS_HOME: home, REMOTE_PATHS_TMPDIR: '/var/folders/own/session/T/' };
+  const env = { REMOTE_PATHS_DIR: shots, REMOTE_PATHS_WAIT: '2' };
   const run = (prompt: string) => hook('remote-paths.py', { prompt }, env);
+  // This Mac's own screenshot folder, when its temp dir has the macOS shape: not the main Mac's.
+  const tmp = (process.env.TMPDIR ?? '').replace(/\/$/, '');
+  const own = /^(\/private)?\/var\/folders\/[^/]+\/[^/]+\/T$/.test(tmp) ? join(tmp, 'TemporaryItems', `NSIRD_screencaptureui_rp${process.pid}`) : '';
+  if (own) mkdirSync(own, { recursive: true });
 
-  for (const prompt of ['create /tmp/report.pdf', 'see https://example.com/shots/a.png and http://x.io/var/folders/q/T/b.png',
-    `write the logo to ${home}/code/app/public/logo.png`, 'my own temp /var/folders/own/session/T/missing.png']) {
+  for (const prompt of ['create /tmp/report.pdf', 'see https://example.com/shots/a.png and http://x.io/var/folders/q/r/T/TemporaryItems/NSIRD_screencaptureui_Q1/a.png',
+    `write the logo to ${dir}/code/app/public/logo.png`, '/var/folders/xy/abc/T/missing.png', '/private/var/folders/xy/abc/T/out/report.pdf',
+    ...own ? [`${own}/gone.png`, `${own.replace(/^\/private/, '')}/gone.png`] : []]) {
     const r = run(prompt);
     assert.equal(r.said, '', prompt);
     assert.ok(r.ms < 1500, `${prompt} waited ${r.ms} ms`);
   }
-  const pasted = run("look at '/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1/a.png'");
-  assert.match(pasted.said, new RegExp(`synced copy here is ${shots}/a\\.png`));
-  assert.match(run(`also ${home}/Desktop/b.png`).said, new RegExp(`synced copy here is ${shots}/b\\.png`));
-  const missing = run('/var/folders/xy/T/NSIRD_screencaptureui_Q1/nope.png');
+  for (const prefix of ['', '/private']) {
+    const pasted = run(`look at '${prefix}/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1/a.png'`);
+    assert.match(pasted.said, new RegExp(`synced copy here is ${shots}/a\\.png`));
+  }
+  // Real screenshot names have spaces (German) or U+202F before AM/PM (English), pasted quoted or backslash-escaped.
+  const de = 'Bildschirmfoto 2026-11-14 um 10.00.00.png', en = 'Screenshot 2026-11-14 at 10.00.00 AM.png';
+  writeFileSync(join(shots, de), 'x');
+  writeFileSync(join(shots, en), 'x');
+  const folder = '/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1';
+  for (const [prompt, name] of [
+    [`see '${folder}/${de}' please`, de],
+    [`see "${folder}/${de}"`, de],
+    [`see ${folder}/${de.replaceAll(' ', '\\ ')} please`, de],
+    [`see ${folder}/${en.replaceAll(' ', '\\ ')} please`, en],
+    [`see '/private${folder}/${en}'`, en],
+  ]) assert.ok(run(prompt).said.includes(`synced copy here is ${shots}/${name}. Read`), prompt);
+  const missing = run('/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1/nope.png');
   assert.match(missing.said, /no synced copy named nope\.png/);
-  assert.ok(missing.ms >= 1900, 'waits for a temp file still syncing');
+  assert.ok(missing.ms >= 1900, 'waits for a screenshot still syncing');
+  if (own) rmSync(own, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -68,6 +86,14 @@ test('replicate kit: share-images names copies by content, never overwrites, pru
   assert.equal(readFileSync(b, 'utf8'), 'second');
   assert.equal(copyOf(one), a, 'same image again: same path');
   assert.deepEqual(readdirSync(shared).filter(f => f.startsWith('.part-')), [], 'no temp files left');
+  // Same size and mtime as an existing copy: reused without reading the source (unreadable here, so a copy would fail).
+  chmodSync(one, 0o000);
+  assert.equal(copyOf(one), a, 'unchanged image: no copy, no hash');
+  chmodSync(one, 0o644);
+  writeFileSync(one, 'third'); // same size, new mtime and bytes
+  const c = copyOf(one);
+  assert.notEqual(c, a, 'changed image: a new copy');
+  assert.equal(readFileSync(c, 'utf8'), 'third');
 
   const old = join(shared, 'old.png');
   writeFileSync(old, 'x');
