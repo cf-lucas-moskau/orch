@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
-import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, type LeadRecord } from './lead.ts';
+import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, parsePane, type LeadRecord } from './lead.ts';
 import { read as readInbox, readBeat } from './lead-inbox.ts';
 import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
@@ -524,7 +524,8 @@ function lead([sub, name]: string[]) {
     const now = { ...rec, workspace: la.workspace_id ?? rec.workspace, pane: la.pane_id, sid: la.agent_session?.value || rec.sid };
     if (JSON.stringify(now) !== JSON.stringify(rec)) save(rec = now);
   }
-  const watcherUp = () => leadUp(readBeat(root, name), leadRecord(name), Date.now());
+  const leadPane = () => { const r = spawnSync('herdr', ['agent', 'get', agent], { encoding: 'utf8', timeout: 10_000 }); return parsePane(r.stdout || r.stderr || ''); };
+  const watcherUp = () => leadUp(readBeat(root, name), leadRecord(name), Date.now(), leadPane);
   if (sub === 'status') {
     const beat = readBeat(root, name);
     return console.log(`${agent}: ${la ? `${la.agent_status} in ${la.pane_id}` : 'no live session'}, watcher ${watcherUp() ? 'up' : 'down'}`

@@ -22,11 +22,31 @@ export type LeadRecord = { name: string; workspace: string; pane: string; sid: s
 
 // A lead's watcher writes leads/<name>.beat every minute with its session id. The lead is up only while that beat is
 // fresh, comes from the session its record names, and the record says running: a watcher left over from a stopped or
-// replaced lead does not count. A watcher re-armed after its 30-minute Monitor timeout is back well within the window.
+// replaced lead does not count. The lead re-arms its expired 30-minute Monitor only when its turn ends, so a long turn
+// leaves the beat stale while the lead works: up to BEAT_DEAD_MS a stale beat still counts as up while herdr says the
+// lead's pane runs the recorded session and is working. A herdr call that failed says nothing either way ('unknown'), so
+// it keeps the lead up within that grace too. pane is asked only for a stale beat.
 export const BEAT_STALE_MS = 3 * 60_000;
+export const BEAT_DEAD_MS = 15 * 60_000;
 export type Beat = { ms: number; sid: string };
-export const leadUp = (beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number) =>
-  !!beat && !!rec && rec.status === 'running' && !!rec.sid && beat.sid === rec.sid && now - beat.ms < BEAT_STALE_MS;
+export type LeadPane = { status: string; sid: string } | 'gone' | 'unknown';
+export function leadUp(beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number, pane: () => LeadPane = () => 'gone') {
+  if (!beat || !rec || rec.status !== 'running' || !rec.sid || beat.sid !== rec.sid) return false;
+  const age = now - beat.ms;
+  if (age < BEAT_STALE_MS) return true;
+  if (age >= BEAT_DEAD_MS) return false;
+  const p = pane();
+  return p === 'unknown' || (p !== 'gone' && p.status === 'working' && p.sid === rec.sid);
+}
+
+// The output of `herdr agent get lead-<name>`: agent_not_found means its process is gone; anything else unreadable is unknown.
+export function parsePane(stdout: string): LeadPane {
+  let r: any;
+  try { r = JSON.parse(stdout); } catch { return 'unknown'; }
+  if (r?.error?.code === 'agent_not_found') return 'gone';
+  const a = r?.result?.agent;
+  return typeof a?.agent_status === 'string' ? { status: a.agent_status, sid: a.agent_session?.value ?? '' } : 'unknown';
+}
 
 const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED', 'STALLED']);
 
