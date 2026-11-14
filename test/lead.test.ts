@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utime
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { LEADS, leadNotice, leadPrompt, leadUp, ownerOf, shows } from '../src/lead.ts';
+import { LEADS, leadNotice, leadPrompt, leadUp, ownerOf, parsePane, shows, type LeadPane } from '../src/lead.ts';
 import { decisionSkeleton, nextDecisionNumber, parseDecision } from '../src/brief.ts';
 import { post, prune, read } from '../src/lead-inbox.ts';
 
@@ -64,19 +64,32 @@ test('a stale beat counts as up while the lead works, for up to 15 minutes', () 
   const now = 1_000_000_000;
   const rec = { sid: 'lead0001', status: 'running' as const };
   const beat = (min: number) => ({ ms: now - min * 60_000, sid: 'lead0001' });
-  const asked: string[] = [];
-  const herdr = (s: string | undefined) => () => { asked.push(String(s)); return s; };
-  assert.equal(leadUp(beat(1), rec, now, herdr('idle')), true, 'fresh beat');
-  assert.deepEqual(asked, [], 'herdr is not asked for a fresh beat');
-  assert.equal(leadUp(beat(5), rec, now, herdr('working')), true, 'stale beat, working');
-  assert.equal(leadUp(beat(14.9), rec, now, herdr('working')), true, 'just under 15 min, working');
-  assert.equal(leadUp(beat(3), rec, now, herdr('idle')), false, 'stale beat, idle');
-  assert.equal(leadUp(beat(5), rec, now, herdr('done')), false, 'stale beat, done');
-  assert.equal(leadUp(beat(5), rec, now, herdr('blocked')), false, 'stale beat, blocked');
-  assert.equal(leadUp(beat(5), rec, now, herdr(undefined)), false, 'stale beat, process gone');
+  let asked = 0;
+  const herdr = (p: LeadPane) => () => { asked++; return p; };
+  const as = (status: string, sid = 'lead0001') => herdr({ status, sid });
+  assert.equal(leadUp(beat(1), rec, now, as('idle')), true, 'fresh beat');
+  assert.equal(asked, 0, 'herdr is not asked for a fresh beat');
+  assert.equal(leadUp(beat(5), rec, now, as('working')), true, 'stale beat, working');
+  assert.equal(leadUp(beat(14.9), rec, now, as('working')), true, 'just under 15 min, working');
+  assert.equal(leadUp(beat(3), rec, now, as('idle')), false, 'stale beat, idle');
+  assert.equal(leadUp(beat(5), rec, now, as('done')), false, 'stale beat, done');
+  assert.equal(leadUp(beat(5), rec, now, as('blocked')), false, 'stale beat, blocked');
+  assert.equal(leadUp(beat(5), rec, now, herdr('gone')), false, 'stale beat, process gone');
   assert.equal(leadUp(beat(5), rec, now), false, 'stale beat, no herdr status given');
-  assert.equal(leadUp(beat(16), rec, now, herdr('working')), false, '16 min stale, working');
-  assert.equal(leadUp({ ms: now - 5 * 60_000, sid: 'other' }, rec, now, herdr('working')), false, 'stale beat of another session');
+  assert.equal(leadUp(beat(5), rec, now, as('working', 'someone-else')), false, 'another session works in that pane');
+  assert.equal(leadUp(beat(5), rec, now, herdr('unknown')), true, 'herdr failed: up within the grace');
+  assert.equal(leadUp(beat(16), rec, now, herdr('unknown')), false, '16 min stale, herdr failed');
+  assert.equal(leadUp(beat(16), rec, now, as('working')), false, '16 min stale, working');
+  assert.equal(leadUp({ ms: now - 5 * 60_000, sid: 'other' }, rec, now, as('working')), false, 'stale beat of another session');
+});
+
+test('parsePane reads herdr agent get: gone only on agent_not_found, unknown on anything unreadable', () => {
+  assert.deepEqual(parsePane('{"result":{"agent":{"agent_status":"working","agent_session":{"value":"lead0001"}}}}'), { status: 'working', sid: 'lead0001' });
+  assert.deepEqual(parsePane('{"result":{"agent":{"agent_status":"idle"}}}'), { status: 'idle', sid: '' });
+  assert.equal(parsePane('{"error":{"code":"agent_not_found","message":"not found"}}'), 'gone');
+  assert.equal(parsePane('{"error":{"code":"timeout"}}'), 'unknown');
+  assert.equal(parsePane(''), 'unknown', 'timed out or killed: no output');
+  assert.equal(parsePane('herdr: socket error'), 'unknown');
 });
 
 test('LEAD down is said once for a started lead, LEAD up once when it is back, nothing for a stopped one', () => {

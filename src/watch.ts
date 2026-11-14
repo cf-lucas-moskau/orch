@@ -9,7 +9,7 @@ import { classify, screenTail } from './triage.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
-import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, shows } from './lead.ts';
+import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 
@@ -24,18 +24,38 @@ const me = process.env.ORCH_LEAD || undefined;
 if (me && !LEADS[me]) { console.log(`LEAD error: ORCH_LEAD=${me} is no lead (${Object.keys(LEADS).join(', ')})`); process.exit(1); }
 const leadPath = (name: string, ext: string) => join(root, 'leads', `${name}.${ext}`);
 const record = (name: string) => json(`leads/${name}.json`, undefined);
-// herdr's agent_status of a lead, kept 30 s: up() runs on every line, and a long lead turn would otherwise ask per line.
-const leadStatus = new Map<string, { ms: number; status?: string }>();
-function herdrStatus(name: string): string | undefined {
-  const hit = leadStatus.get(name);
-  if (hit && Date.now() - hit.ms < 30_000) return hit.status;
-  const r = spawnSync('herdr', ['agent', 'get', leadAgent(name)], { encoding: 'utf8', timeout: 10_000 });
-  let status: string | undefined;
-  try { status = JSON.parse(r.stdout).result?.agent?.agent_status; } catch {}
-  leadStatus.set(name, { ms: Date.now(), status });
-  return status;
+// Each lead's pane as herdr last showed it, refreshed every 30 s off the line path (pollLeadPanes); up() only reads it.
+// A failed herdr call stores nothing, and an answer older than 90 s reads as unknown, so a herdr hiccup never downs a lead.
+const leadPanes = new Map<string, { ms: number; pane: LeadPane }>();
+const leadPane = (name: string): LeadPane => {
+  const hit = leadPanes.get(name);
+  return hit && Date.now() - hit.ms < 90_000 ? hit.pane : 'unknown';
+};
+function storePane(name: string, out: string) {
+  const pane = parsePane(out);
+  if (pane === 'unknown') leadPanes.delete(name); else leadPanes.set(name, { ms: Date.now(), pane });
 }
-const up = (name: string) => leadUp(readBeat(root, name), record(name), Date.now(), () => herdrStatus(name));
+const runningLeads = () => Object.keys(LEADS).filter(name => record(name)?.status === 'running');
+// Once at start, before anything asks up(): without an answer a dead lead's stale beat would read as up until the first poll.
+const pollLeadPanesNow = () => {
+  for (const name of runningLeads()) {
+    const r = spawnSync('herdr', ['agent', 'get', leadAgent(name)], { encoding: 'utf8', timeout: 10_000 });
+    storePane(name, r.stdout || r.stderr || '');
+  }
+};
+// herdr writes its errors, agent_not_found included, to stderr.
+function pollLeadPanes() {
+  for (const name of runningLeads()) {
+    const c = spawn('herdr', ['agent', 'get', leadAgent(name)]);
+    let out = '', err = '';
+    const kill = setTimeout(() => c.kill(), 10_000);
+    c.stdout.on('data', d => { out += d; });
+    c.stderr.on('data', d => { err += d; });
+    c.on('error', () => clearTimeout(kill));
+    c.on('close', () => { clearTimeout(kill); storePane(name, out || err); });
+  }
+}
+const up = (name: string) => leadUp(readBeat(root, name), record(name), Date.now(), () => leadPane(name));
 const workerRepo = (name: string) => json('workers.json', []).find((w: any) => w.status === 'running' && w.name === name)?.repo;
 // orch's watcher makes every line, a lead's included, and never drops one: a line of a lead that is up goes to that
 // lead's inbox, which only its watcher prints. A lead's watcher prints only its own lines.
@@ -228,6 +248,8 @@ function checkLeads(starting = false) {
 }
 
 function startOrchSide() {
+  pollLeadPanesNow();
+  setInterval(pollLeadPanes, 30_000);
   for (const l of pending()) { const o = ownerOf(l, workerRepo); if (o === 'orch' || !up(o)) console.log(l); }
   checkLeads(true);
   setInterval(() => { try { checkLeads(); } catch (e) { inboxError(e); } }, Number(process.env.ORCH_LEAD_CHECK_MS ?? 60_000));
