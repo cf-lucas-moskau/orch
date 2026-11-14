@@ -28,6 +28,14 @@ test('a final report after a subagent message is done', () => {
   assert.equal(classify(ev('Stop', 'I ran five fresh reviewers on PR 113. Five findings need fixing.')), 'done');
 });
 
+test('final reports that say "is in" or "remaining" are done (perf-q3 lost its DONE to these)', () => {
+  assert.equal(classify(ev('Stop', 'Q3 is in place and uncommitted. Engine commits now run on a Postgres connection of their own.',
+    'Logs are in the scratchpad. I didn\'t overlap with another worker\'s files, and I have no questions.')), 'done');
+  assert.equal(classify(ev('Stop', 'D-47 is in and both gates pass.')), 'done');
+  assert.equal(classify(ev('Stop', 'All fixed. No remaining failures; npm test 962 of 962.')), 'done');
+  assert.equal(classify(ev('Stop', 'The remaining runs will notify on completion.')), 'skip');
+});
+
 const workers = [
   { name: 'art-inpaint', pane: 'w7:p1', sid: 'aaaa1111-0000', worktree: '/wt/art-inpaint', status: 'running' },
   { name: 'codex-w', pane: 'w8:p1', worktree: '/wt/codex-w', status: 'running' },

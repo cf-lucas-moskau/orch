@@ -5,7 +5,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { feedLine, screenTail, workerFor } from './triage.ts';
+import { classify, feedLine, screenTail, workerFor, workerIn } from './triage.ts';
+import { due, finishKey, step as stepFinish, type Finishes } from './finish.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
@@ -99,9 +100,11 @@ function follow(d: string, from: number) {
     // The idea bridge writes its watcher lines ready-made: IDEA <id> <kind> <author>: <text>, TEAM <kind> <author>: <text>.
     if (e.event === 'Idea' || e.event === 'Team') return say(e.msg);
     sayStalls(stepStall(stalls, e));
+    stepFinish(finishes, e, line);
     if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
     const l = feedLine(e, json('workers.json', []), json('sessions.json', {}), leadSids());
     if (l) say(l);
+    if (l && (e.event === 'Stop' || e.event === 'Notification')) remember('done.json', [finishKey(line)]);
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.
   let switching = false;
@@ -118,6 +121,7 @@ const hooked = new Set<string>();
 // The feed's tail starts where this read of today's file ended (its last whole line), so nothing falls between them.
 const startDay = day();
 let startBytes = 0;
+const finishes: Finishes = new Map();
 const { stalls, current: startStalls } = (() => {
   const feed: FeedEvent[] = [];
   for (const d of [new Date(Date.now() - 864e5).toLocaleDateString('sv-SE'), startDay]) {
@@ -126,23 +130,57 @@ const { stalls, current: startStalls } = (() => {
     text = text.slice(0, text.lastIndexOf('\n') + 1);
     if (d === startDay) startBytes = Buffer.byteLength(text);
     for (const line of text.split('\n')) {
-      try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { if (e.sid !== self) feed.push(e); if (e.cwd) hooked.add(e.cwd); } } catch {}
+      try { const e = JSON.parse(line); if (e.event !== 'Idea' && e.event !== 'Team') { if (e.sid !== self) { feed.push(e); stepFinish(finishes, e, line); } if (e.cwd) hooked.add(e.cwd); } } catch {}
     }
   }
   return replayStalls(feed, Date.now());
 })();
+// stalled.json and done.json: the keys already said, each with when; entries older than three days are dropped.
+function remember(file: string, keys: string[]) {
+  const said: Record<string, number> = json(file, {});
+  const now = Date.now();
+  for (const k of Object.keys(said)) if (now - said[k] > 3 * 864e5) delete said[k];
+  for (const k of keys) said[k] = now;
+  writeFileSync(join(root, file), JSON.stringify(said, null, 2) + '\n');
+}
 function sayStalls(found: Stall[]) {
   for (const st of found) {
     const w = workerFor(json('workers.json', []), st.sid, st.cwd);
-    if (!w) continue;
-    const said: Record<string, number> = json('stalled.json', {});
-    if (said[st.key]) continue;
-    const now = Date.now();
-    for (const k of Object.keys(said)) if (now - said[k] > 3 * 864e5) delete said[k];
-    said[st.key] = now;
-    writeFileSync(join(root, 'stalled.json'), JSON.stringify(said, null, 2) + '\n');
+    if (!w || json('stalled.json', {})[st.key]) continue;
+    remember('stalled.json', [st.key]);
     say(stallLine(w.name, w.pane, st));
   }
+}
+// A worker's finished or blocked turn that got no line: missed between two watchers, or read as progress and quiet
+// since (src/finish.ts). Said once, on arm and every minute. Without done.json (the first run) the finishes so far count as said.
+// A replayed BLOCKED or a forced DONE stands only on what herdr shows now: a BLOCKED whose pane is no longer blocked
+// was answered and is dropped; a quiet worker whose pane is not idle or done is still busy and checked again next
+// minute, as is anything herdr gives no answer for.
+let finishing = false;
+async function sayFinishes() {
+  if (finishing) return;
+  finishing = true;
+  try {
+    const owed = due(finishes, Date.now());
+    if (!existsSync(join(root, 'done.json'))) return remember('done.json', owed.map(o => o.key));
+    const workers = json('workers.json', []);
+    for (const { e, key } of owed) {
+      const w = workerFor(workers, e.sid, e.cwd) ?? workerIn(workers, e.cwd);
+      if (!w || json('done.json', {})[key]) continue;
+      const kind = classify(e), quiet = kind === 'skip';
+      if (kind === 'blocked' || quiet) {
+        const status = (await herdrCall(new Set(), ['agent', 'get', w.pane])).result?.agent?.agent_status;
+        if (!status) continue;
+        if (kind === 'blocked' && status !== 'blocked') { remember('done.json', [key]); continue; }
+        if (quiet && status !== 'idle' && status !== 'done') continue;
+        if (json('done.json', {})[key]) continue;
+      }
+      remember('done.json', [key]);
+      const l = quiet ? feedLine({ ...e, msg: `quiet 30 min after: ${e.msg}` }, workers, json('sessions.json', {}), leadSids(), 'done')
+        : feedLine(e, workers, json('sessions.json', {}), leadSids());
+      if (l) say(l);
+    }
+  } finally { finishing = false; }
 }
 // Each follower's live herdr processes, by pane, killed when its worker is no longer followed or the watcher exits.
 const followers = new Map<string, Set<ChildProcess>>();
@@ -241,6 +279,8 @@ function startOrchSide() {
   setInterval(syncFollowers, 30_000);
   sayStalls(startStalls);
   setInterval(() => sayStalls(tickStalls(stalls, Date.now())), Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
+  void sayFinishes();
+  setInterval(() => void sayFinishes(),Number(process.env.ORCH_STALL_CHECK_MS ?? 60_000));
   follow(startDay, startBytes);
   refresh();
   setInterval(refresh, 10 * 60_000);

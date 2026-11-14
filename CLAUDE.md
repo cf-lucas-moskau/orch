@@ -51,6 +51,7 @@ Everything except the READMEs is local to this machine and not in git.
 | `decisions/` | One file per needs-the-user decision. |
 | `workers.json` | Workers orch dispatched: name, repo, branch, worktree, pane, session id, status. |
 | `stalled.json` | Stalled worker turns the watcher already reported (`STALLED`, src/stall.ts). |
+| `done.json` | Finished worker turns the watcher already reported; a finish it missed is replayed on arm (src/finish.ts). |
 | `overlap.json` | Worker pairs the watcher already reported as changing the same files (`orch overlap --new`). |
 | `leads/` | Per lead: `<name>.json` (workspace, pane, session id, running or stopped), `<name>.beat` (its watcher's heartbeat and session id), `<name>.inbox-<date>` (lines orch's watcher hands it, append-only, one file a day, deleted after two days), `<name>.offsets.json` (how far each inbox file has been read), `<name>.down` (orch already said LEAD down). |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |

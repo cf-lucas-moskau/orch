@@ -4,7 +4,9 @@ import type { FeedEvent } from './board.ts';
 // done is FYI unless orch finds a question on the pane, skip is noise.
 export type Kind = 'blocked' | 'question' | 'done' | 'skip';
 
-const INTERIM = /still running|\bnow (re-?)?(checking|running|reviewing)\b|waiting on|remaining|reviewers? (is|are) (in|done)|lens (is in|finished)|\bis in\b/i;
+// Only wording that says the turn waits on something. Bare "is in" and "remaining" read final reports ("Q3 is in
+// place", "no remaining failures") as progress and dropped their DONE.
+const INTERIM = /still running|\bnow (re-?)?(checking|running|reviewing)\b|waiting on|will notify|reviewers? (is|are) (in|done)|lens (is in|finished)/i;
 const QUESTION = /\?\s*(`{3}\s*)?$|\?\s*\n|\b(should I|want me to|do you want|shall I|which (one|option))\b/i;
 
 export function classify(e: FeedEvent): Kind {
@@ -25,17 +27,20 @@ export type WorkerRec = { name: string; pane: string; sid?: string; worktree?: s
 export const workerFor = (workers: WorkerRec[], sid: string, cwd: string) => workers.find(w => w.status === 'running'
   && (w.sid ? w.sid === sid : inside(cwd, w.worktree)));
 
+// The running worker whose worktree holds cwd, whatever session is talking there.
+export const workerIn = (workers: WorkerRec[], cwd: string) => workers.find(x => x.status === 'running' && inside(cwd, x.worktree));
+
 const inside = (cwd: string, dir?: string) => !!dir && !!cwd && (cwd === dir || cwd.startsWith(dir + '/'));
 
 // The watcher line for a feed event, or undefined when it needs nobody. Leads' turns end all day and they escalate
 // through decisions/, so their DONE says nothing. Another session id in a worker's worktree (a critic's claude -p, or
 // the worker itself after a /clear) is not a finished worker, so its DONE says nothing; its prompts and questions
 // still need the user and are said under the worker's name.
-export function feedLine(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>, leads: Set<string>): string | undefined {
-  const kind = classify(e);
+// kind overrides triage's reading, for a finish the watcher owes a line anyway (src/finish.ts).
+export function feedLine(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>, leads: Set<string>, kind = classify(e)): string | undefined {
   if (kind === 'skip' || (kind === 'done' && leads.has(e.sid))) return;
   const w = workerFor(workers, e.sid, e.cwd);
-  const host = w ? undefined : workers.find(x => x.status === 'running' && inside(e.cwd, x.worktree));
+  const host = w ? undefined : workerIn(workers, e.cwd);
   if (host && kind === 'done') return;
   const at = w ?? (sessions[e.sid] ? undefined : host);
   const { name, pane } = at ? { name: `worker ${at.name}`, pane: at.pane } : sessions[e.sid] ?? { name: e.sid.slice(0, 8), pane: '?' };
