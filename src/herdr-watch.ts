@@ -1,7 +1,7 @@
 // The watcher's herdr side, for workers whose sessions send no hook events (Codex: no session id in herdr, and no
 // turn hooks since herdr 0.9.5). Their finishes and blocks come from `herdr agent wait`; the hook feed stays the only
 // source for every other session.
-export type HerdrAgent = { agent_status?: string; state_change_seq?: number; completion_seq?: number };
+export type HerdrAgent = { agent_status?: string; state_change_seq?: number; completion_seq?: number; agent_session?: { value?: string } };
 export type HerdrReply = { result?: { agent?: HerdrAgent }; error?: { code: string; message?: string } };
 
 // done and idle are one finish (focusing a pane turns done into idle); completion_seq tells it from the next one.

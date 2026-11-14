@@ -153,9 +153,14 @@ function sayStalls(found: Stall[]) {
 }
 // A worker's finished or blocked turn that got no line: missed between two watchers, or read as progress and quiet
 // since (src/finish.ts). Said once, on arm and every minute. Without done.json (the first run) the finishes so far count as said.
-// A replayed BLOCKED or a forced DONE stands only on what herdr shows now: a BLOCKED whose pane is no longer blocked
-// was answered and is dropped; a quiet worker whose pane is not idle or done is still busy and checked again next
-// minute, as is anything herdr gives no answer for.
+// Some stand only on what herdr shows now: a replayed BLOCKED whose pane is no longer blocked was answered and is
+// dropped; a quiet worker whose pane is not idle or done is still busy and checked again next minute; another session's
+// DONE in a worker's worktree is the worker's only while the pane runs that session (the worker after a /clear), and
+// is dropped otherwise. A pane herdr does not know, or that gives no answer GONE_TRIES times in a row, is gone: its
+// worker gets one DONE marked (pane gone).
+const GONE_TRIES = 5;
+const HERDR_GET_MS = Number(process.env.ORCH_HERDR_MS ?? 10_000);
+const misses = new Map<string, number>();
 let finishing = false;
 async function sayFinishes() {
   if (finishing) return;
@@ -165,19 +170,26 @@ async function sayFinishes() {
     if (!existsSync(join(root, 'done.json'))) return remember('done.json', owed.map(o => o.key));
     const workers = json('workers.json', []);
     for (const { e, key } of owed) {
-      const w = workerFor(workers, e.sid, e.cwd) ?? workerIn(workers, e.cwd);
+      const own = workerFor(workers, e.sid, e.cwd), w = own ?? workerIn(workers, e.cwd);
       if (!w || json('done.json', {})[key]) continue;
-      const kind = classify(e), quiet = kind === 'skip';
-      if (kind === 'blocked' || quiet) {
-        const status = (await herdrCall(new Set(), ['agent', 'get', w.pane])).result?.agent?.agent_status;
-        if (!status) continue;
-        if (kind === 'blocked' && status !== 'blocked') { remember('done.json', [key]); continue; }
-        if (quiet && status !== 'idle' && status !== 'done') continue;
+      const kind = classify(e), quiet = kind === 'skip', foreignDone = !own && kind !== 'blocked' && kind !== 'question';
+      let note = quiet ? 'quiet 30 min after: ' : '';
+      if (kind === 'blocked' || quiet || foreignDone) {
+        const r = await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS);
+        const a = r.result?.agent;
         if (json('done.json', {})[key]) continue;
+        if (!a?.agent_status && r.error?.code !== 'agent_not_found' && (misses.get(key) ?? 0) + 1 < GONE_TRIES) { misses.set(key, (misses.get(key) ?? 0) + 1); continue; }
+        misses.delete(key);
+        if (!a?.agent_status) note = '(pane gone) ';
+        else if (foreignDone && a.agent_session?.value !== e.sid) { remember('done.json', [key]); continue; }
+        else if (kind === 'blocked' && a.agent_status !== 'blocked') { remember('done.json', [key]); continue; }
+        else if (quiet && a.agent_status !== 'idle' && a.agent_status !== 'done') continue;
       }
       remember('done.json', [key]);
-      const l = quiet ? feedLine({ ...e, msg: `quiet 30 min after: ${e.msg}` }, workers, json('sessions.json', {}), leadSids(), 'done')
-        : feedLine(e, workers, json('sessions.json', {}), leadSids());
+      // A session proven to be the worker (its pane runs it, or the pane is gone) speaks as the worker.
+      const as = own ? workers : workers.map((x: typeof w) => x === w ? { ...x, sid: e.sid } : x);
+      const l = note ? feedLine({ ...e, msg: note + e.msg }, as, json('sessions.json', {}), leadSids(), 'done')
+        : feedLine(e, as, json('sessions.json', {}), leadSids());
       if (l) say(l);
     }
   } finally { finishing = false; }
@@ -185,14 +197,16 @@ async function sayFinishes() {
 // Each follower's live herdr processes, by pane, killed when its worker is no longer followed or the watcher exits.
 const followers = new Map<string, Set<ChildProcess>>();
 // Bounded, so a wait the watcher left behind when it died ends on its own; a timeout just starts the next round.
-function herdrCall(procs: Set<ChildProcess>, args: string[]): Promise<HerdrReply> {
+// ms: a call that takes longer is killed and answers hung, so one stuck herdr never holds up what comes after it.
+function herdrCall(procs: Set<ChildProcess>, args: string[], ms?: number): Promise<HerdrReply> {
   return new Promise(resolve => {
     const c = spawn('herdr', args);
     procs.add(c);
     let out = '';
+    const hung = ms ? setTimeout(() => { resolve({ error: { code: 'hung' } }); c.kill('SIGKILL'); }, ms) : undefined;
     c.stdout.on('data', d => { out += d; });
-    c.on('error', () => resolve({ error: { code: 'spawn' } }));
-    c.on('close', () => { procs.delete(c); try { resolve(JSON.parse(out)); } catch { resolve({ error: { code: 'unparsed' } }); } });
+    c.on('error', () => { clearTimeout(hung); resolve({ error: { code: 'spawn' } }); });
+    c.on('close', () => { clearTimeout(hung); procs.delete(c); try { resolve(JSON.parse(out)); } catch { resolve({ error: { code: 'unparsed' } }); } });
   });
 }
 function followPane(w: Followed, seed: boolean) {
