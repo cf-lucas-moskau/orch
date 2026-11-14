@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, screenTail } from '../src/triage.ts';
+import { classify, feedLine, screenTail } from '../src/triage.ts';
 import type { FeedEvent } from '../src/board.ts';
 
 const ev = (event: string, msg: string, tail?: string): FeedEvent => ({ ts: '', sid: 's', event, cwd: '', prompt: '', msg, tail });
@@ -26,6 +26,38 @@ test('progress with no question is skipped even without a subagent prompt', () =
 
 test('a final report after a subagent message is done', () => {
   assert.equal(classify(ev('Stop', 'I ran five fresh reviewers on PR 113. Five findings need fixing.')), 'done');
+});
+
+const workers = [
+  { name: 'art-inpaint', pane: 'w7:p1', sid: 'aaaa1111-0000', worktree: '/wt/art-inpaint', status: 'running' },
+  { name: 'codex-w', pane: 'w8:p1', worktree: '/wt/codex-w', status: 'running' },
+];
+const sessions = { 'bbbb2222-0000': { name: 'orch-ui', pane: 'w2:p1' } };
+const at = (sid: string, cwd: string, event: string, msg: string): FeedEvent => ({ ts: '', sid, event, cwd, prompt: '', msg });
+const line = (e: FeedEvent) => feedLine(e, workers, sessions, new Set(['cccc3333-0000']));
+
+test('a worker is done only when its own session id ends the turn', () => {
+  assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Stop', 'All gates green.')), 'DONE worker art-inpaint [w7:p1] aaaa1111: All gates green.');
+  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint', 'Stop', '{"doors": 3}')), undefined, 'a critic run in the worktree is not the worker');
+  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint/sub', 'Notification', 'Claude needs your permission to use Bash')),
+    'BLOCKED worker art-inpaint [w7:p1] dddd4444: Claude needs your permission to use Bash', 'a prompt from another session id in the worktree passes (a /clear changes the id)');
+  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint', 'Stop', 'Which door?')), 'QUESTION worker art-inpaint [w7:p1] dddd4444: Which door?');
+  assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Notification', 'Claude needs your permission to use Bash')),
+    'BLOCKED worker art-inpaint [w7:p1] aaaa1111: Claude needs your permission to use Bash');
+  assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Stop', 'Which door?')), 'QUESTION worker art-inpaint [w7:p1] aaaa1111: Which door?');
+  assert.equal(line(at('eeee5555-0000', '/wt/codex-w/app', 'Stop', 'Codex finished.')), 'DONE worker codex-w [w8:p1] eeee5555: Codex finished.',
+    'a worker without a session id is found by its worktree');
+});
+
+test('a one-off session in a worker worktree says nothing; unknown sessions elsewhere still do', () => {
+  assert.equal(line(at('50f10d65-0000', '/wt/art-inpaint', 'Stop', 'ok')), undefined);
+  assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', 'Which file?')), 'QUESTION ffff6666 [?] ffff6666: Which file?');
+  assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', 'Merged.')), 'DONE ffff6666 [?] ffff6666: Merged.');
+  assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', '')), undefined, 'an empty DONE from an unknown helper says nothing');
+  assert.equal(line(at('ffff6666-0000', '/wt/art-inpaint-2', 'Stop', 'Merged.')), 'DONE ffff6666 [?] ffff6666: Merged.', 'a sibling folder is not the worktree');
+  assert.equal(line(at('bbbb2222-0000', '/r', 'Stop', 'Which file?')), 'QUESTION orch-ui [w2:p1] bbbb2222: Which file?');
+  assert.equal(line(at('bbbb2222-0000', '/r', 'Stop', 'Merged.')), 'DONE orch-ui [w2:p1] bbbb2222: Merged.');
+  assert.equal(line(at('cccc3333-0000', '/r', 'Stop', 'Merged.')), undefined, 'a lead is never DONE');
 });
 
 test('other events are noise', () => {

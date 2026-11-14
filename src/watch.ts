@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { FeedEvent } from './board.ts';
-import { classify, screenTail } from './triage.ts';
+import { feedLine, screenTail, workerFor } from './triage.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
@@ -76,12 +76,6 @@ function inboxError(e: unknown) {
 const safeRead = (name: string, emit: (l: string) => void) => { try { read(root, name, emit); } catch (e) { inboxError(e); } };
 // Sessions that are leads: their turns end all day and they escalate through decisions/, so orch skips their DONE lines.
 const leadSids = () => new Set(Object.keys(LEADS).flatMap(n => json(`leads/${n}.json`, null)?.sid ?? []));
-// Workers orch dispatched are tagged so a DONE line triggers their gates check.
-const names = (): Record<string, { name: string; pane: string }> => {
-  const out = json('sessions.json', {});
-  for (const w of json('workers.json', [])) if (w.status === 'running' && w.sid) out[w.sid] = { name: `worker ${w.name}`, pane: w.pane };
-  return out;
-};
 
 // Every tail this watcher runs, killed when it exits so no tail outlives it.
 const tails = new Set<ChildProcess>();
@@ -106,15 +100,8 @@ function follow(d: string, from: number) {
     if (e.event === 'Idea' || e.event === 'Team') return say(e.msg);
     sayStalls(stepStall(stalls, e));
     if (e.cwd && !hooked.has(e.cwd)) { hooked.add(e.cwd); syncFollowers(); }
-    const kind = classify(e);
-    if (kind === 'skip' || (kind === 'done' && leadSids().has(e.sid))) return;
-    // Codex panes have no session id in herdr, so a worker is also found by its worktree.
-    const w = json('workers.json', []).find((x: any) => x.status === 'running' && x.worktree === e.cwd);
-    const s = names()[e.sid] ?? (w ? { name: `worker ${w.name}`, pane: w.pane } : { name: e.sid.slice(0, 8), pane: '?' });
-    const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
-    // Workers' helper subagents end with an empty DONE from a session orch doesn't know; nothing to act on.
-    if (kind === 'done' && !text.trim() && s.pane === '?') return;
-    say(`${kind.toUpperCase()} ${s.name} [${s.pane}] ${e.sid.slice(0, 8)}: ${text}`);
+    const l = feedLine(e, json('workers.json', []), json('sessions.json', {}), leadSids());
+    if (l) say(l);
   });
   // Switch files at midnight; if tail dies for any other reason, follow again so the watcher never goes deaf.
   let switching = false;
@@ -144,12 +131,9 @@ const { stalls, current: startStalls } = (() => {
   }
   return replayStalls(feed, Date.now());
 })();
-// A worker with a known session id matches by it alone; its folder only when it has none (Codex).
-const workerOf = (st: Stall) => json('workers.json', []).find((x: any) => x.status === 'running'
-  && (x.sid ? x.sid === st.sid : !!x.worktree && (st.cwd === x.worktree || st.cwd.startsWith(x.worktree + '/'))));
 function sayStalls(found: Stall[]) {
   for (const st of found) {
-    const w = workerOf(st);
+    const w = workerFor(json('workers.json', []), st.sid, st.cwd);
     if (!w) continue;
     const said: Record<string, number> = json('stalled.json', {});
     if (said[st.key]) continue;

@@ -4,7 +4,10 @@
 # Must never block or fail the session: no orch dir means no-op, errors are swallowed, always exit 0.
 dir="${ORCH_DIR:-$HOME/orch}"
 [ -d "$dir" ] || exit 0
+# Headless runs (claude -p, the Agent SDK) are one-offs, not sessions orch watches. The payload doesn't say print mode;
+# Claude Code sets CLAUDE_CODE_ENTRYPOINT=sdk-cli (sdk-ts, sdk-py) for them and cli for an interactive session.
 in=$(cat)
+if [ "${ORCH_AGENT:-claude}" = claude ]; then case "${CLAUDE_CODE_ENTRYPOINT:-}" in sdk-*) exit 0 ;; esac; fi
 {
   mkdir -p "$dir/feed"
   ev=$(printf '%s' "$in" | jq -r '.hook_event_name // empty')

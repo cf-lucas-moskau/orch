@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const hook = join(import.meta.dirname, '..', 'hooks', 'orch-feed.sh');
-const run = (dir: string, payload: object | string) =>
-  execFileSync('bash', [hook], { input: typeof payload === 'string' ? payload : JSON.stringify(payload), env: { ...process.env, ORCH_DIR: dir } });
+const run = (dir: string, payload: object | string, env: Record<string, string> = {}) => execFileSync('bash', [hook],
+  { input: typeof payload === 'string' ? payload : JSON.stringify(payload), env: { ...process.env, ORCH_DIR: dir, CLAUDE_CODE_ENTRYPOINT: 'cli', ...env } });
 const lines = (dir: string) => {
   const f = readdirSync(join(dir, 'feed'));
   return f.flatMap(n => readFileSync(join(dir, 'feed', n), 'utf8').trim().split('\n')).map(l => JSON.parse(l));
@@ -47,6 +47,15 @@ test('does nothing and exits 0 when the orch dir is missing', () => {
   const d = join(fresh(), 'nope');
   run(d, { session_id: 's4', hook_event_name: 'Stop' });
   assert.ok(!existsSync(d));
+});
+
+test('headless claude -p runs leave no line; codex started from one still does', () => {
+  const d = fresh();
+  run(d, { session_id: 'h1', hook_event_name: 'Stop', cwd: '/x', last_assistant_message: '{"doors": 3}' }, { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' });
+  run(d, { session_id: 'h2', hook_event_name: 'Stop', cwd: '/x', last_assistant_message: 'ok' }, { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' });
+  run(d, { session_id: 'c1', hook_event_name: 'Stop', cwd: '/x', last_assistant_message: 'codex done' }, { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', ORCH_AGENT: 'codex' });
+  run(d, { session_id: 'i1', hook_event_name: 'Stop', cwd: '/x', last_assistant_message: 'interactive done' });
+  assert.deepEqual(lines(d).map(l => l.sid), ['c1', 'i1']);
 });
 
 test('exits 0 on garbage input', () => {
