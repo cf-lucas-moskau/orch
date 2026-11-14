@@ -13,6 +13,7 @@ projects.md
 workers.json
 overlap.json
 stalled.json
+done.json
 leads/
 log.md
 decisions/*
