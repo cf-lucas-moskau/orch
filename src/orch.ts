@@ -524,7 +524,7 @@ function lead([sub, name]: string[]) {
     const now = { ...rec, workspace: la.workspace_id ?? rec.workspace, pane: la.pane_id, sid: la.agent_session?.value || rec.sid };
     if (JSON.stringify(now) !== JSON.stringify(rec)) save(rec = now);
   }
-  const watcherUp = () => leadUp(readBeat(root, name), leadRecord(name), Date.now());
+  const watcherUp = () => leadUp(readBeat(root, name), leadRecord(name), Date.now(), () => la?.agent_status);
   if (sub === 'status') {
     const beat = readBeat(root, name);
     return console.log(`${agent}: ${la ? `${la.agent_status} in ${la.pane_id}` : 'no live session'}, watcher ${watcherUp() ? 'up' : 'down'}`

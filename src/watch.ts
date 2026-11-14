@@ -24,7 +24,18 @@ const me = process.env.ORCH_LEAD || undefined;
 if (me && !LEADS[me]) { console.log(`LEAD error: ORCH_LEAD=${me} is no lead (${Object.keys(LEADS).join(', ')})`); process.exit(1); }
 const leadPath = (name: string, ext: string) => join(root, 'leads', `${name}.${ext}`);
 const record = (name: string) => json(`leads/${name}.json`, undefined);
-const up = (name: string) => leadUp(readBeat(root, name), record(name), Date.now());
+// herdr's agent_status of a lead, kept 30 s: up() runs on every line, and a long lead turn would otherwise ask per line.
+const leadStatus = new Map<string, { ms: number; status?: string }>();
+function herdrStatus(name: string): string | undefined {
+  const hit = leadStatus.get(name);
+  if (hit && Date.now() - hit.ms < 30_000) return hit.status;
+  const r = spawnSync('herdr', ['agent', 'get', leadAgent(name)], { encoding: 'utf8', timeout: 10_000 });
+  let status: string | undefined;
+  try { status = JSON.parse(r.stdout).result?.agent?.agent_status; } catch {}
+  leadStatus.set(name, { ms: Date.now(), status });
+  return status;
+}
+const up = (name: string) => leadUp(readBeat(root, name), record(name), Date.now(), () => herdrStatus(name));
 const workerRepo = (name: string) => json('workers.json', []).find((w: any) => w.status === 'running' && w.name === name)?.repo;
 // orch's watcher makes every line, a lead's included, and never drops one: a line of a lead that is up goes to that
 // lead's inbox, which only its watcher prints. A lead's watcher prints only its own lines.

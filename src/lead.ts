@@ -22,11 +22,17 @@ export type LeadRecord = { name: string; workspace: string; pane: string; sid: s
 
 // A lead's watcher writes leads/<name>.beat every minute with its session id. The lead is up only while that beat is
 // fresh, comes from the session its record names, and the record says running: a watcher left over from a stopped or
-// replaced lead does not count. A watcher re-armed after its 30-minute Monitor timeout is back well within the window.
+// replaced lead does not count. The lead re-arms its expired 30-minute Monitor only when its turn ends, so a long turn
+// leaves the beat stale while the lead works: up to BEAT_DEAD_MS a stale beat still counts as up while herdr says the
+// lead's pane is working. status gives herdr's agent_status, undefined when its process is gone; it is asked only then.
 export const BEAT_STALE_MS = 3 * 60_000;
+export const BEAT_DEAD_MS = 15 * 60_000;
 export type Beat = { ms: number; sid: string };
-export const leadUp = (beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number) =>
-  !!beat && !!rec && rec.status === 'running' && !!rec.sid && beat.sid === rec.sid && now - beat.ms < BEAT_STALE_MS;
+export function leadUp(beat: Beat | undefined, rec: Pick<LeadRecord, 'sid' | 'status'> | undefined, now: number, status: () => string | undefined = () => undefined) {
+  if (!beat || !rec || rec.status !== 'running' || !rec.sid || beat.sid !== rec.sid) return false;
+  const age = now - beat.ms;
+  return age < BEAT_STALE_MS || (age < BEAT_DEAD_MS && status() === 'working');
+}
 
 const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED', 'STALLED']);
 

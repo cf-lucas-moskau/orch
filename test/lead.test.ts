@@ -60,6 +60,25 @@ test('a lead is up while a fresh beat comes from the session its running record 
   assert.equal(leadUp({ ms: now, sid: '' }, { ...rec, sid: '' }, now), false, 'no session id on either side');
 });
 
+test('a stale beat counts as up while the lead works, for up to 15 minutes', () => {
+  const now = 1_000_000_000;
+  const rec = { sid: 'lead0001', status: 'running' as const };
+  const beat = (min: number) => ({ ms: now - min * 60_000, sid: 'lead0001' });
+  const asked: string[] = [];
+  const herdr = (s: string | undefined) => () => { asked.push(String(s)); return s; };
+  assert.equal(leadUp(beat(1), rec, now, herdr('idle')), true, 'fresh beat');
+  assert.deepEqual(asked, [], 'herdr is not asked for a fresh beat');
+  assert.equal(leadUp(beat(5), rec, now, herdr('working')), true, 'stale beat, working');
+  assert.equal(leadUp(beat(14.9), rec, now, herdr('working')), true, 'just under 15 min, working');
+  assert.equal(leadUp(beat(3), rec, now, herdr('idle')), false, 'stale beat, idle');
+  assert.equal(leadUp(beat(5), rec, now, herdr('done')), false, 'stale beat, done');
+  assert.equal(leadUp(beat(5), rec, now, herdr('blocked')), false, 'stale beat, blocked');
+  assert.equal(leadUp(beat(5), rec, now, herdr(undefined)), false, 'stale beat, process gone');
+  assert.equal(leadUp(beat(5), rec, now), false, 'stale beat, no herdr status given');
+  assert.equal(leadUp(beat(16), rec, now, herdr('working')), false, '16 min stale, working');
+  assert.equal(leadUp({ ms: now - 5 * 60_000, sid: 'other' }, rec, now, herdr('working')), false, 'stale beat of another session');
+});
+
 test('LEAD down is said once for a started lead, LEAD up once when it is back, nothing for a stopped one', () => {
   const ev = LEADS.evrloot;
   const down = leadNotice(ev, false, true, false);
