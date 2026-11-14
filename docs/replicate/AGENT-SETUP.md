@@ -4,7 +4,18 @@ You are a Claude Code agent setting up your human's two Macs so they work like L
 
 ## How to run this file
 
-- **Roles.** Every step is tagged `[host]`, `[main]` or `[both]`. Run only the steps for the Mac you are on. Do the host first, up to the end of phase 9, then the main Mac, then phase 10 from the main Mac.
+- **Roles.** Every step is tagged `[host]`, `[main]` or `[both]`. Run only the steps for the Mac you are on, in the order below. Some steps need the other Mac to be further along, so the two agents take turns. At each handover, stop and tell the human which step the other Mac's agent runs next; resume when the human says it is done (or check the other Mac's `~/agent-setup-log.md` over SSH once S3.3 works).
+
+| Turn | Mac | Steps | Then |
+| --- | --- | --- | --- |
+| 1 | host | S0.1 to S4.1 | hand over to main |
+| 2 | main | S0.1 to S4.2 (S3.3 gives main SSH to the host; S4.2 pairs both Syncthings) | hand over to host |
+| 3 | host | S4.3, S5.1, S5.2, S5.3 | hand over to main |
+| 4 | main | S4.4, S4.5, S5.2, S5.3, S5.4, S6.4 | hand over to host |
+| 5 | host | S6.1 to S8.6 | hand over to main |
+| 6 | main | S9.1, S9.2, S10.1, S10.2 (and S10.1 on the host over SSH) | done |
+
+S5.1 runs on the host before S4.4 so that main's first sync of `~/.claude` already carries the agent-bus code and skill.
 - **Idempotent.** Start every step with its `Verify:` command. Already passing: write "skip" in the log and move on. After doing the step, run `Verify:` again; the step is done only when it passes.
 - **Progress log.** Append one line per step to `~/agent-setup-log.md` (`- S4.2 done`, `- S4.2 skip`, `- S4.2 blocked: <why>`). On a restart, read it and continue at the first step not done.
 - **The human.** Steps marked `HUMAN:` need hands, a password, a browser login or an account; everything else is yours. Batch the HUMAN parts: before each phase, collect every HUMAN step in it and ask once, with exact clicks or a ready-to-paste Terminal block. Never ask for anything you can find out yourself (`tailscale status`, Obsidian's vault list, `whoami`).
@@ -204,12 +215,13 @@ echo "$HOST_ID" > ~/.agent-setup.host-id
 Verify (after about 30 s): `curl -s -H "X-API-Key: $(grep -o '<apikey>[^<]*' "$HOME/Library/Application Support/Syncthing/config.xml" | sed 's/<apikey>//')" http://127.0.0.1:8384/rest/system/connections | python3 -c 'import json,sys;print([d["connected"] for d in json.load(sys.stdin)["connections"].values()])'` prints `[True]`.
 
 ### S4.3 [host] `~/.claude` as the source
-On the host, put the ignore file in place and share the folder. The host's `~/.claude` wins the first sync.
+Needs S4.2 done on main (turn 2): until then the host knows no other device. On the host, put the ignore file in place and share the folder. The host's `~/.claude` wins the first sync.
 
 ```bash
 . ~/.agent-setup.env
 cp "$TPL/claude-config.stignore" ~/.claude/.stignore
 MAIN_ID=$(syncthing cli config devices list | grep -v "$(syncthing cli show system | python3 -c 'import json,sys;print(json.load(sys.stdin)["myID"])')" | head -1)
+[ -n "$MAIN_ID" ] || { echo "main is not paired yet: run S4.2 on main first"; exit 1; }
 syncthing cli config folders list | grep -qx claude-config || \
   syncthing cli config folders add --id claude-config --label claude-config --path "$HOME/.claude" --type sendreceive
 syncthing cli config folders claude-config devices add --device-id "$MAIN_ID" 2>/dev/null || true
@@ -230,19 +242,30 @@ syncthing cli config folders list | grep -qx claude-config || \
 syncthing cli config folders claude-config devices add --device-id "$HOST_ID" 2>/dev/null || true
 ```
 
-Wait until the folder is idle with nothing left to fetch, then:
+Then wait for the download, revert main's own differences, and wait again: the revert runs in the background and re-downloads the host's versions. Switch the folder type only when the folder is idle, needs nothing and has no local changes left. Switching earlier would publish main's leftovers to the host.
 
 ```bash
 K=$(grep -o '<apikey>[^<]*' "$HOME/Library/Application Support/Syncthing/config.xml" | sed 's/<apikey>//')
-curl -s -H "X-API-Key: $K" "http://127.0.0.1:8384/rest/db/status?folder=claude-config" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["state"], d["needFiles"], d["receiveOnlyChangedFiles"])'
-# when it prints "idle 0 <n>":
+settled() { # idle, nothing to fetch, no receive-only changes; waits up to 20 min
+  for _ in $(seq 1 240); do
+    s=$(curl -s -H "X-API-Key: $K" "http://127.0.0.1:8384/rest/db/status?folder=claude-config" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["state"], d["needFiles"], d["receiveOnlyChangedFiles"])')
+    echo "$s"
+    case "$s" in "idle 0 0") return 0 ;; "idle 0 "*) [ "${1:-}" = any ] && return 0 ;; esac
+    sleep 5
+  done
+  return 1
+}
+settled any || { echo "claude-config did not finish downloading"; exit 1; }
 curl -s -X POST -H "X-API-Key: $K" "http://127.0.0.1:8384/rest/db/revert?folder=claude-config"
+sleep 5
+settled || { echo "revert did not finish; leave the folder receive only and look at the Syncthing GUI"; exit 1; }
 syncthing cli config folders claude-config type set sendreceive
 ```
 
-Verify: `diff <(ssh "$HOST_NAME" cat .claude/CLAUDE.md 2>/dev/null) ~/.claude/CLAUDE.md && echo same` (after phase 6 there is a CLAUDE.md to compare; before that, compare `ls ~/.claude/skills`).
+Verify: `syncthing cli config folders claude-config type get` prints `sendreceive`, and `diff <(ssh "$HOST_NAME" cat .claude/skills/agent-bus/SKILL.md) ~/.claude/skills/agent-bus/SKILL.md && echo same` prints `same`.
 
 ### S4.5 [main] The other three folders
+Needs S4.3 done on the host (turn 3), so both Macs already share a folder and know each other.
 Share `agent-bus` and `agent-outbox` both ways, the vault one way. Find the vault path from Obsidian:
 
 ```bash
@@ -304,6 +327,7 @@ AGENT_BUS_OWNER="$(. ~/.agent-setup.env; echo "$OWNER")" ~/.claude/agent-bus/bin
 Verify: `launchctl print gui/$(id -u)/agent-bus.watch >/dev/null && echo watching`
 
 ### S5.4 [main] Trust each other (from main)
+Needs S5.2 and S5.3 done on both Macs (host in turn 3, main earlier in turn 4).
 
 ```bash
 . ~/.agent-setup.env
@@ -366,9 +390,13 @@ Lucas runs workers in pstack's poteto-mode (`/pstack:poteto-mode`) and has compo
 bash "$KIT/host-services.sh"
 ```
 
-This installs `agent-host.herdr-server` (keeps herdr running) and `agent-host.rc-bootstrap` (every 5 min makes sure herdr's `remote-control` workspace runs `claude remote-control`, so the human can start sessions on the host from the Claude app or claude.ai/code).
+This installs three launchd jobs, so the host comes back after a reboot with nobody attaching to herdr:
 
-Verify: `herdr status server | grep "status: running" && herdr workspace list | grep -q '"label":"remote-control"' && echo services`
+- `agent-host.herdr-server` keeps the herdr server running.
+- `agent-host.rc-bootstrap` (every 5 min) makes sure herdr's `remote-control` workspace runs `claude remote-control`, so the human can start sessions on the host from the Claude app or claude.ai/code.
+- `agent-host.orch-bootstrap` (every 5 min) makes sure herdr's `orch` workspace runs orch. If it doesn't, it resumes orch's last conversation there (it records orch's session id while orch runs; a fresh orch when there is none) and prompts it to re-arm its watcher, which brings back the queue page and routines. It does nothing until `~/orch` exists (S8). Log: `~/Library/Logs/agent-host.orch-bootstrap.log`.
+
+Verify: `herdr status server | grep "status: running" && herdr workspace list | grep -q '"label":"remote-control"' && launchctl print gui/$(id -u)/agent-host.orch-bootstrap >/dev/null && echo services`
 
 HUMAN, once: in the Claude app on the phone, open Code and check that the host shows up as an environment.
 
@@ -420,21 +448,21 @@ Verify: every repo row's path exists: `grep '^|' ~/orch/projects.md | tail -n +3
 `cd ~/orch && npm run setup -- --nightly` adds a 23:40 job that reads the day's corrections and proposes memory and rule updates, applied only after the human says yes. Offer it in one line.
 
 ### S8.5 [host] Start orch in herdr
+The `agent-host.orch-bootstrap` job from S7.1 starts orch within 5 minutes of S8.1. Start it now instead of waiting:
+
 ```bash
-herdr workspace list | grep -q '"label":"orch"' || {
-  pane=$(herdr workspace create --cwd "$HOME/orch" --label orch --no-focus | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])')
-  sleep 2
-  herdr pane run "$pane" "cd ~/orch && npm start"
-}
+~/.local/bin/orch-bootstrap.sh
 ```
 
-HUMAN, once: attach (`herdr --remote <HOST_NAME>` from main after S9.1, or `herdr` in Terminal on the host), switch to workspace `orch`, accept the folder trust prompt if Claude shows one, and send the first prompt: "what's going on". The answer lists the sessions herdr shows. Detach; herdr keeps running.
+It creates herdr's workspace `orch`, starts orch in `~/orch` and sends it its first prompt. The same happens after every reboot or crash.
 
-`npm start` runs `claude -n orch --remote-control orch --plugin-dir ./mod`: orch with Remote Control on (reachable as "orch" from the phone and claude.ai/code) and the deck mod (`/deck`). The deck is an early-access Claude Code mod; if `/deck` is unknown, skip it, nothing else depends on it.
+HUMAN, only if Claude shows a folder trust prompt on this first start (orch then stays silent and Verify fails): attach (`herdr` in Terminal on the host, or `herdr --remote <HOST_NAME>` from main), switch to workspace `orch`, accept it and say "what's going on". Detach; herdr keeps running.
+
+orch runs as `claude -n orch --remote-control orch --plugin-dir ./mod` (what `npm start` runs): orch with Remote Control on (reachable as "orch" from the phone and claude.ai/code) and the deck mod (`/deck`). The deck is an early-access Claude Code mod; if `/deck` is unknown, skip it, nothing else depends on it.
 
 On its first turn orch arms its watcher (feed, herdr state, the decision queue page on port 7390) and adds the `morning-brief` routine; that is in orch's own `CLAUDE.md`.
 
-Verify: `herdr workspace list | grep -q '"label":"orch"' && nc -z -G 2 127.0.0.1 7390 && test -f ~/orch/routines/morning-brief.md && echo orch-up` (allow a minute after the first prompt).
+Verify: `herdr workspace list | grep -q '"label":"orch"' && nc -z -G 2 127.0.0.1 7390 && test -f ~/orch/routines/morning-brief.md && echo orch-up` (allow two minutes after the start).
 
 ### S8.6 [host] The decision queue page
 The page serves every open decision on `http://127.0.0.1:7390` and on the host's tailnet name. From the tailnet it needs a one-time login link per device; orch relays it from the watcher's `QUEUE started` line, and it is also in `~/Library/Logs/orch.queue.log`. The phone (with the Tailscale app) is the natural place for it.
@@ -442,7 +470,7 @@ The page serves every open decision on `http://127.0.0.1:7390` and on the host's
 Verify: `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7390/` prints `200`.
 
 ## Phase 9: the main Mac
-Run phases 1 to 6 marked `[main]` or `[both]` on main if not done yet. Then:
+Turn 6. Every earlier `[main]` and `[both]` step is done by now (turns 2 and 4). Then:
 
 ### S9.1 [main] Reach the host's herdr
 `herdr --remote <HOST_NAME>` attaches to the host's herdr over SSH: orch, workers, agent-bus sessions, in this terminal, nothing running locally.
@@ -473,6 +501,18 @@ Verify: `git -C ~/code/$repo branch -r | grep agent-host` after the first worker
 4. Remote Control: on the phone, open the Claude app, Code, the "orch" session: it answers.
 
 Done when all four pass. Report to the human in a few lines: what runs where, what they declined, and the two playbooks in `PLAYBOOKS.md`.
+
+## Known limits
+
+Found in review and left as they are. None blocks the setup; fix one when it bites.
+
+- **bus-autorun state never shrinks.** Every message leaves small files in `~/.cache/agent-bus-autorun/{attempts,prompts,notified,failed}`, and auto replies nobody reads stay in the inbox and get their signature re-checked on every scan. Harmless for months; `bus inbox` plus `bus read` clears replies.
+- **bus-autorun closes waiting sessions.** A bus session older than an hour that is not `working` gets its tab closed, also when it is blocked on a question. Its request is already archived, so it is not retried. Answer bus sessions within the hour.
+- **Retry tabs are forgotten.** When a request is retried after 15 minutes, the first attempt's tab is no longer tracked for cleanup; close it in herdr by hand.
+- **rc-bootstrap can type twice.** In the 10 s while `rc-loop.sh` restarts `claude remote-control`, the 5-minute check may see no claude and type `rc-loop.sh` into the running loop. The pane then runs a second loop; closing the tab lets the job start a clean one.
+- **orch-bootstrap is not tested on a fresh reboot.** It was checked by dry run against a running orch. Two things are unverified: whether herdr, when a client attaches later, also restores the old agent in the pane orch-bootstrap already started; and that a first `claude --continue` with no conversation exits so the fresh start runs. Check once after the first reboot: `herdr agent list` shows one claude in workspace `orch`.
+- **image-gen errors.** An empty `candidates` list (some safety blocks) or a network error prints a Python traceback instead of "no image in response". Treat a traceback as the same thing: rephrase or retry.
+- **deck-to-pdf trailing page.** A deck with another `div` after the last slide inside `#deck` gets one blank last page. Delete it or move that element out of `#deck`.
 
 ## Lucas-specific parts (skip unless asked)
 

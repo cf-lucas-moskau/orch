@@ -8,6 +8,7 @@ briefs/
 board.md
 sessions.json
 local.md
+!docs/replicate/templates/local.md
 projects.md
 workers.json
 overlap.json

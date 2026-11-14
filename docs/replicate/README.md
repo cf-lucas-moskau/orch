@@ -33,7 +33,7 @@ Rechne mit einem halben Tag, davon etwa eine Stunde aktiv für dich, verteilt au
 
 ## So startest du
 
-Erst den Host, dann den Arbeits-Mac. Auf jedem Mac:
+Du fängst mit dem Host an. Die beiden Agents wechseln sich danach ein paar Mal ab, weil manche Schritte den anderen Mac brauchen (Tailscale, Syncthing, die Schlüssel für den agent-bus). Dein Agent sagt dir jeweils, wann du am anderen Mac weitermachen sollst. Auf jedem Mac:
 
 1. macOS einrichten wie oben, dann im Terminal `xcode-select --install`.
 2. Claude Code installieren: `curl -fsSL https://claude.ai/install.sh | bash`, dann `claude` starten und einloggen.
@@ -52,7 +52,7 @@ Der Agent führt ein Protokoll in `~/agent-setup-log.md` und macht nach einer Un
 | `PLAYBOOKS.md` | euch beide | Coding-Worker und lose Themen, einmal durchgespielt |
 | `templates/` | den Agent | `CLAUDE.md` (deine globalen Regeln), `local.md` für orch, Syncthing-Ignore für `~/.claude` |
 | `kit/agent-bus/` | den Agent | die Mailbox zwischen den Macs: `bus`, Watcher, Setup, Skill |
-| `kit/host-services.sh`, `kit/remote-control/` | den Agent | herdr und Remote Control per launchd, damit der Host nach einem Neustart von selbst hochkommt |
+| `kit/host-services.sh`, `kit/remote-control/`, `kit/orch-bootstrap.sh` | den Agent | herdr, Remote Control und orch per launchd, damit der Host nach einem Neustart von selbst hochkommt |
 | `kit/image-gen/` | den Agent | Bildgenerierung über Gemini |
 | `kit/deck-to-pdf.mjs` | den Agent | Präsentation zu PDF, unsichtbar im Hintergrund |
 | `kit/check.sh` | beide | Statusprüfung, ändert nichts |

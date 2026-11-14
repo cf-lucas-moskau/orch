@@ -14,7 +14,7 @@ Rules:
 - A request gets MAX_ATTEMPTS sessions, RETRY_AFTER_S apart. If it is still unread after that,
   the sender gets an auto error reply.
 """
-import fcntl, json, os, shlex, subprocess, sys, tempfile, time
+import fcntl, json, os, re, shlex, subprocess, sys, tempfile, time
 from datetime import datetime
 import importlib.machinery, importlib.util
 
@@ -24,7 +24,7 @@ _loader = importlib.machinery.SourceFileLoader("bus", os.path.join(BIN, "bus"))
 bus = importlib.util.module_from_spec(importlib.util.spec_from_loader("bus", _loader))
 _loader.exec_module(bus)
 
-STATE = os.path.expanduser("~/.cache/agent-bus-autorun")
+STATE = os.path.expanduser(os.environ.get("AGENT_BUS_STATE", "~/.cache/agent-bus-autorun"))
 LOG = os.path.expanduser("~/Library/Logs/agent-bus-autorun.log")
 GRACE_S = 15             # let an interactive `bus wait` claim a message first
 MAX_ATTEMPTS = 2
@@ -165,9 +165,36 @@ def give_up(mid, m):
 
 
 def reject(f, m, why):
+    m = m if isinstance(m, dict) else {}
     os.replace(f, path("rejected", os.path.basename(f)))
     log(f"{os.path.basename(f)}: rejected ({why}), from={m.get('from')!r} subject={m.get('subject')!r}")
-    notify("agent-bus: rejected message", f"{why}: {m.get('from')} / {m.get('subject')}")
+    notify("agent-bus: rejected message", f"{why}: {str(m.get('from'))[:40]} / {str(m.get('subject'))[:80]}")
+
+
+ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")      # what bus.send makes
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")  # machine names
+
+
+def malformed(name, m):
+    """Why an inbox file is not a well-formed bus message, or None. Its id ends up in paths and in a prompt."""
+    if not isinstance(m, dict):
+        return "not a JSON object"
+    mid = m.get("id")
+    if not isinstance(mid, str) or not ID_RE.match(mid):
+        return "bad id"
+    if name != mid + ".json":
+        return "id does not match file name"
+    for k in ("from", "to"):
+        if not isinstance(m.get(k), str) or not NAME_RE.match(m[k]):
+            return f"bad {k}"
+    for k in ("subject", "body"):
+        if not isinstance(m.get(k), str):
+            return f"missing {k}"
+    if "sig" in m and not isinstance(m["sig"], str):
+        return "bad sig"
+    if m.get("reply_to") is not None and not (isinstance(m["reply_to"], str) and ID_RE.match(m["reply_to"])):
+        return "bad reply_to"
+    return None
 
 
 def scan(me):
@@ -182,8 +209,20 @@ def scan(me):
             m = json.load(open(f))
         except (OSError, ValueError):
             continue  # half-synced or just archived
-        if bus.enforcing() and not bus.verify(m):
-            reject(f, m, "bad or missing signature")
+        try:
+            why = malformed(name, m)
+            if why:
+                reject(f, m, f"malformed envelope: {why}")
+                continue
+            if bus.enforcing() and not bus.verify(m):
+                reject(f, m, "bad or missing signature")
+                continue
+        except Exception as e:  # one bad file must never stop the scanner
+            log(f"{name}: could not check ({e!r}), rejecting")
+            try:
+                reject(f, m, "check failed")
+            except OSError:
+                pass
             continue
         mid = m["id"]
         if m.get("auto") and m.get("reply_to"):
