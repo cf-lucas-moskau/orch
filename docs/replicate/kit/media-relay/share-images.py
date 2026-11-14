@@ -9,9 +9,11 @@ this file syncs to main with ~/.claude and does nothing there.
 The image is first copied to a private temp file, and that copy is named
 <name>-<first 10 hex of its sha256><ext> and hard-linked into place, which fails instead of
 replacing. So a name always matches the bytes it holds, the same image lands on the same
-path, and parallel workers cannot overwrite each other. Copies older than 14 days go, checked at most
-once an hour.
+path, and parallel workers cannot overwrite each other. A copy keeps the source's mtime, so
+reading the same unchanged image again finds it by size and mtime without copying or hashing.
+Its access time marks the last use; copies unused for 14 days go, checked at most once an hour.
 """
+import glob
 import hashlib
 import json
 import os
@@ -43,7 +45,7 @@ def prune():
     for f in os.listdir(SHARED):
         p = os.path.join(SHARED, f)
         try:
-            if not f.startswith(".") and os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+            if not f.startswith(".") and os.path.isfile(p) and os.path.getatime(p) < cutoff:
                 os.remove(p)
         except OSError:
             pass
@@ -57,22 +59,38 @@ def digest(path):
     return h.hexdigest()[:10]
 
 
+def unchanged_copy(src, base, ext, st):
+    # A copy of this image made earlier: same name stem, size and mtime. Then nothing is copied or hashed.
+    for f in glob.glob(os.path.join(glob.escape(SHARED), f"{glob.escape(base)}-{'[0-9a-f]' * 10}{glob.escape(ext)}")):
+        c = os.stat(f)
+        if c.st_size == st.st_size and c.st_mtime_ns == st.st_mtime_ns:
+            return f
+    return None
+
+
 def share(src):
-    # Copy first, then name the copy by its own hash: the name always matches the bytes it holds,
-    # even when src changes while this runs.
     base, ext = os.path.splitext(os.path.basename(src))
-    fd, tmp = tempfile.mkstemp(prefix=".part-", dir=SHARED)
-    try:
-        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
-            shutil.copyfileobj(inp, out)
-        dest = os.path.join(SHARED, f"{base}-{digest(tmp)}{ext}")
+    st = os.stat(src)
+    dest = unchanged_copy(src, base, ext, st)
+    if not dest:
+        # Copy first, then name the copy by its own hash: the name always matches the bytes it holds,
+        # even when src changes while this runs.
+        fd, tmp = tempfile.mkstemp(prefix=".part-", dir=SHARED)
         try:
-            os.link(tmp, dest)
-        except FileExistsError:
-            pass  # the same bytes are already there
-    finally:
-        os.unlink(tmp)
-    os.utime(dest)
+            with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+                shutil.copyfileobj(inp, out)
+            # The source's mtime only when it did not change during the copy, so a later match is exact.
+            if os.stat(src).st_mtime_ns == st.st_mtime_ns:
+                os.utime(tmp, ns=(time.time_ns(), st.st_mtime_ns))
+            dest = os.path.join(SHARED, f"{base}-{digest(tmp)}{ext}")
+            try:
+                os.link(tmp, dest)
+            except FileExistsError:
+                pass  # the same bytes are already there
+        finally:
+            os.unlink(tmp)
+    # Last use is the access time; the mtime stays the source's.
+    os.utime(dest, ns=(time.time_ns(), os.stat(dest).st_mtime_ns))
     return dest
 
 

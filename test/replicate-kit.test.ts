@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -51,6 +51,18 @@ test('replicate kit: remote-paths acts only on main-Mac screenshot temp paths, n
     const pasted = run(`look at '${prefix}/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1/a.png'`);
     assert.match(pasted.said, new RegExp(`synced copy here is ${shots}/a\\.png`));
   }
+  // Real screenshot names have spaces (German) or U+202F before AM/PM (English), pasted quoted or backslash-escaped.
+  const de = 'Bildschirmfoto 2026-11-14 um 10.00.00.png', en = 'Screenshot 2026-11-14 at 10.00.00 AM.png';
+  writeFileSync(join(shots, de), 'x');
+  writeFileSync(join(shots, en), 'x');
+  const folder = '/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1';
+  for (const [prompt, name] of [
+    [`see '${folder}/${de}' please`, de],
+    [`see "${folder}/${de}"`, de],
+    [`see ${folder}/${de.replaceAll(' ', '\\ ')} please`, de],
+    [`see ${folder}/${en.replaceAll(' ', '\\ ')} please`, en],
+    [`see '/private${folder}/${en}'`, en],
+  ]) assert.ok(run(prompt).said.includes(`synced copy here is ${shots}/${name}. Read`), prompt);
   const missing = run('/var/folders/xy/abc/T/TemporaryItems/NSIRD_screencaptureui_Q1/nope.png');
   assert.match(missing.said, /no synced copy named nope\.png/);
   assert.ok(missing.ms >= 1900, 'waits for a screenshot still syncing');
@@ -74,6 +86,14 @@ test('replicate kit: share-images names copies by content, never overwrites, pru
   assert.equal(readFileSync(b, 'utf8'), 'second');
   assert.equal(copyOf(one), a, 'same image again: same path');
   assert.deepEqual(readdirSync(shared).filter(f => f.startsWith('.part-')), [], 'no temp files left');
+  // Same size and mtime as an existing copy: reused without reading the source (unreadable here, so a copy would fail).
+  chmodSync(one, 0o000);
+  assert.equal(copyOf(one), a, 'unchanged image: no copy, no hash');
+  chmodSync(one, 0o644);
+  writeFileSync(one, 'third'); // same size, new mtime and bytes
+  const c = copyOf(one);
+  assert.notEqual(c, a, 'changed image: a new copy');
+  assert.equal(readFileSync(c, 'utf8'), 'third');
 
   const old = join(shared, 'old.png');
   writeFileSync(old, 'x');

@@ -19,16 +19,18 @@ import time
 
 SYNC_DIR = os.environ.get("REMOTE_PATHS_DIR", os.path.expanduser("~/Screenshots"))
 WAIT_S = float(os.environ.get("REMOTE_PATHS_WAIT", "20"))
-SHOT_RE = re.compile(
-    r"(?<![\w/])(?:/private)?/var/folders/[^/\s'\"]+/[^/\s'\"]+/T/TemporaryItems/"
-    r"NSIRD_screencaptureui_[^/\s'\"]+/(?:\\.|[^/\s'\"\\])+"
-)
+# Paths as a terminal pastes them, the same parsing as the hook this one is based on: '...', "..." or bare
+# with backslash-escaped spaces. A bare path also keeps U+202F (narrow no-break space, in English macOS
+# screenshot names), which \s would otherwise end it at.
+PATH_RE = re.compile(r"""'(/[^']+)'|"(/[^"]+)"|(/(?:\\.| |[^\s'"\\])+)""")
+# The only paths acted on: a file directly inside a screenshot's temp folder.
+SHOT = re.compile(r"(?:/private)?/var/folders/[^/]+/[^/]+/T/TemporaryItems/NSIRD_screencaptureui_[^/]+/[^/]+")
 
 
 def pasted_shots(prompt):
-    for m in SHOT_RE.findall(prompt):
-        path = re.sub(r"\\(.)", r"\1", m).rstrip(".,;:)")
-        if not os.path.exists(path) and not os.path.isdir(os.path.dirname(path)):
+    for quoted1, quoted2, bare in PATH_RE.findall(prompt):
+        path = quoted1 or quoted2 or re.sub(r"\\(.)", r"\1", bare).rstrip(".,;:)")
+        if SHOT.fullmatch(path) and not os.path.exists(path) and not os.path.isdir(os.path.dirname(path)):
             yield path
 
 
