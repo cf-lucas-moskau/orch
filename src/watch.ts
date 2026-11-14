@@ -156,11 +156,9 @@ function sayStalls(found: Stall[]) {
 // Some stand only on what herdr shows now: a replayed BLOCKED whose pane is no longer blocked was answered and is
 // dropped; a quiet worker whose pane is not idle or done is still busy and checked again next minute; another session's
 // DONE in a worker's worktree is the worker's only while the pane runs that session (the worker after a /clear), and
-// is dropped otherwise. A pane herdr does not know, or that gives no answer GONE_TRIES times in a row, is gone: its
-// worker gets one DONE marked (pane gone).
-const GONE_TRIES = 5;
+// is dropped otherwise. No answer from herdr (an error, a timeout, a pane it does not know) is unknown: checked again
+// next minute, never said.
 const HERDR_GET_MS = Number(process.env.ORCH_HERDR_MS ?? 10_000);
-const misses = new Map<string, number>();
 let finishing = false;
 async function sayFinishes() {
   if (finishing) return;
@@ -173,22 +171,17 @@ async function sayFinishes() {
       const own = workerFor(workers, e.sid, e.cwd), w = own ?? workerIn(workers, e.cwd);
       if (!w || json('done.json', {})[key]) continue;
       const kind = classify(e), quiet = kind === 'skip', foreignDone = !own && kind !== 'blocked' && kind !== 'question';
-      let note = quiet ? 'quiet 30 min after: ' : '';
       if (kind === 'blocked' || quiet || foreignDone) {
-        const r = await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS);
-        const a = r.result?.agent;
-        if (json('done.json', {})[key]) continue;
-        if (!a?.agent_status && r.error?.code !== 'agent_not_found' && (misses.get(key) ?? 0) + 1 < GONE_TRIES) { misses.set(key, (misses.get(key) ?? 0) + 1); continue; }
-        misses.delete(key);
-        if (!a?.agent_status) note = '(pane gone) ';
-        else if (foreignDone && a.agent_session?.value !== e.sid) { remember('done.json', [key]); continue; }
-        else if (kind === 'blocked' && a.agent_status !== 'blocked') { remember('done.json', [key]); continue; }
-        else if (quiet && a.agent_status !== 'idle' && a.agent_status !== 'done') continue;
+        const a = (await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS)).result?.agent;
+        if (!a?.agent_status || json('done.json', {})[key]) continue;
+        if (foreignDone && a.agent_session?.value !== e.sid) { remember('done.json', [key]); continue; }
+        if (kind === 'blocked' && a.agent_status !== 'blocked') { remember('done.json', [key]); continue; }
+        if (quiet && a.agent_status !== 'idle' && a.agent_status !== 'done') continue;
       }
       remember('done.json', [key]);
-      // A session proven to be the worker (its pane runs it, or the pane is gone) speaks as the worker.
+      // A session its worker's pane runs (the worker after a /clear) speaks as the worker.
       const as = own ? workers : workers.map((x: typeof w) => x === w ? { ...x, sid: e.sid } : x);
-      const l = note ? feedLine({ ...e, msg: note + e.msg }, as, json('sessions.json', {}), leadSids(), 'done')
+      const l = quiet ? feedLine({ ...e, msg: `quiet 30 min after: ${e.msg}` }, as, json('sessions.json', {}), leadSids(), 'done')
         : feedLine(e, as, json('sessions.json', {}), leadSids());
       if (l) say(l);
     }

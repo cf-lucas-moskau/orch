@@ -166,8 +166,8 @@ test('the watcher says every finished or blocked worker once, as herdr shows it 
   await kill(third.p);
 });
 
-test('a hung herdr holds up nothing, a gone pane gets one (pane gone) DONE, and a worker after /clear gets its DONE', async () => {
-  const { root, add } = ledger(['hung', 'asks', 'closed', 'silent', 'cleared', 'helped']);
+test('a hung herdr holds up nothing and a worker after /clear gets its DONE', async () => {
+  const { root, add } = ledger(['hung', 'asks', 'cleared', 'helped']);
   writeFileSync(join(root, 'done.json'), '{}');
   const stub = herdrStub();
   const pane = (name: string, state: string) => writeFileSync(join(stub, 'state', `${name}:p1`), state);
@@ -176,9 +176,6 @@ test('a hung herdr holds up nothing, a gone pane gets one (pane gone) DONE, and 
   pane('hung', 'hang');
   add(ago(1), 'ask00001', 'asks', 'Notification', perm);
   pane('asks', 'blocked ask00001');
-  add(ago(40), 'clo00001', 'closed', 'Stop', 'Still running the e2e.');
-  pane('closed', 'gone');
-  add(ago(40), 'sil00001', 'silent', 'Stop', 'Still running the e2e.');
   // cleared ran /clear: its pane now runs new00001. helped's worktree has a helper session; its pane runs the worker.
   add(ago(1), 'new00001', 'cleared', 'Stop', 'All green, committed.');
   pane('cleared', 'idle new00001');
@@ -186,23 +183,17 @@ test('a hung herdr holds up nothing, a gone pane gets one (pane gone) DONE, and 
   pane('helped', 'working hel00001');
 
   const w = watcher(root, stub);
-  await until(w.lines, 3);
+  await until(w.lines, 2);
   assert.deepEqual(turnEnds(w.lines).sort(), [
     'BLOCKED worker asks [asks:p1] ask00001: Claude needs your permission to use Bash',
     'DONE worker cleared [cleared:p1] new00001: All green, committed.',
-    'DONE worker closed [closed:p1] clo00001: (pane gone) Still running the e2e.',
   ], 'the hung pane first in line did not hold these up');
-  await until(w.lines, 5);
-  assert.deepEqual(turnEnds(w.lines).slice(3).sort(), [
-    'DONE worker hung [hung:p1] hun00001: (pane gone) Claude needs your permission to use Bash',
-    'DONE worker silent [silent:p1] sil00001: (pane gone) Still running the e2e.',
-  ], 'no answer five times in a row is gone');
   // Live: cleared runs /clear again and finishes.
   pane('cleared', 'idle new00002');
   add(new Date().toISOString(), 'new00002', 'cleared', 'Stop', 'Round 2 done.');
-  await until(w.lines, 6);
+  await until(w.lines, 3);
   await pause(2000);
-  assert.deepEqual(turnEnds(w.lines).slice(5), ['DONE worker cleared [cleared:p1] new00002: Round 2 done.'],
-    'each said once; the helper in helped\'s worktree never');
+  assert.deepEqual(turnEnds(w.lines).slice(2), ['DONE worker cleared [cleared:p1] new00002: Round 2 done.'],
+    'each said once; the helper in helped\'s worktree never; the hung pane is unknown, never said');
   await kill(w.p);
 });
