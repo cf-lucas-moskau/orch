@@ -39,15 +39,18 @@ const line = (e: FeedEvent) => feedLine(e, workers, sessions, new Set(['cccc3333
 test('a worker is done only when its own session id ends the turn', () => {
   assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Stop', 'All gates green.')), 'DONE worker art-inpaint [w7:p1] aaaa1111: All gates green.');
   assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint', 'Stop', '{"doors": 3}')), undefined, 'a critic run in the worktree is not the worker');
-  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint/sub', 'Notification', 'Claude needs your permission to use Bash')), undefined,
-    'nothing from another session in the worktree, a prompt included');
+  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint/sub', 'Notification', 'Claude needs your permission to use Bash')),
+    'BLOCKED worker art-inpaint [w7:p1] dddd4444: Claude needs your permission to use Bash', 'a prompt from another session id in the worktree passes (a /clear changes the id)');
+  assert.equal(line(at('dddd4444-0000', '/wt/art-inpaint', 'Stop', 'Which door?')), 'QUESTION worker art-inpaint [w7:p1] dddd4444: Which door?');
+  assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Notification', 'Claude needs your permission to use Bash')),
+    'BLOCKED worker art-inpaint [w7:p1] aaaa1111: Claude needs your permission to use Bash');
+  assert.equal(line(at('aaaa1111-0000', '/wt/art-inpaint', 'Stop', 'Which door?')), 'QUESTION worker art-inpaint [w7:p1] aaaa1111: Which door?');
   assert.equal(line(at('eeee5555-0000', '/wt/codex-w/app', 'Stop', 'Codex finished.')), 'DONE worker codex-w [w8:p1] eeee5555: Codex finished.',
     'a worker without a session id is found by its worktree');
 });
 
 test('a one-off session in a worker worktree says nothing; unknown sessions elsewhere still do', () => {
   assert.equal(line(at('50f10d65-0000', '/wt/art-inpaint', 'Stop', 'ok')), undefined);
-  assert.equal(line(at('50f10d65-0000', '/wt/art-inpaint', 'Stop', 'Which file?')), undefined);
   assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', 'Which file?')), 'QUESTION ffff6666 [?] ffff6666: Which file?');
   assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', 'Merged.')), 'DONE ffff6666 [?] ffff6666: Merged.');
   assert.equal(line(at('ffff6666-0000', '/Users/lucas/orch', 'Stop', '')), undefined, 'an empty DONE from an unknown helper says nothing');

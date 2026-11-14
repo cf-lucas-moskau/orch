@@ -28,14 +28,17 @@ export const workerFor = (workers: WorkerRec[], sid: string, cwd: string) => wor
 const inside = (cwd: string, dir?: string) => !!dir && !!cwd && (cwd === dir || cwd.startsWith(dir + '/'));
 
 // The watcher line for a feed event, or undefined when it needs nobody. Leads' turns end all day and they escalate
-// through decisions/, so their DONE says nothing. Another session in a worker's worktree (a critic's claude -p, a
-// helper) is not the worker and its events say nothing. Any other session is named from sessions.json or its id.
+// through decisions/, so their DONE says nothing. Another session id in a worker's worktree (a critic's claude -p, or
+// the worker itself after a /clear) is not a finished worker, so its DONE says nothing; its prompts and questions
+// still need the user and are said under the worker's name.
 export function feedLine(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>, leads: Set<string>): string | undefined {
   const kind = classify(e);
   if (kind === 'skip' || (kind === 'done' && leads.has(e.sid))) return;
   const w = workerFor(workers, e.sid, e.cwd);
-  if (!w && workers.some(x => x.status === 'running' && x.sid && inside(e.cwd, x.worktree))) return;
-  const { name, pane } = w ? { name: `worker ${w.name}`, pane: w.pane } : sessions[e.sid] ?? { name: e.sid.slice(0, 8), pane: '?' };
+  const host = w ? undefined : workers.find(x => x.status === 'running' && inside(e.cwd, x.worktree));
+  if (host && kind === 'done') return;
+  const at = w ?? (sessions[e.sid] ? undefined : host);
+  const { name, pane } = at ? { name: `worker ${at.name}`, pane: at.pane } : sessions[e.sid] ?? { name: e.sid.slice(0, 8), pane: '?' };
   const text = (kind === 'done' ? e.msg.slice(0, 160) : (e.tail || e.msg).slice(-200)).replace(/\s+/g, ' ');
   // Workers' helper subagents end with an empty DONE from a session orch doesn't know; nothing to act on.
   if (kind === 'done' && !text.trim() && pane === '?') return;
