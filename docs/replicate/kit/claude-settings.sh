@@ -5,16 +5,17 @@
 #   skipAutoPermissionPrompt          the classifier still reviews every action
 #   remoteControlAtStartup            every session, workers included, is reachable from the Claude app
 #   agentPushNotifEnabled             orch's PushNotification (a new decision, the morning brief) reaches the phone
-#   statusLine                        model, 5-hour and weekly limit, session cost; an existing statusLine is kept
-# The first run backs up the original to settings.json.bak-agent-setup; later runs leave that backup alone.
+#   statusLine                        model, 5-hour and weekly limit, session cost; an existing statusLine is kept,
+#                                     and ~/.claude/statusline.sh is written only when absent
 #   hooks                             remote-paths.py (UserPromptSubmit), share-images.py (PostToolUse on Read)
+# The first run backs up the original to settings.json.bak-agent-setup; later runs leave that backup alone.
 # Usage: bash claude-settings.sh     CLAUDE_CONFIG_DIR is honoured, so a test can run against a scratch config.
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")" && pwd)"
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 S="$CFG/settings.json"
 mkdir -p "$CFG/hooks"
-install -m 755 "$KIT/statusline.sh" "$CFG/statusline.sh"
+[ -e "$CFG/statusline.sh" ] || install -m 755 "$KIT/statusline.sh" "$CFG/statusline.sh"
 install -m 755 "$KIT/media-relay/remote-paths.py" "$KIT/media-relay/share-images.py" "$CFG/hooks/"
 [ -s "$S" ] || echo '{}' > "$S"
 [ -e "$S.bak-agent-setup" ] || cp "$S" "$S.bak-agent-setup"
@@ -41,5 +42,5 @@ mv "$tmp" "$S"
 echo "settings merged into $S (original kept in $S.bak-agent-setup)"
 case "$had_status" in
   "" | *statusline.sh*) ;;
-  *) echo "kept your existing statusLine ($had_status); the kit's is at $CFG/statusline.sh if you want it" ;;
+  *) echo "kept your existing statusLine ($had_status); the kit's is $KIT/statusline.sh if you want it" ;;
 esac

@@ -6,10 +6,10 @@ Syncthing mirrors ~/AgentImages to main at the same path, so the copy's path ope
 on both Macs. Runs only where ~/.config/agent-images/sender exists (the host);
 this file syncs to main with ~/.claude and does nothing there.
 
-A copy is named <name>-<first 10 hex of its sha256><ext>: the same image always lands
-on the same path, two different images never share one, and parallel workers cannot
-overwrite each other (the copy is written to a private temp file, then hard-linked into
-place, which fails instead of replacing). Copies older than 14 days go, checked at most
+The image is first copied to a private temp file, and that copy is named
+<name>-<first 10 hex of its sha256><ext> and hard-linked into place, which fails instead of
+replacing. So a name always matches the bytes it holds, the same image lands on the same
+path, and parallel workers cannot overwrite each other. Copies older than 14 days go, checked at most
 once an hour.
 """
 import hashlib
@@ -58,20 +58,20 @@ def digest(path):
 
 
 def share(src):
+    # Copy first, then name the copy by its own hash: the name always matches the bytes it holds,
+    # even when src changes while this runs.
     base, ext = os.path.splitext(os.path.basename(src))
-    dest = os.path.join(SHARED, f"{base}-{digest(src)}{ext}")
-    if not os.path.exists(dest):
-        fd, tmp = tempfile.mkstemp(prefix=".part-", dir=SHARED)
+    fd, tmp = tempfile.mkstemp(prefix=".part-", dir=SHARED)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        dest = os.path.join(SHARED, f"{base}-{digest(tmp)}{ext}")
         try:
-            with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
-                shutil.copyfileobj(inp, out)
-            shutil.copystat(src, tmp)
-            try:
-                os.link(tmp, dest)
-            except FileExistsError:
-                pass  # another worker placed the same image first
-        finally:
-            os.unlink(tmp)
+            os.link(tmp, dest)
+        except FileExistsError:
+            pass  # the same bytes are already there
+    finally:
+        os.unlink(tmp)
     os.utime(dest)
     return dest
 
