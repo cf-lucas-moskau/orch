@@ -11,9 +11,9 @@ You are a Claude Code agent setting up your human's two Macs so they work like L
 | 1 | host | S0.1 to S4.1 | hand over to main |
 | 2 | main | S0.1 to S4.2 (S3.3 gives main SSH to the host; S4.2 pairs both Syncthings) | hand over to host |
 | 3 | host | S4.3, S5.1, S5.2, S5.3 | hand over to main |
-| 4 | main | S4.4, S4.5, S5.2, S5.3, S5.4, S6.4 | hand over to host |
+| 4 | main | S4.4, S4.5, S5.2, S5.3, S5.4, S6.4, S6.5 | hand over to host |
 | 5 | host | S6.1 to S8.7 | hand over to main |
-| 6 | main | S9.1, S9.2, S10.1, S10.2 (and S10.1 on the host over SSH) | done |
+| 6 | main | S9.1, S9.2, S9.3, S10.1, S10.2 (and S10.1 on the host over SSH) | done |
 
 S5.1 runs on the host before S4.4 so that main's first sync of `~/.claude` already carries the agent-bus code and skill.
 - **Idempotent.** Start every step with its `Verify:` command. Already passing: write "skip" in the log and move on. After doing the step, run `Verify:` again; the step is done only when it passes.
@@ -100,16 +100,27 @@ Verify: `xcode-select -p && /opt/homebrew/bin/brew --version | head -1`
 ```bash
 brew install git gh jq node herdr syncthing
 brew install --cask tailscale-app
+brew install --cask google-chrome    # the Playwright MCP (S6.4) drives Chrome headless; agents never open it visibly on main
 ```
 
 Host only, additionally:
 
 ```bash
 brew install poppler                 # lets agents read PDFs page by page
-brew install --cask google-chrome    # headless PDF rendering, never opened on main
 ```
 
-Verify: `for t in git gh jq node npm herdr syncthing; do command -v $t >/dev/null || echo "missing $t"; done; node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' && echo node-ok`
+Verify: `for t in git gh jq node npm herdr syncthing python3; do command -v $t >/dev/null || echo "missing $t"; done; node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' && echo node-ok; test -d "/Applications/Google Chrome.app" && echo chrome`
+
+### S2.2b [host] Docker (only if a repo needs it)
+Ask once whether any repo orch will work on runs a database or services with Docker (a `docker-compose.yml`, `compose.yaml` or `Dockerfile` in it). Workers start throwaway stacks there and `orch cleanup` takes them down with their volumes; without Docker that part is skipped silently. If yes:
+
+```bash
+brew install --cask docker
+```
+
+HUMAN: open Docker once, accept its terms, and in its Settings, General, turn on "Start Docker Desktop when you sign in". Worker stacks fill disk fast; in Settings, Resources, keep the disk limit modest.
+
+Verify: `docker info >/dev/null 2>&1 && echo docker` (or "skip" in the log when no repo needs it).
 
 ### S2.3 [both] Claude Code
 Usually already there, since you run in it. Otherwise: `curl -fsSL https://claude.ai/install.sh | bash`.
@@ -175,7 +186,7 @@ From here on you can run host commands from main with `ssh "$HOST_NAME" '<cmd>'`
 
 ## Phase 4: Syncthing over Tailscale
 
-Syncthing keeps four folders in step between the Macs, talking only over the tailnet (discovery and relays off).
+Syncthing keeps six folders in step between the Macs, talking only over the tailnet (discovery and relays off).
 
 | Folder id | Path (both Macs) | Host | Main | What |
 | --- | --- | --- | --- | --- |
@@ -183,6 +194,8 @@ Syncthing keeps four folders in step between the Macs, talking only over the tai
 | `agent-bus` | `~/agent-bus` | send and receive | send and receive | bus messages |
 | `agent-outbox` | `~/AgentOutbox` | send and receive | send and receive | finished PDFs and images for the human, feedback files back |
 | `vault` | vault path on main, `~/Vault` on host | receive only | send only | Obsidian notes, read-only for agents |
+| `screenshots` | `~/Screenshots` | receive only | send only | the human's screenshots, so one dragged into a host session is found (S6.7) |
+| `agent-images` | `~/AgentImages` | send only | receive only | images host agents open, at a path that also opens on main (S6.7) |
 
 ### S4.1 [both] Run Syncthing, Tailscale only
 
@@ -264,9 +277,9 @@ syncthing cli config folders claude-config type set sendreceive
 
 Verify: `syncthing cli config folders claude-config type get` prints `sendreceive`, and `diff <(ssh "$HOST_NAME" cat .claude/skills/agent-bus/SKILL.md) ~/.claude/skills/agent-bus/SKILL.md && echo same` prints `same`.
 
-### S4.5 [main] The other three folders
+### S4.5 [main] The other five folders
 Needs S4.3 done on the host (turn 3), so both Macs already share a folder and know each other.
-Share `agent-bus` and `agent-outbox` both ways, the vault one way. Find the vault path from Obsidian:
+Share `agent-bus` and `agent-outbox` both ways, the vault, screenshots and agent images one way. Find the vault path from Obsidian:
 
 ```bash
 python3 -c 'import json,os;print("\n".join(v["path"] for v in json.load(open(os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")))["vaults"].values()))'
@@ -279,7 +292,7 @@ One vault: use it. Several: HUMAN picks. None: HUMAN names the notes folder, or 
 VAULT="/path/from/above"
 HOST_ID=$(cat ~/.agent-setup.host-id)
 ME_ID=$(syncthing cli show system | python3 -c 'import json,sys;print(json.load(sys.stdin)["myID"])')
-mkdir -p ~/agent-bus ~/AgentOutbox
+mkdir -p ~/agent-bus ~/AgentOutbox ~/Screenshots ~/AgentImages
 add() { # id path type remote_path remote_type
   syncthing cli config folders list | grep -qx "$1" || syncthing cli config folders add --id "$1" --label "$1" --path "$2" --type "$3"
   syncthing cli config folders "$1" devices add --device-id "$HOST_ID" 2>/dev/null || true
@@ -290,9 +303,13 @@ add() { # id path type remote_path remote_type
 add agent-bus    "$HOME/agent-bus"    sendreceive '~/agent-bus'    sendreceive
 add agent-outbox "$HOME/AgentOutbox"  sendreceive '~/AgentOutbox'  sendreceive
 add vault        "$VAULT"             sendonly    '~/Vault'        receiveonly
+add screenshots  "$HOME/Screenshots"  sendonly    '~/Screenshots'  receiveonly
+add agent-images "$HOME/AgentImages"  receiveonly '~/AgentImages'  sendonly
 ```
 
-The agent-bus folder made here is the one `bus-setup` (S5.3) looks for; it then only installs the watcher.
+The agent-bus folder made here is the one `bus-setup` (S5.3) looks for; it then only installs the watcher. `screenshots` and `agent-images` carry the media relay (S6.7): screenshots the human drags into a host session, and images host agents open, back to main at the same path.
+
+A vault under `~/Documents` or `~/Desktop` (also when those live in iCloud) is behind macOS privacy protection, and Syncthing runs from launchd, where it cannot ask. HUMAN on main: System Settings, Privacy & Security, Full Disk Access, add `/opt/homebrew/opt/syncthing/bin/syncthing` and switch it on, then `brew services restart syncthing`.
 
 Verify: `touch ~/AgentOutbox/.ping && sleep 20 && ssh "$HOST_NAME" 'ls -a AgentOutbox | grep -c .ping; ls Vault | head -3'` prints `1` and vault files.
 
@@ -378,8 +395,63 @@ On main it stays headless: agents never open a visible browser there.
 
 Verify: `claude mcp list | grep playwright`
 
-### S6.5 [host] Plugins (optional)
-Lucas runs workers in pstack's poteto-mode (`/pstack:poteto-mode`) and has compound-engineering. Offer them in one line; skip if declined. orch works without them.
+### S6.5 [both] pstack (required)
+orch starts every Claude worker in pstack's poteto-mode (`/pstack:poteto-mode`, `policies.md`), and `orch run` refuses to start a Claude worker without it. Install Lucas's public Claude Code port of pstack and pstack-team-kit (the plugin list is per Mac, so on both):
+
+```bash
+. ~/.agent-setup.env
+bash "$KIT/pstack.sh"
+```
+
+It runs `claude plugin marketplace add cf-lucas-moskau/pstack-claude`, `claude plugin install pstack@pstack-claude` and `claude plugin install pstack-team-kit@pstack-claude`, skipping what is already there.
+
+When `~/.claude/pstack/models.md` is missing, the script writes a default from `templates/pstack-models.md` (Opus for code and judgment, Sonnet for bulk exploration, effort high); it never overwrites one. The file syncs to main. Without it pstack falls back to Cursor model names that Claude Code cannot run.
+
+HUMAN, once: restart Claude so the plugins load (exit, then `claude --continue`). Tell the human in one line that `/pstack:setup-pstack` changes the models whenever they like.
+
+Verify: `claude plugin list --json | jq -e 'any(.[]; .id == "pstack@pstack-claude" and .enabled) and any(.[]; .id == "pstack-team-kit@pstack-claude" and .enabled)' && echo pstack`, and that the slash command loads (one short headless run):
+
+```bash
+cd "$(mktemp -d)" && echo "/pstack:poteto-mode Do not do any task. Reply with only the second-level markdown heading that comes first in the skill text you were given, or NONE." | claude -p --no-session-persistence --tools "" | grep -q Non-negotiables && echo poteto-mode
+```
+
+Also verify `test -f ~/.claude/pstack/models.md && echo models`.
+
+Optional, offer in one line: Lucas also has `compound-engineering` (`claude plugin marketplace add EveryInc/compound-engineering-plugin`, then `claude plugin install compound-engineering@compound-engineering-plugin`) and `impeccable` for frontend design (`claude plugin marketplace add pbakaus/impeccable`, then `claude plugin install impeccable@impeccable`). Nothing in orch needs them.
+
+### S6.6 [host] Settings for unattended agents
+Workers, bus sessions and routines run with nobody watching. Each permission prompt would stop them for hours, and orch's decision pushes need push notifications.
+
+```bash
+. ~/.agent-setup.env
+bash "$KIT/claude-settings.sh"
+```
+
+It merges into `~/.claude/settings.json` (backup next to it, other keys kept): `permissions.defaultMode: "auto"` and `skipAutoPermissionPrompt: true` (auto mode: a classifier reviews every action instead of asking), `remoteControlAtStartup: true` (every session, workers included, shows up in the Claude app), `agentPushNotifEnabled: true` (orch's push for each new decision and the morning brief), a status line with the 5-hour and weekly limit, and the two media-relay hooks of S6.7. The file syncs, so main gets the same.
+
+HUMAN: in the Claude app on the phone, allow notifications. If the account has no auto mode, say so: workers then stop on prompts, and orch reports them as blocked.
+
+Verify: `jq -e '.permissions.defaultMode=="auto" and .skipAutoPermissionPrompt and .remoteControlAtStartup and .agentPushNotifEnabled and (.statusLine.command|test("statusline"))' ~/.claude/settings.json && echo settings`
+
+### S6.7 [host, main] Media relay
+Dragging a screenshot from main into a host session (through `herdr --remote` or Screen Sharing) pastes a path that only exists on main; `remote-paths.py` points the agent at the synced copy in `~/Screenshots`. In the other direction `share-images.py` copies every image a host agent opens into `~/AgentImages`, so a path the agent shows opens on main too. Both hooks are installed by S6.6; the folders come from S4.5.
+
+Host: mark it as the sender, so `share-images.py` does nothing on main.
+
+```bash
+mkdir -p ~/.config/agent-images ~/AgentImages && touch ~/.config/agent-images/sender
+```
+
+Main (turn 6, S9.3): screenshots go to `~/Screenshots`, and a small launchd agent also catches ones dragged straight from the floating thumbnail.
+
+```bash
+. ~/.agent-setup.env
+bash "$KIT/media-relay/screenshot-catcher-install.sh"
+```
+
+HUMAN, if the script says so: give `~/.local/bin/screenshot-catcher` Full Disk Access (it opens the right Settings page), then `launchctl kickstart -k gui/$(id -u)/agent-main.screenshot-catcher`.
+
+Verify, host: `test -f ~/.config/agent-images/sender && echo sender`. Main: `defaults read com.apple.screencapture location` prints `~/Screenshots` expanded, and `~/.local/bin/screenshot-catcher --check` prints `ok`.
 
 ## Phase 7: host services
 
@@ -432,6 +504,8 @@ cd ~/orch && npm run setup
 It checks tools, creates `local.md`, `projects.md`, `workers.json`, `log.md` and the ledger folders, installs herdr's agent-state hooks, adds `hooks/orch-feed.sh` to `~/.claude/settings.json` (and Codex's hooks) and installs the launchd routine scheduler `orch.routines`. Safe to rerun.
 
 Verify: `grep -q orch-feed.sh ~/.claude/settings.json && launchctl print gui/$(id -u)/orch.routines >/dev/null && echo orch-setup`
+
+With Codex (S2.5): Codex runs hooks from `~/.codex/hooks.json` only after someone trusted them once, and an unattended Codex worker would sit on that question. HUMAN, once: `cd ~/orch && codex`, accept the folder and the hooks it lists, then quit. Verify: `grep -c 'hooks.json:session_start' ~/.codex/config.toml` prints `1` or more.
 
 The hook lives in the synced `settings.json`, so it also runs on main; there `~/orch` does not exist and the hook does nothing, by design.
 
@@ -498,6 +572,9 @@ git -C ~/code/$repo fetch agent-host 'refs/heads/orch/*:refs/remotes/agent-host/
 
 Verify: `git -C ~/code/$repo branch -r | grep agent-host` after the first worker ran.
 
+### S9.3 [main] Screenshot catcher
+The main half of S6.7: run `screenshot-catcher-install.sh` there and its Verify.
+
 ## Phase 10: final checks
 
 ### S10.1 [both] Status
@@ -530,3 +607,9 @@ orch's repo carries features that only make sense for Lucas. They stay off by de
 - **Leads** (`lead start evrloot`, `src/lead.ts`): a long-running session per area. Only `evrloot` exists. Never start it.
 - **M365 mail and calendar** (`scripts/m365.py`): reads Lucas's TIKI Outlook. Needs its own Azure sign-in; not part of this setup.
 - **Evrloot deploy** (`npm run deploy:evrloot`) and the orch companion app (`companion/`, `npm run setup -- --state`): not needed.
+- **Auto mode allow rules and `gh pr review`/`gh pr merge` allow rules** in Lucas's `settings.json`: they let orch merge, approve and deploy in his repos once he asked. The human grants such rights per repo later, in `local.md` (Autonomy) and `autoMode.allow`, never during setup.
+- **Lucas's own skills** `grill-with-docs`, `writing-for-agents`, `retro` and the plugins `typesafe`, `swift-lsp`, `claude-bionify`: personal tools, nothing in orch or the playbooks calls them.
+- **Evrloot launchd jobs, MySQL, MongoDB, Heroku, Go, ffmpeg**: his game and other projects. ffmpeg only serves his motion reviews of game footage.
+- **`disk-hygiene.sh`** (`scripts/`): tuned to his Docker projects; `orch run` points at it when the disk floor is hit, and its `--dry-run` is harmless anywhere.
+
+See `INVENTORY.md` for every item checked and why it is in, Lucas-specific or skipped.

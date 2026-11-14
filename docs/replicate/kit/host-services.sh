@@ -2,7 +2,8 @@
 # Agent host only. Installs two launchd jobs so the host comes back by itself after a reboot or power loss:
 #   agent-host.herdr-server   keeps the herdr server running (KeepAlive)
 #   agent-host.rc-bootstrap   every 5 min: makes sure herdr has a "remote-control" workspace running rc-loop.sh,
-#                             which keeps `claude remote-control` up so you can start sessions from your phone.# Safe to re-run. Usage: bash host-services.sh [--dry-run]
+#                             which keeps `claude remote-control` up so you can start sessions from your phone.
+# Safe to re-run. Usage: bash host-services.sh [--dry-run]
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")" && pwd)"
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1

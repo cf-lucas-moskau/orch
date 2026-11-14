@@ -27,7 +27,16 @@ fi
 echo "Tools"
 for t in brew git gh jq node npm claude herdr syncthing tailscale; do chk "$t" has "$t"; done
 chk "node 22.6+" node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=6)?0:1)'
-if [ "$role" = host ]; then has codex && ok "codex (optional)" || info "codex not installed (optional)"; fi
+chk "python3" has python3
+chk "Google Chrome (Playwright MCP)" test -d "/Applications/Google Chrome.app"
+if [ "$role" = host ]; then
+  has pdftoppm && ok "poppler" || miss "poppler (brew install poppler)"
+  if has codex; then
+    ok "codex (optional)"
+    chk "codex trusts orch's hooks" grep -q 'hooks.json:session_start' "$HOME/.codex/config.toml"
+  else info "codex not installed (optional)"; fi
+  if has docker; then chk "docker running (optional)" docker info; else info "docker not installed (optional, only for repos that need it)"; fi
+fi
 chk "gh logged in" gh auth status
 chk "claude logged in" sh -c 'claude auth status 2>/dev/null | grep -qi "logged in\|\"loggedIn\": *true"'
 
@@ -41,7 +50,7 @@ chk "syncthing GUI/API answers on 127.0.0.1:8384" curl -s -o /dev/null http://12
 ST=""
 for f in "$HOME/Library/Application Support/Syncthing/config.xml" "$HOME/.local/state/syncthing/config.xml" "$HOME/.config/syncthing/config.xml"; do [ -f "$f" ] && ST="$f" && break; done
 if [ -n "$ST" ]; then
-  for id in claude-config agent-bus agent-outbox vault; do chk "folder $id" grep -q "<folder id=\"$id\"" "$ST"; done
+  for id in claude-config agent-bus agent-outbox vault screenshots agent-images; do chk "folder $id" grep -q "<folder id=\"$id\"" "$ST"; done
   chk "discovery and relays off (Tailscale only)" sh -c "grep -q '<globalAnnounceEnabled>false' '$ST' && grep -q '<relaysEnabled>false' '$ST'"
 else miss "syncthing config.xml"; fi
 
@@ -60,12 +69,31 @@ chk "image-gen key (.env)" test -f "$HOME/.claude/skills/image-gen/.env"
 chk "present skill" sh -c 'ls "$HOME"/.claude/skills/present/*.md'
 chk "Playwright MCP configured" sh -c 'grep -q "@playwright/mcp" "$HOME/.claude.json"'
 chk "herdr claude integration" sh -c 'herdr integration status | grep -q "^claude: current"'
+plugins=$(claude plugin list --json 2>/dev/null)
+for p in pstack pstack-team-kit; do
+  chk "$p plugin enabled" sh -c 'printf "%s" "$0" | jq -e --arg p "$1" "any(.[]; (.id | startswith(\$p + \"@\")) and .enabled)"' "$plugins" "$p"
+done
+chk "poteto-mode skill present" sh -c 'ls "$HOME"/.claude/plugins/cache/*/pstack/*/skills/poteto-mode/SKILL.md'
+chk "pstack models (~/.claude/pstack/models.md)" test -f "$HOME/.claude/pstack/models.md"
+S="$HOME/.claude/settings.json"
+chk "auto mode for unattended agents" jq -e '.permissions.defaultMode == "auto" and .skipAutoPermissionPrompt == true' "$S"
+chk "Remote Control at startup" jq -e '.remoteControlAtStartup == true' "$S"
+chk "push notifications" jq -e '.agentPushNotifEnabled == true' "$S"
+chk "status line" sh -c 'test -x "$HOME/.claude/statusline.sh" && grep -q statusline.sh "$0"' "$S"
+chk "media-relay hooks" sh -c 'test -f "$HOME/.claude/hooks/remote-paths.py" && test -f "$HOME/.claude/hooks/share-images.py" && grep -q remote-paths.py "$0" && grep -q share-images.py "$0"' "$S"
+if [ "$role" = host ]; then
+  chk "agent-images sender marker" test -f "$HOME/.config/agent-images/sender"
+else
+  chk "screenshots go to ~/Screenshots" sh -c '[ "$(defaults read com.apple.screencapture location 2>/dev/null)" = "$HOME/Screenshots" ]'
+  chk "screenshot catcher job" job agent-main.screenshot-catcher
+fi
 
 if [ "$role" = host ]; then
   echo "Agent host services"
   chk "herdr server running" sh -c 'herdr status server | grep -q "status: running"'
   chk "job agent-host.herdr-server" job agent-host.herdr-server
-  chk "job agent-host.rc-bootstrap" job agent-host.rc-bootstrap  chk "deck-to-pdf installed" test -d "$HOME/.local/share/deck-to-pdf/node_modules/playwright-core"
+  chk "job agent-host.rc-bootstrap" job agent-host.rc-bootstrap
+  chk "deck-to-pdf installed" test -d "$HOME/.local/share/deck-to-pdf/node_modules/playwright-core"
   echo "orch"
   chk "repo at $ORCH" test -f "$ORCH/package.json"
   chk "local.md" test -f "$ORCH/local.md"

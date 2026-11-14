@@ -8,7 +8,7 @@ import type { FeedEvent } from './board.ts';
 import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
 import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, parsePane, type LeadRecord } from './lead.ts';
 import { read as readInbox, readBeat } from './lead-inbox.ts';
-import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, potetoMissing, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -72,8 +72,7 @@ function dispatchable(workers: Worker[], name: string) {
     ? `${blocker}\ntop consumers orch knows about:\n${topConsumers()}\nfree space first: scripts/disk-hygiene.sh --dry-run`
     : blocker);
 }
-// poteto-mode needs pstack; without it workers get the plain prompt.
-// The newest installed pstack's poteto-mode SKILL.md, or false.
+// The newest installed pstack's poteto-mode SKILL.md, or false. Without it Claude workers do not start (potetoMissing).
 const potetoSkill = (): string | false => {
   const r = spawnSync('/bin/sh', ['-c', `ls -t ${join(homedir(), '.claude/plugins/cache')}/*/pstack/*/skills/poteto-mode/SKILL.md 2>/dev/null | head -1`], { encoding: 'utf8' });
   return r.stdout.trim() || false;
@@ -220,6 +219,8 @@ function run([repoArg, name, ...args]: string[]) {
   if (!['claude', 'codex', 'both'].includes(kind)) die('kind must be claude, codex or both');
 
   const workers = loadWorkers();
+  const blocked = potetoMissing([kind === 'both' ? 'claude' : kind], potetoSkill());
+  if (blocked) die(blocked);
   const names = kind === 'both' ? [pairNames(name).claude, pairNames(name).codex] : [name];
   if (kind === 'both' && name.length > 29) die('pair names add -cl/-cx; keep the name to 29 characters');
   for (let i = 0; i < names.length; i++) dispatchable([...workers, ...names.slice(0, i).map(() => ({ status: 'running' }) as Worker)], names[i]);
@@ -766,6 +767,8 @@ function address([repoArg, n, ...args]: string[]) {
   const { me, prs } = openPrs(p);
   const t = triagePrs(prs, me).find(x => x.pr.number === Number(n.replace('#', ''))) ?? die(`#${n} is not an open PR in ${p.repo}`);
   if (t.kind !== 'address') die(`#${t.pr.number} has no colleague feedback to address (${t.kind})`);
+  const blocked = potetoMissing([kind], potetoSkill());
+  if (blocked) die(blocked);
   dispatchable(loadWorkers(), `pr${t.pr.number}`);
   git(p.path, 'fetch', '-q', 'origin', t.pr.headRefName);
   const from = `origin/${t.pr.headRefName}`;
