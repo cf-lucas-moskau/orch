@@ -79,7 +79,7 @@ S="$HOME/.claude/settings.json"
 chk "auto mode for unattended agents" jq -e '.permissions.defaultMode == "auto" and .skipAutoPermissionPrompt == true' "$S"
 chk "Remote Control at startup" jq -e '.remoteControlAtStartup == true' "$S"
 chk "push notifications" jq -e '.agentPushNotifEnabled == true' "$S"
-chk "status line" sh -c 'test -x "$HOME/.claude/statusline.sh" && grep -q statusline.sh "$0"' "$S"
+chk "status line" jq -e '.statusLine.command' "$S"
 chk "media-relay hooks" sh -c 'test -f "$HOME/.claude/hooks/remote-paths.py" && test -f "$HOME/.claude/hooks/share-images.py" && grep -q remote-paths.py "$0" && grep -q share-images.py "$0"' "$S"
 if [ "$role" = host ]; then
   chk "agent-images sender marker" test -f "$HOME/.config/agent-images/sender"

@@ -6,11 +6,17 @@
 # Usage: bash pstack.sh            CLAUDE_CONFIG_DIR is honoured, so a test can run against a scratch config.
 set -euo pipefail
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-claude plugin marketplace list --json 2>/dev/null | grep -q '"name": "pstack-claude"' \
+claude plugin marketplace list --json 2>/dev/null | jq -e 'any(.[]; .name == "pstack-claude")' >/dev/null \
   || claude plugin marketplace add cf-lucas-moskau/pstack-claude
 claude plugin marketplace update pstack-claude >/dev/null 2>&1 || true
 for p in pstack pstack-team-kit; do
-  claude plugin list --json 2>/dev/null | grep -q "\"id\": \"$p@pstack-claude\"" || claude plugin install "$p@pstack-claude"
+  # installed: "true" or "false" (its enabled flag), empty when not installed
+  state=$(claude plugin list --json 2>/dev/null | jq -r --arg id "$p@pstack-claude" '.[] | select(.id == $id) | .enabled')
+  case "$state" in
+    true) ;;
+    false) claude plugin enable "$p@pstack-claude" ;;
+    *) claude plugin install "$p@pstack-claude" ;;
+  esac
 done
 ls "$CFG"/plugins/cache/*/pstack/*/skills/poteto-mode/SKILL.md >/dev/null
 # A default model per role (Opus for code and judgment, Sonnet for bulk exploration), only when none exists yet.

@@ -31,3 +31,6 @@ secrets/
 
 # Copies --keep saved before orch cleanup removed a worktree
 saved/
+
+# Python bytecode from running the kit's scripts and tests
+__pycache__/

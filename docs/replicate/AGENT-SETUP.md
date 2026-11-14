@@ -427,11 +427,11 @@ Workers, bus sessions and routines run with nobody watching. Each permission pro
 bash "$KIT/claude-settings.sh"
 ```
 
-It merges into `~/.claude/settings.json` (backup next to it, other keys kept): `permissions.defaultMode: "auto"` and `skipAutoPermissionPrompt: true` (auto mode: a classifier reviews every action instead of asking), `remoteControlAtStartup: true` (every session, workers included, shows up in the Claude app), `agentPushNotifEnabled: true` (orch's push for each new decision and the morning brief), a status line with the 5-hour and weekly limit, and the two media-relay hooks of S6.7. The file syncs, so main gets the same.
+It merges into `~/.claude/settings.json` (the first run keeps the original as `settings.json.bak-agent-setup`; other keys stay, and so does an existing status line, which the script then names): `permissions.defaultMode: "auto"` and `skipAutoPermissionPrompt: true` (auto mode: a classifier reviews every action instead of asking), `remoteControlAtStartup: true` (every session, workers included, shows up in the Claude app), `agentPushNotifEnabled: true` (orch's push for each new decision and the morning brief), a status line with the 5-hour and weekly limit, and the two media-relay hooks of S6.7. The file syncs, so main gets the same.
 
 HUMAN: in the Claude app on the phone, allow notifications. If the account has no auto mode, say so: workers then stop on prompts, and orch reports them as blocked.
 
-Verify: `jq -e '.permissions.defaultMode=="auto" and .skipAutoPermissionPrompt and .remoteControlAtStartup and .agentPushNotifEnabled and (.statusLine.command|test("statusline"))' ~/.claude/settings.json && echo settings`
+Verify: `jq -e '.permissions.defaultMode=="auto" and .skipAutoPermissionPrompt and .remoteControlAtStartup and .agentPushNotifEnabled and (.statusLine.command != null)' ~/.claude/settings.json && echo settings`
 
 ### S6.7 [host, main] Media relay
 Dragging a screenshot from main into a host session (through `herdr --remote` or Screen Sharing) pastes a path that only exists on main; `remote-paths.py` points the agent at the synced copy in `~/Screenshots`. In the other direction `share-images.py` copies every image a host agent opens into `~/AgentImages`, so a path the agent shows opens on main too. Both hooks are installed by S6.6; the folders come from S4.5.
@@ -597,6 +597,8 @@ Found in review and left as they are. None blocks the setup; fix one when it bit
 - **Retry tabs are forgotten.** When a request is retried after 15 minutes, the first attempt's tab is no longer tracked for cleanup; close it in herdr by hand.
 - **rc-bootstrap can type twice.** In the 10 s while `rc-loop.sh` restarts `claude remote-control`, the 5-minute check may see no claude and type `rc-loop.sh` into the running loop. The pane then runs a second loop; closing the tab lets the job start a clean one.
 - **image-gen errors.** An empty `candidates` list (some safety blocks) or a network error prints a Python traceback instead of "no image in response". Treat a traceback as the same thing: rephrase or retry.
+- **Screenshot catcher can copy a half-written file.** It copies a thumbnail screenshot the first time it sees it; if macOS is still writing it, the host keeps a truncated image under that name. Take the screenshot again.
+- **`CLAUDE_CONFIG_DIR` and the hooks.** `claude-settings.sh` honours it for where it installs, but the hook and status-line commands it writes always point at `~/.claude`. Only matters for a second Claude profile.
 - **deck-to-pdf trailing page.** A deck with another `div` after the last slide inside `#deck` gets one blank last page. Delete it or move that element out of `#deck`.
 
 ## Lucas-specific parts (skip unless asked)
