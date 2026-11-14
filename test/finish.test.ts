@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -14,9 +14,18 @@ const ev = (min: number, sid: string, event: string, msg = ''): FeedEvent => ({ 
 
 const owed = (events: FeedEvent[], nowMin: number) => {
   const m: Finishes = new Map();
-  for (const e of events) step(m, e);
-  return due(m, T0 + nowMin * 60_000).map(e => `${e.sid}: ${e.msg}`);
+  for (const e of events) step(m, e, JSON.stringify(e));
+  return due(m, T0 + nowMin * 60_000).map(({ e }) => `${e.sid}: ${e.msg}`);
 };
+
+test('two events of one session in the same second get different keys', () => {
+  const m: Finishes = new Map();
+  const stop = ev(0, 't', 'Stop', 'Done.'), perm = ev(0, 't', 'Notification', 'Claude needs your permission to use Bash');
+  step(m, stop, JSON.stringify(stop));
+  const first = m.get('t')!.key;
+  step(m, perm, JSON.stringify(perm));
+  assert.notEqual(m.get('t')!.key, first);
+});
 
 test('a session whose last Stop got no prompt after it is owed its finish', () => {
   assert.deepEqual(owed([ev(0, 'q3', 'UserPromptSubmit'), ev(46, 'q3', 'Stop', 'Q3 is in place.'), ev(47, 'q3', 'Notification', 'Claude is waiting for your input')], 48),
@@ -56,25 +65,33 @@ function watcher(root: string, stub: string) {
 }
 const kill = (p: ChildProcess) => new Promise(r => { p.on('exit', r); p.kill(); });
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
-const done = (ls: string[]) => ls.filter(l => l.startsWith('DONE'));
-const turnEnds = (ls: string[]) => ls.filter(l => /^(DONE|BLOCKED) /.test(l));
+const turnEnds = (ls: string[]) => ls.filter(l => /^(DONE|BLOCKED|QUESTION) /.test(l));
+async function until(lines: string[], n: number) {
+  for (const end = Date.now() + 15_000; turnEnds(lines).length < n; await pause(100)) if (Date.now() > end) assert.fail(`got ${JSON.stringify(lines)}`);
+  await pause(1000);
+}
 
-test('the watcher says every finished worker once: missed between watchers, quiet after progress, and live', async () => {
+test('the watcher says every finished or blocked worker once, as herdr shows it now', async () => {
   const root = mkdtempSync(join(tmpdir(), 'orch-finish-'));
   for (const d of ['feed', 'leads', 'ideas']) mkdirSync(join(root, d));
   writeFileSync(join(root, 'ideas', 'off'), '');
   writeFileSync(join(root, 'ideas', 'config.json'), '{"adapter":"mock"}');
+  // herdr agent get <pane> answers with the status in state/<pane>; no file, no answer.
   const stub = mkdtempSync(join(tmpdir(), 'herdr-stub-'));
-  writeFileSync(join(stub, 'herdr'), '#!/bin/sh\necho \'{"error":{"code":"stub"}}\'\n', { mode: 0o755 });
+  mkdirSync(join(stub, 'state'));
+  writeFileSync(join(stub, 'herdr'), `#!/bin/sh
+f="$(dirname "$0")/state/$3"
+if [ "$1 $2" = "agent get" ] && [ -f "$f" ]; then echo "{\\"result\\":{\\"agent\\":{\\"agent_status\\":\\"$(cat "$f")\\"}}}"; else echo '{"error":{"code":"stub"}}'; fi
+`, { mode: 0o755 });
+  const pane = (name: string, status: string) => writeFileSync(join(stub, 'state', `${name}:p1`), status);
   const worker = (name: string, sid: string) => ({ name, repo: 'netto', sid, pane: `${name}:p1`, worktree: join(root, name), status: 'running', branch: `orch/${name}`, task: 't', workspace: 'w', started: '' });
-  writeFileSync(join(root, 'workers.json'), JSON.stringify([worker('perf-q3', 'q3000001'), worker('busy', 'bus00001'), worker('quiet', 'qui00001'), worker('steered', 'ste00001'), worker('asks', 'ask00001')]));
+  writeFileSync(join(root, 'workers.json'), JSON.stringify(['perf-q3', 'quiet', 'steered', 'asks', 'approved', 'cleared', 'twin']
+    .map(n => worker(n, `${n.slice(0, 3)}00001`))));
   const feed = join(root, 'feed', `${new Date().toLocaleDateString('sv-SE')}.jsonl`);
-  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString().replace(/\.\d+Z$/, 'Z');
   const add = (ts: string, sid: string, cwd: string, event: string, msg = '') =>
     appendFileSync(feed, JSON.stringify({ ts, sid, event, cwd: join(root, cwd), prompt: '', msg, tail: msg }) + '\n');
-  add(ago(60), 'q3000001', 'perf-q3', 'UserPromptSubmit');
-  add(ago(50), 'bus00001', 'busy', 'UserPromptSubmit');
-  add(ago(5), 'bus00001', 'busy', 'Stop', 'Still running the e2e.');
+  add(ago(60), 'per00001', 'perf-q3', 'UserPromptSubmit');
   add(ago(50), 'qui00001', 'quiet', 'UserPromptSubmit');
   add(ago(50), 'ste00001', 'steered', 'Stop', 'Round 1 done.');
   add(ago(45), 'ste00001', 'steered', 'UserPromptSubmit');
@@ -83,40 +100,53 @@ test('the watcher says every finished worker once: missed between watchers, quie
   const first = watcher(root, stub);
   for (const end = Date.now() + 15_000; !existsSync(join(root, 'done.json')); await pause(100)) if (Date.now() > end) assert.fail('no done.json');
   await pause(1000);
-  assert.deepEqual(done(first.lines), []);
+  assert.deepEqual(turnEnds(first.lines), []);
   await kill(first.p);
 
-  // perf-q3 finishes while no watcher runs (between an expiry and the re-arm).
-  add(ago(1), 'q3000001', 'perf-q3', 'Stop', 'Q3 is in place and uncommitted.');
-  // quiet's progress Stop has had 30 minutes with nothing after it.
+  // While no watcher runs: perf-q3 finishes; quiet's progress Stop goes 40 minutes quiet while its job still runs;
+  // asks waits on a permission prompt; approved's prompt was approved since; cleared, after a /clear, asks a question
+  // from a new session id in its worktree.
+  add(ago(1), 'per00001', 'perf-q3', 'Stop', 'Q3 is in place and uncommitted.');
   add(ago(40), 'qui00001', 'quiet', 'Stop', 'Still running the e2e.');
-  // asks hits a permission prompt in the same gap.
-  add(ago(3), 'ask00001', 'asks', 'UserPromptSubmit');
+  pane('quiet', 'working');
   add(ago(1), 'ask00001', 'asks', 'Notification', 'Claude needs your permission to use Bash');
+  pane('asks', 'blocked');
+  add(ago(1), 'app00001', 'approved', 'Notification', 'Claude needs your permission to use Bash');
+  pane('approved', 'working');
+  add(ago(1), 'new00001', 'cleared', 'Stop', 'Both options work. Should I push the branch?');
   const second = watcher(root, stub);
-  for (const end = Date.now() + 15_000; turnEnds(second.lines).length < 3; await pause(100)) if (Date.now() > end) assert.fail(`got ${JSON.stringify(second.lines)}`);
-  await pause(1000);
+  await until(second.lines, 3);
   assert.deepEqual(turnEnds(second.lines).sort(), [
     'BLOCKED worker asks [asks:p1] ask00001: Claude needs your permission to use Bash',
-    'DONE worker perf-q3 [perf-q3:p1] q3000001: Q3 is in place and uncommitted.',
-    'DONE worker quiet [quiet:p1] qui00001: quiet 30 min after: Still running the e2e.',
-  ]);
-  // Live: a finish the tail says is not said again by the replay.
+    'DONE worker perf-q3 [perf-q3:p1] per00001: Q3 is in place and uncommitted.',
+    'QUESTION worker cleared [cleared:p1] new00001: Both options work. Should I push the branch?',
+  ], 'not quiet: its pane is still working; not approved: its pane is no longer blocked');
+  // quiet's job ends: the next minute's check says it.
+  pane('quiet', 'idle');
+  await until(second.lines, 4);
+  assert.deepEqual(turnEnds(second.lines).slice(3), ['DONE worker quiet [quiet:p1] qui00001: quiet 30 min after: Still running the e2e.']);
+  // Live lines are not said again by the replay.
   add(new Date().toISOString(), 'ste00001', 'steered', 'Stop', 'Round 2 done, gates green.');
-  for (const end = Date.now() + 15_000; done(second.lines).length < 3; await pause(100)) if (Date.now() > end) assert.fail(`got ${JSON.stringify(second.lines)}`);
-  await pause(1000);
-  assert.equal(done(second.lines).length, 3);
-  assert.equal(done(second.lines)[2], 'DONE worker steered [steered:p1] ste00001: Round 2 done, gates green.');
   add(new Date().toISOString(), 'qui00001', 'quiet', 'Notification', 'Claude needs your permission to use Write');
-  for (const end = Date.now() + 15_000; turnEnds(second.lines).length < 5; await pause(100)) if (Date.now() > end) assert.fail(`got ${JSON.stringify(second.lines)}`);
-  await pause(1000);
-  assert.deepEqual(turnEnds(second.lines).slice(4), ['BLOCKED worker quiet [quiet:p1] qui00001: Claude needs your permission to use Write'],
-    'a live BLOCKED is said once, not again by the replay');
+  pane('quiet', 'blocked');
+  await until(second.lines, 6);
+  assert.deepEqual(turnEnds(second.lines).slice(4), [
+    'DONE worker steered [steered:p1] ste00001: Round 2 done, gates green.',
+    'BLOCKED worker quiet [quiet:p1] qui00001: Claude needs your permission to use Write',
+  ]);
+  // twin finishes live, then hits a prompt within the same second while no watcher runs.
+  const sec = ago(0);
+  add(sec, 'twi00001', 'twin', 'Stop', 'Round 1 done.');
+  await until(second.lines, 7);
   await kill(second.p);
+  add(sec, 'twi00001', 'twin', 'Notification', 'Claude needs your permission to use Edit');
+  pane('twin', 'blocked');
+  pane('approved', 'blocked');
 
   const third = watcher(root, stub);
-  await pause(2500);
-  assert.deepEqual(turnEnds(third.lines), [], 'a re-arm says nothing it already said');
+  await until(third.lines, 1);
+  await pause(1500);
+  assert.deepEqual(turnEnds(third.lines), ['BLOCKED worker twin [twin:p1] twi00001: Claude needs your permission to use Edit'],
+    'a re-arm says nothing it already said or dropped, and a same-second event is its own');
   await kill(third.p);
-  assert.equal(Object.keys(JSON.parse(readFileSync(join(root, 'done.json'), 'utf8'))).length, 5);
 });

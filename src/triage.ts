@@ -27,6 +27,9 @@ export type WorkerRec = { name: string; pane: string; sid?: string; worktree?: s
 export const workerFor = (workers: WorkerRec[], sid: string, cwd: string) => workers.find(w => w.status === 'running'
   && (w.sid ? w.sid === sid : inside(cwd, w.worktree)));
 
+// The running worker whose worktree holds cwd, whatever session is talking there.
+export const workerIn = (workers: WorkerRec[], cwd: string) => workers.find(x => x.status === 'running' && inside(cwd, x.worktree));
+
 const inside = (cwd: string, dir?: string) => !!dir && !!cwd && (cwd === dir || cwd.startsWith(dir + '/'));
 
 // The watcher line for a feed event, or undefined when it needs nobody. Leads' turns end all day and they escalate
@@ -37,7 +40,7 @@ const inside = (cwd: string, dir?: string) => !!dir && !!cwd && (cwd === dir || 
 export function feedLine(e: FeedEvent, workers: WorkerRec[], sessions: Record<string, Speaker>, leads: Set<string>, kind = classify(e)): string | undefined {
   if (kind === 'skip' || (kind === 'done' && leads.has(e.sid))) return;
   const w = workerFor(workers, e.sid, e.cwd);
-  const host = w ? undefined : workers.find(x => x.status === 'running' && inside(e.cwd, x.worktree));
+  const host = w ? undefined : workerIn(workers, e.cwd);
   if (host && kind === 'done') return;
   const at = w ?? (sessions[e.sid] ? undefined : host);
   const { name, pane } = at ? { name: `worker ${at.name}`, pane: at.pane } : sessions[e.sid] ?? { name: e.sid.slice(0, 8), pane: '?' };
