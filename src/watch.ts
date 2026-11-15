@@ -13,6 +13,7 @@ import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
+import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -297,6 +298,36 @@ function startOrchSide() {
   setInterval(ensureBridge, 60_000);
   void ensureQueue();
   setInterval(() => void ensureQueue(), 60_000);
+  setInterval(checkDisk, Number(process.env.ORCH_DISK_CHECK_MS ?? CHECK_MS));
+}
+
+// Under the Disk thin threshold (local.md, default 30 GB) on the home folder's volume, thin local Time Machine
+// snapshots (src/disk.ts). The first check waits one interval, so a watcher that lives only for a test never runs
+// tmutil. disk.json gets the thin's start before tmutil runs, so a watcher that dies mid-thin still counts it.
+let thinning = false, diskError = '';
+const freeGb = () => parseDfFreeGb(spawnSync('df', ['-k', homedir()], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '');
+const text = (f: string) => { try { return readFileSync(join(root, f), 'utf8'); } catch { return ''; } };
+function checkDisk() {
+  const before = freeGb(), now = Date.now();
+  const s: DiskState = { ...NEVER, ...json('disk.json', {}) };
+  if (thinning || before === undefined || !thinDue(s, now, before, parseDiskThin(text('local.md')))) return;
+  thinning = true;
+  writeFileSync(join(root, 'disk.json'), JSON.stringify({ ...s, thinned: now }) + '\n');
+  let err = '', ended = false;
+  const end = (failure: string) => {
+    if (ended) return;
+    ended = true;
+    thinning = false;
+    if (failure) { if (failure !== diskError) say(`DISK error: tmutil thinlocalsnapshots ${failure}`); diskError = failure; return; }
+    diskError = '';
+    const r = afterThin(s, now, before, freeGb() ?? before);
+    writeFileSync(join(root, 'disk.json'), JSON.stringify(r.state) + '\n');
+    for (const l of r.lines) say(l);
+  };
+  const c = spawn('tmutil', THIN_ARGS, { timeout: 10 * 60_000, killSignal: 'SIGKILL' });
+  c.stderr.on('data', d => { err += d; });
+  c.on('error', e => end(`did not start: ${e.message}`));
+  c.on('close', (code, signal) => end(code === 0 ? '' : `${signal ? `killed (${signal})` : `exited ${code}`}: ${err.trim().slice(0, 200)}`));
 }
 
 // Keep board.md and sessions.json fresh so new sessions get names (the plan's 10-minute refresh).

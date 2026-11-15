@@ -14,6 +14,7 @@ workers.json
 overlap.json
 stalled.json
 done.json
+disk.json
 leads/
 log.md
 decisions/*

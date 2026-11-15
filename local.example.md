@@ -6,5 +6,6 @@ The user is <your name>. orch runs on <this machine> in the herdr workspace `orc
 
 Concurrency cap: 4 workers
 Disk floor: 20 GB
+Disk thin: 30 GB
 
 PR comments in my voice: plain and direct.

@@ -6,6 +6,7 @@ The user is {{OWNER}}. orch runs on {{AGENT_HOST}} (the always-on agent Mac) in 
 
 Concurrency cap: 3 workers
 Disk floor: 20 GB
+Disk thin: 30 GB
 
 PR comments in my voice: plain and direct.
 
