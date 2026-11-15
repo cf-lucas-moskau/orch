@@ -514,6 +514,8 @@ Replace `~/orch/local.md` with `templates/local.md`, placeholders filled (`{{USE
 
 Verify: `grep -c '{{' ~/orch/local.md` prints `0`.
 
+Local Time Machine snapshots: macOS takes one every hour while Time Machine is on, and each keeps everything workers deleted since, so free space can fall by tens of GB in a few hours. orch's watcher handles it: under `Disk thin` (in `local.md`, 30 GB by default) it runs `tmutil thinlocalsnapshots / 999999999999 4` (no sudo, boot volume only, backups on other disks untouched) and prints a `DISK` line. Nothing to set up; `tmutil listlocalsnapshots /` shows what is there.
+
 ### S8.3 [host] projects.md
 Ask the human which repos orch should work on. For each: clone it to `~/code/<repo>` on the host, find the commands that prove a change works (`package.json` scripts, the CI workflow) and add a row to `~/orch/projects.md`. Remove the example row.
 

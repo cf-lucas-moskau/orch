@@ -17,6 +17,7 @@ import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrSta
 import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
 import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
 import { pendingLines } from './ideas.ts';
+import { parseDfFreeGb } from './disk.ts';
 import { impl as implCmd, team as teamCmd } from './team-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
@@ -54,9 +55,8 @@ const cap = () => parseCap(read('local.md') + read('policies.md'));
 
 // Free space on the volume orch (and the user's data) lives on; on macOS that is the Data volume, not /.
 function disk(): Disk | undefined {
-  const r = spawnSync('df', ['-k', root], { encoding: 'utf8' });
-  const kb = Number(r.stdout?.trim().split('\n')[1]?.split(/\s+/)[3]);
-  return Number.isFinite(kb) ? { freeGb: Math.floor(kb / 1048576), floorGb: parseDiskFloor(read('local.md') + read('policies.md')) } : undefined;
+  const freeGb = parseDfFreeGb(spawnSync('df', ['-k', root], { encoding: 'utf8' }).stdout ?? '');
+  return freeGb === undefined ? undefined : { freeGb, floorGb: parseDiskFloor(read('local.md') + read('policies.md')) };
 }
 const CLAUDE_TMP = `/private/tmp/claude-${process.getuid?.() ?? 501}`;
 const sizeKb = (path: string) => Number(spawnSync('du', ['-sk', path], { encoding: 'utf8', timeout: 60_000 }).stdout?.split('\t')[0]) || 0;
