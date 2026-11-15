@@ -13,6 +13,7 @@ import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
+import { parseDiskFloor } from './dispatch.ts';
 import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -318,9 +319,9 @@ function checkDisk() {
     if (ended) return;
     ended = true;
     thinning = false;
-    if (failure) { if (failure !== diskError) say(`DISK error: tmutil thinlocalsnapshots ${failure}`); diskError = failure; return; }
-    diskError = '';
-    const r = afterThin(s, now, before, freeGb() ?? before);
+    if (failure && failure !== diskError) say(`DISK error: tmutil thinlocalsnapshots ${failure}`);
+    diskError = failure;
+    const r = afterThin(s, now, before, freeGb() ?? before, parseDiskFloor(text('local.md') + text('policies.md')));
     writeFileSync(join(root, 'disk.json'), JSON.stringify(r.state) + '\n');
     for (const l of r.lines) say(l);
   };

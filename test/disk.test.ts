@@ -25,17 +25,22 @@ test('a thin runs under the threshold, at most once per 10 minutes', () => {
   assert.equal(thinDue(s, T0 + 10 * MIN, 5, 30), true);
 });
 
-test('a thin that freed space says before and after; one still under 20 GB says DISK low once an hour', () => {
-  const first = afterThin(NEVER, T0, 18, 59);
+test('a thin that freed space says before and after; one still under the Disk floor says DISK low once an hour', () => {
+  const first = afterThin(NEVER, T0, 18, 59, 20);
   assert.deepEqual(first.lines, ['DISK thinned local snapshots: 18 -> 59 GB free']);
   assert.deepEqual(first.state, { thinned: T0, lowSaid: 0 });
 
-  const low = afterThin(NEVER, T0, 12, 15);
+  const low = afterThin(NEVER, T0, 12, 15, 20);
   assert.deepEqual(low.lines, ['DISK thinned local snapshots: 12 -> 15 GB free', 'DISK low: 15 GB free after thinning']);
-  const again = afterThin(low.state, T0 + 59 * MIN, 15, 15);
+  const again = afterThin(low.state, T0 + 59 * MIN, 15, 15, 20);
   assert.deepEqual(again.lines, []);
   assert.equal(again.state.lowSaid, T0);
-  assert.deepEqual(afterThin(again.state, T0 + 60 * MIN, 15, 15).lines, ['DISK low: 15 GB free after thinning']);
+  assert.deepEqual(afterThin(again.state, T0 + 60 * MIN, 15, 15, 20).lines, ['DISK low: 15 GB free after thinning']);
+});
+
+test('DISK low follows the configured Disk floor, not a fixed 20 GB', () => {
+  assert.deepEqual(afterThin(NEVER, T0, 12, 15, 10).lines, ['DISK thinned local snapshots: 12 -> 15 GB free']);
+  assert.deepEqual(afterThin(NEVER, T0, 22, 22, 25).lines, ['DISK low: 22 GB free after thinning']);
 });
 
 test('the thin command only ever thins the boot volume by amount, never a dated delete or sudo', () => {
@@ -53,7 +58,7 @@ test('df -k output parses to whole GB free', () => {
 const spawned: ChildProcess[] = [];
 after(() => { for (const p of spawned) p.kill(); });
 
-function setup(localMd: string) {
+function setup(localMd: string, tmutil = `#!/bin/sh\necho "$@" >> "$(dirname "$0")/../thinned"\n`, freeGb = 18) {
   const root = mkdtempSync(join(tmpdir(), 'orch-disk-'));
   for (const d of ['feed', 'leads', 'ideas']) mkdirSync(join(root, d));
   writeFileSync(join(root, 'ideas', 'off'), '');
@@ -63,11 +68,11 @@ function setup(localMd: string) {
   mkdirSync(bin);
   const thinned = join(root, 'thinned');
   writeFileSync(join(bin, 'df'), `#!/bin/sh
-kb=$((18 * 1048576)); [ -f '${thinned}' ] && kb=$((25 * 1048576))
+kb=$((${freeGb} * 1048576)); [ -f '${thinned}' ] && kb=$((25 * 1048576))
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/disk3s5 482797652 1 $kb 87% /System/Volumes/Data"
 `, { mode: 0o755 });
-  writeFileSync(join(bin, 'tmutil'), `#!/bin/sh\necho "$@" >> '${thinned}'\n`, { mode: 0o755 });
+  writeFileSync(join(bin, 'tmutil'), tmutil, { mode: 0o755 });
   return { root, bin, thinned };
 }
 
@@ -87,6 +92,11 @@ test('the watcher thins once under the threshold and says it; checks every inter
   assert.deepEqual(await watch(root, bin, 3000), ['DISK thinned local snapshots: 18 -> 25 GB free']);
   assert.equal(readFileSync(thinned, 'utf8'), 'thinlocalsnapshots / 999999999999 4\n');
   assert.equal(typeof JSON.parse(readFileSync(join(root, 'disk.json'), 'utf8')).thinned, 'number');
+});
+
+test('a failing tmutil is reported once and still warns DISK low under the Disk floor from local.md', async () => {
+  const { root, bin } = setup('Disk floor: 25 GB\n', '#!/bin/sh\necho "boom" >&2\nexit 1\n', 22);
+  assert.deepEqual(await watch(root, bin, 3000), ['DISK error: tmutil thinlocalsnapshots exited 1: boom', 'DISK low: 22 GB free after thinning']);
 });
 
 test('the watcher leaves snapshots alone above the threshold set in local.md', async () => {

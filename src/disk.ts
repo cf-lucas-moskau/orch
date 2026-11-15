@@ -9,7 +9,6 @@ export const NEVER: DiskState = { thinned: 0, lowSaid: 0 };
 export const CHECK_MS = 5 * 60_000;
 export const THIN_MS = 10 * 60_000;
 export const LOW_MS = 60 * 60_000;
-export const LOW_GB = 20;
 
 // Only the boot volume's local snapshots, by purge amount and urgency 4; never a dated delete, never sudo.
 export const THIN_ARGS = ['thinlocalsnapshots', '/', '999999999999', '4'];
@@ -23,12 +22,13 @@ export const thinDue = (s: DiskState, now: number, freeGb: number, thresholdGb: 
   freeGb < thresholdGb && now - s.thinned >= THIN_MS;
 
 // The lines a finished thin prints and the state after it. A thin that freed under 1 GB says nothing: there was
-// nothing left to thin, and repeating that every 10 minutes is noise. Still under LOW_GB: said once an hour.
-export function afterThin(s: DiskState, now: number, beforeGb: number, afterGb: number): { state: DiskState; lines: string[] } {
+// nothing left to thin, and repeating that every 10 minutes is noise. Still under the Disk floor: said once an hour,
+// also after a thin that failed.
+export function afterThin(s: DiskState, now: number, beforeGb: number, afterGb: number, floorGb: number): { state: DiskState; lines: string[] } {
   const lines: string[] = [];
   if (afterGb - beforeGb >= 1) lines.push(`DISK thinned local snapshots: ${beforeGb} -> ${afterGb} GB free`);
   let lowSaid = s.lowSaid;
-  if (afterGb < LOW_GB && now - s.lowSaid >= LOW_MS) {
+  if (afterGb < floorGb && now - s.lowSaid >= LOW_MS) {
     lines.push(`DISK low: ${afterGb} GB free after thinning`);
     lowSaid = now;
   }
