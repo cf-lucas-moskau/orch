@@ -1854,6 +1854,11 @@ test('team sounds: mp3, wav and ogg by name and by first bytes, renamed png or t
     assert.equal(inboxOk(ext, TEXT), false, `a text file renamed to .${ext}`);
   }
   assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xd8, 0xff, 0xe0])), false, 'a jpg is not an MPEG frame');
+  assert.equal(inboxOk('mp3', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello, not a sound', 'utf16le')])), false, 'a UTF-16 text file renamed to .mp3');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xfb, 0xf0, 0x64])), false, 'bitrate index 1111');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xfb, 0x9c, 0x64])), false, 'sample-rate index 11');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xf9, 0x90, 0x64])), false, 'layer bits 00');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xf3, 0x90, 0x64])), true, 'an MPEG-2 Layer III frame');
   assert.equal(inboxOk('wav', WEBP), false, 'a webp is RIFF but not WAVE');
   assert.equal(inboxOk('webp', WAV), false, 'a wav is RIFF but not WEBP');
   assert.equal(inboxOk('png', OGG), false);

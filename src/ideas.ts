@@ -425,7 +425,9 @@ const MAGIC: Record<string, (b: Buffer) => boolean> = {
   mp4: b => b.subarray(4, 8).toString('latin1') === 'ftyp',
   webm: b => b.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])),
   webp: b => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
-  mp3: b => b.subarray(0, 3).toString('latin1') === 'ID3' || (b.length > 1 && b[0] === 0xff && (b[1]! & 0xe0) === 0xe0),
+  // An MPEG frame header: sync, Layer III (a UTF-16 BOM, FF FE, reads as Layer I), a valid bitrate and sample rate.
+  mp3: b => b.subarray(0, 3).toString('latin1') === 'ID3'
+    || (b.length > 2 && b[0] === 0xff && (b[1]! & 0xe0) === 0xe0 && (b[1]! & 0x06) === 0x02 && b[2]! >> 4 !== 0xf && (b[2]! & 0x0c) !== 0x0c),
   wav: b => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WAVE',
   ogg: b => b.subarray(0, 4).toString('latin1') === 'OggS',
 };
