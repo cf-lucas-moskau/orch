@@ -12,7 +12,7 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   --json                calendar, mail, read and chats print JSON instead of text
   --box <address>       any command on a shared mailbox, e.g. --box loesungen@tiki-institut.com (Lösungen)
 The token cache lives in ~/.local/share/orch-m365/cache.json (mode 600) and never leaves this Mac."""
-import html, json, os, re, sys, datetime as dt
+import html, json, os, re, sys, time, datetime as dt
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import msal, requests
 
@@ -69,6 +69,20 @@ class GraphError(Exception):
         self.status = status
 
 
+RETRIES, RETRY_MAX_WAIT = 4, 30
+sleep = time.sleep
+
+
+def fetch(url, params, h):
+    # Graph throttles bursts (429) and sometimes answers 503/504; wait as long as Retry-After says (capped), then try again.
+    for attempt in range(RETRIES + 1):
+        r = requests.get(url, params=params, headers=h, timeout=30)
+        if r.status_code not in (429, 503, 504) or attempt == RETRIES:
+            return r
+        wait = (getattr(r, 'headers', None) or {}).get('Retry-After')
+        sleep(min(int(wait) if str(wait or '').isdigit() else 2 ** attempt, RETRY_MAX_WAIT))
+
+
 def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCOPES, until=None):
     # Follows @odata.nextLink while all_pages is set, until limit items are collected
     # or until(item) holds for a page's last item (lists ordered newest first stop at a cutoff).
@@ -76,7 +90,7 @@ def get(path, params=None, headers=None, all_pages=False, limit=None, scopes=SCO
     h = {'Authorization': f'Bearer {token(scopes)}', **(headers or {})}
     url, out = (path if path.startswith('https://') else G + path), None
     while url:
-        r = requests.get(url, params=params, headers=h, timeout=30)
+        r = fetch(url, params, h)
         if r.status_code >= 400:
             raise GraphError(r.status_code, r.text)
         j = r.json()
@@ -204,8 +218,9 @@ def chat_time(c):
 
 
 def chat(c, msgs):
-    members = [{'name': m.get('displayName'), 'email': (m.get('email') or '').lower() or None, 'userId': m.get('userId')}
-               for m in c.get('members', [])]
+    # userId and tenantId let a reader tell a guest or a colleague's second account from a namesake.
+    members = [{'name': m.get('displayName'), 'email': (m.get('email') or '').lower() or None, 'userId': m.get('userId'),
+                'tenantId': m.get('tenantId')} for m in c.get('members', [])]
     email = {m['userId']: m['email'] for m in members if m['userId']}
     out = []
     for m in msgs:
@@ -213,7 +228,8 @@ def chat(c, msgs):
             continue
         u = (m.get('from') or {}).get('user') or {}
         out.append({'id': m['id'], 'created': m.get('createdDateTime'),
-                    'from': {'name': u.get('displayName'), 'email': email.get(u.get('id'))},
+                    'from': {'name': u.get('displayName'), 'email': email.get(u.get('id')), 'userId': u.get('id'),
+                             'tenantId': u.get('tenantId')},
                     'text': text_of(m.get('body'))})
     return {'id': c['id'], 'topic': c.get('topic'), 'type': c.get('chatType'),
             'updated': chat_time(c), 'link': c.get('webUrl'), 'members': members, 'messages': out}

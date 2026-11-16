@@ -106,3 +106,24 @@ test('a failed backup verify stops before d14; d14 failing keeps its own exit st
   assert.equal(r.status, 7);
   assert.match(r.stderr, /d14 done\nd14 exited 7/);
 });
+
+test('--accepted D-NN lets migrations through only when that decision is accepted and names every file', () => {
+  const w = world();
+  w.commit('packages/db/migrations/002_quests.sql', 'CREATE TABLE quests (id int);\n');
+  const next = w.commit('packages/db/migrations/003_loot.sql', 'CREATE TABLE loot (id int);\n');
+  const dec = mkdtempSync(join(tmpdir(), 'decisions-'));
+  const env = { ORCH_DECISIONS_DIR: dec };
+  const run = (...args: string[]) => spawnSync(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, '..', 'src', 'deploy-evrloot.ts'), ...args],
+    { env: { ...process.env, EVR_DEPLOY_DIR: w.dir, RUNS: join(w.dir, '..', 'runs'), TMPDIR: w.tmp, ...env }, encoding: 'utf8' });
+  assert.equal(run('--accepted', 'D-9').status, 3, 'no decision file');
+  writeFileSync(join(dec, 'D-9.md'), '# D-9\n\n- Status: open\n\npackages/db/migrations/002_quests.sql\npackages/db/migrations/003_loot.sql\n');
+  assert.match(run('--accepted', 'D-9').stderr, /D-9 is not accepted/);
+  writeFileSync(join(dec, 'D-9.md'), '# D-9\n\n- Status: accepted\n\npackages/db/migrations/002_quests.sql\n');
+  assert.match(run('--accepted', 'D-9').stderr, /does not name these migrations:\npackages\/db\/migrations\/003_loot.sql/);
+  assert.equal(w.head(), w.first, 'the checkout did not move');
+  writeFileSync(join(dec, 'D-9.md'), '# D-9\n\n- Status: accepted\n\npackages/db/migrations/002_quests.sql\npackages/db/migrations/003_loot.sql\n');
+  const r = run('--accepted', 'D-9');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /migrations accepted in D-9: 2/);
+  assert.equal(w.head(), next);
+});

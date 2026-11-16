@@ -8,6 +8,8 @@ Every event the watcher prints is sorted into one of three buckets.
 
 Needs the user: a session is blocked on a permission prompt, asks a question, or waits on an approval. Anything touching commits, pushes, merges, deploys, DB writes, outward-facing actions (PR comments, Slack, email, Jira) or money is always needs the user, even if the session only proposes it, except what Autonomy below switches on. A long task that finished and now sits idle waiting for "go" counts too.
 
+Exception for Evrloot game design: when a team member asks to change balance, timings or rules of a feature that already exists, and lead-evrloot has a clear recommendation, the lead acts on that recommendation and reports it as FYI in the next brief. Still needs the user: anything that moves value between players (treasuries, transfers), touches the token, drop points' purpose or real money, or adds a new system. (Lucas accepted D-62, D-63 and D-66 with the recommendation on 2026-11-13 and turned down the D-56 treasury.)
+
 FYI: a session finished and reported, nothing pending. Shown when the user asks, never pushed. Exception: when a worker or session the user asked for finishes, orch says so in its own chat in one line with the result, right away.
 
 Handled: interim progress, subagent chatter, the user already typing in that pane (herdr `focused`), or orch's own session. Dropped.

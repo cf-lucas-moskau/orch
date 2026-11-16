@@ -13,15 +13,16 @@ def fixture(name):
 
 
 class Resp:
-    def __init__(self, status, body):
-        self.status_code, self._body, self.text = status, body, json.dumps(body)
+    def __init__(self, status, body, headers=None):
+        self.status_code, self._body, self.text, self.headers = status, body, json.dumps(body), headers or {}
 
     def json(self):
         return self._body
 
 
 class Fake:
-    """Graph and msal stand-ins: routes maps a URL to (status, fixture name or body); calls records every request."""
+    """Graph and msal stand-ins: routes maps a URL to (status, fixture name or body[, headers]), or to a list of those
+    answered in turn (the last one repeats); calls records every request."""
     granted = {'User.Read', 'Mail.Read', 'Mail.Read.Shared', 'Calendars.Read', 'Calendars.Read.Shared'}
     accounts = [{'username': 'lucas@tiki.example'}]
 
@@ -30,8 +31,11 @@ class Fake:
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append((url, dict(params or {}), dict(headers or {})))
-        status, body = self.routes[url]
-        return Resp(status, fixture(body) if isinstance(body, str) else body or {'error': {'code': 'Forbidden'}})
+        route = self.routes[url]
+        if isinstance(route, list):
+            route = route.pop(0) if len(route) > 1 else route[0]
+        status, body, *extra = route
+        return Resp(status, fixture(body) if isinstance(body, str) else body or {'error': {'code': 'Forbidden'}}, *extra)
 
 
 fake = Fake()
@@ -248,22 +252,24 @@ class M365(unittest.TestCase):
         self.assertEqual(got[0], {
             'id': '19:abc@thread.v2', 'topic': None, 'type': 'oneOnOne', 'updated': '2026-11-11T10:00:00.000Z',
             'link': 'https://teams.microsoft.com/l/chat/19%3Aabc%40thread.v2/0',
-            'members': [{'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'userId': 'u-lucas'},
-                        {'name': 'Erika Muster', 'email': 'erika.muster@netto.example', 'userId': 'u-erika'}],
+            'members': [{'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'userId': 'u-lucas', 'tenantId': None},
+                        {'name': 'Erika Muster', 'email': 'erika.muster@netto.example', 'userId': 'u-erika', 'tenantId': None}],
             'messages': [
                 {'id': '1731319200000', 'created': '2026-11-11T10:00:00.000Z',
-                 'from': {'name': 'Erika Muster', 'email': 'erika.muster@netto.example'},
+                 'from': {'name': 'Erika Muster', 'email': 'erika.muster@netto.example', 'userId': 'u-erika', 'tenantId': None},
                  'text': 'Passt der Termin am Freitag?\nGrüße'},
                 {'id': '1731319000000', 'created': '2026-11-11T09:55:00.000Z',
-                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example'}, 'text': 'Hi Erika'}],
+                 'from': {'name': 'Lucas Moskau', 'email': 'lucas@tiki.example', 'userId': 'u-lucas', 'tenantId': None},
+                 'text': 'Hi Erika'}],
             'truncated': {'members': False, 'messages': False}})
         self.assertEqual(got[1], {
             'id': '19:revived@thread.v2', 'topic': 'Zollner Rahmenvertrag', 'type': 'group',
             'updated': '2026-11-05T12:00:00.000Z',
             'link': 'https://teams.microsoft.com/l/chat/19%3Arevived%40thread.v2/0',
-            'members': [{'name': 'Hans Zoll', 'email': 'hans@zollner.example', 'userId': 'u-hans'}],
+            'members': [{'name': 'Hans Zoll', 'email': 'hans@zollner.example', 'userId': 'u-hans', 'tenantId': None}],
             'messages': [{'id': '1730800000000', 'created': '2026-11-05T12:00:00.000Z',
-                          'from': {'name': 'Hans Zoll', 'email': 'hans@zollner.example'}, 'text': 'Neue Version anbei'}],
+                          'from': {'name': 'Hans Zoll', 'email': 'hans@zollner.example', 'userId': 'u-hans', 'tenantId': None},
+                          'text': 'Neue Version anbei'}],
             'truncated': {'members': False, 'messages': False}})
         self.assertEqual(len(got), 2, '19:old was renamed recently but has no message since the cutoff')
 
@@ -297,6 +303,43 @@ class M365(unittest.TestCase):
             self.assertEqual([c['id'] for c in got], ['19:abc@thread.v2'])
             self.assertEqual(err.getvalue(), f'skipped chat 19:revived@thread.v2: {status}: {{"error": {{"code": "Boom"}}}}\n')
 
+    def test_chats_carry_user_and_tenant_ids_also_for_senders_without_address(self):
+        self.chat_routes()
+        chats = fixture('chats.json')
+        chats['value'][0]['members'][1]['tenantId'] = 't-netto'
+        fake.routes[G + '/me/chats'] = (200, chats)
+        msgs = fixture('chat-messages.json')
+        msgs['value'][0]['from']['user'] = {'id': 'u-guest', 'displayName': 'Gast Extern', 'tenantId': 't-guest'}
+        fake.routes[G + '/chats/19:abc@thread.v2/messages'] = (200, msgs)
+        got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
+        self.assertEqual(got[0]['members'][1]['tenantId'], 't-netto')
+        self.assertEqual(got[0]['messages'][0]['from'], {'name': 'Gast Extern', 'email': None, 'userId': 'u-guest', 'tenantId': 't-guest'})
+
+    def test_throttled_requests_wait_and_retry(self):
+        waits = []
+        m365.sleep = waits.append
+        try:
+            self.chat_routes()
+            fake.routes[G + '/chats/19:revived@thread.v2/messages'] = [
+                (429, {'error': {'code': 'TooManyRequests'}}, {'Retry-After': '7'}),
+                (503, {'error': {'code': 'Unavailable'}}),
+                (200, 'chat-messages-revived.json')]
+            got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
+            self.assertEqual([c['id'] for c in got], ['19:abc@thread.v2', '19:revived@thread.v2'])
+            self.assertEqual(waits, [7, 2], 'Retry-After first, then exponential backoff')
+
+            waits.clear()
+            self.chat_routes()
+            fake.routes[G + '/chats/19:revived@thread.v2/messages'] = (429, {'error': {'code': 'TooManyRequests'}}, {'Retry-After': '120'})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
+            self.assertEqual([c['id'] for c in got], ['19:abc@thread.v2'])
+            self.assertEqual(waits, [30, 30, 30, 30], 'capped at RETRY_MAX_WAIT, then the chat is skipped and reported')
+            self.assertTrue(err.getvalue().startswith('skipped chat 19:revived@thread.v2: 429: '))
+        finally:
+            m365.sleep = m365.time.sleep
+
     def test_chats_with_25_members_fetch_the_full_list(self):
         self.chat_routes()
         member = lambda i: {'displayName': f'P{i}', 'userId': f'u{i}', 'email': f'p{i}@zollner.example'}
@@ -306,7 +349,7 @@ class M365(unittest.TestCase):
         fake.routes[G + '/chats/19:revived@thread.v2/members'] = (200, {'value': [member(i) for i in range(30)]})
         got = json.loads(run('chats', '--since', '2026-11-01', '--json'))
         self.assertEqual(len(got[1]['members']), 30)
-        self.assertEqual(got[1]['members'][29], {'name': 'P29', 'email': 'p29@zollner.example', 'userId': 'u29'})
+        self.assertEqual(got[1]['members'][29], {'name': 'P29', 'email': 'p29@zollner.example', 'userId': 'u29', 'tenantId': None})
         self.assertNotIn(G + '/chats/19:abc@thread.v2/members', [u for u, _, _ in fake.calls])
 
     def test_flags_only_on_commands_that_take_them(self):

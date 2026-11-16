@@ -4,6 +4,7 @@
 // after a refusal refuses again. Any migration in that range stops it: Lucas approves each one (they are rare), so
 // nothing here tries to judge SQL. Exit codes: 2 checkout not deployable, 3 migrations need Lucas (listed on stderr),
 // 4 backup verify failed, otherwise d14's own. EVR_DEPLOY_DIR points it at another checkout (tests).
+// `--accepted D-NN` lets migrations through when decisions/D-NN.md is accepted and names every one of them by path.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -34,7 +35,19 @@ catch (e) { stop(2, `cannot tell what 8790 runs (releases/current/manifest.json)
 const deployed = git('rev-parse', `${commit!}^{commit}`);
 if (!isAncestor(deployed, main)) stop(2, `8790 runs ${deployed.slice(0, 8)}, which is not on origin/main`);
 const migrations = git('diff', '--name-only', '--no-renames', deployed, main, '--', 'packages/db/migrations');
-if (migrations) stop(3, `migrations since ${deployed.slice(0, 8)} need Lucas:\n${migrations}`);
+const accepted = process.argv.indexOf('--accepted');
+const decision = accepted < 0 ? undefined : process.argv[accepted + 1];
+if (migrations && !decision) stop(3, `migrations since ${deployed.slice(0, 8)} need Lucas:\n${migrations}`);
+if (migrations && decision) {
+  if (!/^D-\d+$/.test(decision)) stop(3, `--accepted takes a decision id like D-12, not ${decision}`);
+  const decisions = process.env.ORCH_DECISIONS_DIR ?? join(import.meta.dirname, '..', 'decisions');
+  let text = '';
+  try { text = readFileSync(join(decisions, `${decision}.md`), 'utf8'); } catch { stop(3, `no decisions/${decision}.md`); }
+  if (!/^- Status: accepted\b/m.test(text)) stop(3, `${decision} is not accepted`);
+  const missing = migrations.split('\n').filter(m => !text.includes(m));
+  if (missing.length) stop(3, `${decision} does not name these migrations:\n${missing.join('\n')}`);
+  console.log(`migrations accepted in ${decision}: ${migrations.split('\n').length}`);
+}
 
 console.log(`deploy ${main.slice(0, 8)} (8790 runs ${deployed.slice(0, 8)})`);
 
