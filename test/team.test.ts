@@ -133,6 +133,10 @@ test('team say, impl say and impl raise post scrubbed text in their channels', a
   assert.equal(w.stored().at(-1).kind, 'sent', "orch's own team-general post is kept too");
   await assert.rejects(impl(['raise', 'I-9', 'x'], w.d), /no idea I-9/);
   await assert.rejects(team(['say', 'https://x.example'], w.d), /nothing left to post/);
+  const before = w.stored().length;
+  await assert.rejects(team(['say', '--help'], w.d), /unknown flag --help/);
+  await assert.rejects(team(['say', 'hi', '--medai', 'x.png'], w.d), /unknown flag --medai/);
+  assert.equal(w.stored().length, before, 'an unknown flag posts nothing');
 
   await idea(['off'], w.d);
   await assert.rejects(team(['say', 'hi'], w.d), /the idea bridge is off/);

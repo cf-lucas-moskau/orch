@@ -449,3 +449,79 @@ export function prTitle(task: string): string {
   const cut = sentence.slice(0, 70);
   return cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : 70).trim();
 }
+
+// Paths a worker must never touch, per repo (D-56: data/admin holds the live Admin 2 session).
+export const SECRET_PATHS: Record<string, string[]> = { 'evrloot-next': ['data/admin'] };
+
+// What a tool call reaches: the command, path, pattern or glob it acts on.
+// A search command's quoted pattern only names what it looks for; its targets are what it reads. So for each grep/rg/ag
+// segment of a shell command the first quoted argument is set aside; everything else (targets, other commands) stays.
+const SEARCH = /^\s*(?:git\s+grep|grep|egrep|rg|ag)\b/;
+const QUOTED = /'[^']*'|"(?:[^"\\]|\\.)*"/;
+// The command split at unquoted |, ||, &&, ; and newlines, separators kept, so joining gives the command back.
+function shellSegments(command: string): string[] {
+  const out: string[] = [];
+  let cur = '', quote = '';
+  for (let k = 0; k < command.length; k++) {
+    const c = command[k];
+    if (quote) { cur += c; if (c === '\\' && quote === '"') cur += command[++k] ?? ''; else if (c === quote) quote = ''; continue; }
+    if (c === "'" || c === '"') { quote = c; cur += c; continue; }
+    const sep = command.startsWith('&&', k) || command.startsWith('||', k) ? command.slice(k, k + 2) : '|;\n'.includes(c) ? c : '';
+    if (sep) { out.push(cur, sep); cur = ''; k += sep.length - 1; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function splitSearchPatterns(command: string): { access: string; patterns: string } {
+  const patterns: string[] = [];
+  const access = shellSegments(command).map(seg => {
+    if (!SEARCH.test(seg)) return seg;
+    const m = seg.match(QUOTED);
+    if (!m) return seg;
+    patterns.push(m[0]);
+    return seg.replace(m[0], "''");
+  }).join('');
+  return { access, patterns: patterns.join('\n') };
+}
+
+function accessText(input: unknown): string {
+  const i = (input ?? {}) as Record<string, unknown>;
+  const command = typeof i.command === 'string' ? splitSearchPatterns(i.command).access : undefined;
+  return [command, i.file_path, i.notebook_path, i.path, i.glob].filter(v => typeof v === 'string').join('\n');
+}
+
+// Code a tool call writes (not prose in .md/.mdx/.txt), so a guard that names the path can be told from a real access.
+function writtenCode(input: unknown): string {
+  const i = (input ?? {}) as Record<string, unknown>;
+  const searched = [typeof i.command === 'string' ? splitSearchPatterns(i.command).patterns : '', typeof i.pattern === 'string' ? i.pattern : ''].join('\n');
+  const path = String(i.file_path ?? i.notebook_path ?? '');
+  if (!path) return searched;
+  if (/\.(md|mdx|txt)$/i.test(path)) return searched;
+  return [searched, i.content, i.new_string, i.new_source].filter(v => typeof v === 'string').join('\n');
+}
+
+function scanTools(transcript: string, paths: string[], text: (input: unknown) => string): string[] {
+  if (!paths.length) return [];
+  const hits: string[] = [];
+  for (const line of transcript.split('\n')) {
+    if (!line.includes('tool_use')) continue;
+    let e: { message?: { content?: unknown } };
+    try { e = JSON.parse(line); } catch { continue; }
+    const content = Array.isArray(e.message?.content) ? e.message!.content as { type?: string; name?: string; input?: unknown }[] : [];
+    for (const c of content) {
+      if (c.type !== 'tool_use') continue;
+      if (paths.some(p => text(c.input).includes(p))) hits.push(`${c.name}: ${JSON.stringify(c.input ?? '').slice(0, 120)}`);
+    }
+  }
+  return hits;
+}
+
+// Every tool call in a Claude transcript (JSONL) that acts on one of the paths (a command, a read, a search), as short labels.
+// Only tool inputs count, so a brief or AGENTS.md that merely mentions the rule passes. These fail the gates.
+export const secretTouches = (transcript: string, paths: string[]) => scanTools(transcript, paths, accessText);
+
+// Tool calls that write code naming one of the paths (a guard that refuses it, or a script that loads it), or search for it as a pattern.
+// These warn: orch reads each one before shipping.
+export const secretMentions = (transcript: string, paths: string[]) => scanTools(transcript, paths, writtenCode);
