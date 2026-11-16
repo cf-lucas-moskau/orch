@@ -73,7 +73,7 @@ function statusOf(root: string, id: string): string | undefined {
   try { return decisionStatus(readFileSync(join(root, 'decisions', `${id}.md`), 'utf8')); } catch { return undefined; }
 }
 // The decisions the parked ideas wait on that are still open. Only their files are read, none when nothing is parked.
-const openDecisions = (ideas: Idea[], root: string) =>
+export const openDecisions = (ideas: Idea[], root: string) =>
   new Set([...new Set(ideas.flatMap(i => i.parked ? [i.parked] : []))].filter(id => statusOf(root, id) === 'open'));
 // A park whose decision is no longer open, or whose idea stopped building, is cleared. Every `orch idea` and every
 // bridge tick runs it.

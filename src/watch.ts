@@ -1,6 +1,6 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,13 +8,14 @@ import type { FeedEvent } from './board.ts';
 import { classify, feedLine, screenTail, workerFor, workerIn } from './triage.ts';
 import { due, finishKey, step as stepFinish, type Finishes } from './finish.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
-import { loadConfig, loadIdeas } from './ideas-io.ts';
+import { loadConfig, loadIdeas, openDecisions } from './ideas-io.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 import { parseDiskFloor } from './dispatch.ts';
 import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
+import { buildLimit, building, EMPTY, idleDue, idleLine, mergedNotCleaned, noteDone, prune as pruneDone, unshipped, unshippedDue, waitingWork, type CapacityState } from './capacity.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -63,6 +64,7 @@ const workerRepo = (name: string) => json('workers.json', []).find((w: any) => w
 // orch's watcher makes every line, a lead's included, and never drops one: a line of a lead that is up goes to that
 // lead's inbox, which only its watcher prints. A lead's watcher prints only its own lines.
 function say(line: string) {
+  if (!me && line.startsWith('DONE worker ')) saveCapacity(noteDone(capacity(), line, Date.now()));
   const owner = ownerOf(line, workerRepo);
   if (shows(owner, me, up)) return console.log(line);
   if (me) return;
@@ -300,6 +302,82 @@ function startOrchSide() {
   void ensureQueue();
   setInterval(() => void ensureQueue(), 60_000);
   setInterval(checkDisk, Number(process.env.ORCH_DISK_CHECK_MS ?? CHECK_MS));
+  void checkCapacity();
+  setInterval(() => void checkCapacity(), Number(process.env.ORCH_CAPACITY_CHECK_MS ?? 60_000));
+}
+
+// IDLE and UNSHIPPED lines (src/capacity.ts), checked every minute. capacity.json keeps when each was last said and
+// when each worker last said DONE, so a re-arm neither repeats nor forgets them.
+const capacity = (): CapacityState => ({ ...EMPTY, ...json('capacity.json', {}) });
+const saveCapacity = (s: CapacityState) => {
+  const f = join(root, 'capacity.json'), tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n');
+  renameSync(tmp, f);
+};
+// A command off the event loop: its exit code and stdout, or undefined when it did not start or ran past ms (killed).
+function run(cmd: string, args: string[], cwd: string, ms = 30_000): Promise<{ code: number; out: string } | undefined> {
+  return new Promise(resolve => {
+    const c = spawn(cmd, args, { cwd });
+    let out = '';
+    const kill = setTimeout(() => { c.kill('SIGKILL'); resolve(undefined); }, ms);
+    c.stdout.on('data', d => { out += d; });
+    c.on('error', () => { clearTimeout(kill); resolve(undefined); });
+    c.on('close', code => { clearTimeout(kill); resolve(code === null ? undefined : { code, out }); });
+  });
+}
+// Merged when a merged PR's head (on prHead or branch) contains the worktree's HEAD, as orch's overlap check decides.
+// Anything that cannot tell (gh failed or timed out, no worktree, a PR head git cannot read even after a fetch) is
+// unknown, and the worker is skipped this round.
+async function mergedState(w: any): Promise<'merged' | 'unmerged' | 'unknown'> {
+  if (!w.repoPath || !w.worktree || !existsSync(w.worktree)) return 'unknown';
+  const gh = await run('gh', ['pr', 'list', '--head', w.prHead ?? w.branch, '--state', 'merged', '--json', 'headRefOid', '-q', '.[].headRefOid'], w.repoPath);
+  if (gh?.code !== 0) return 'unknown';
+  let unknown = false;
+  for (const h of gh.out.trim().split('\n').filter(Boolean)) {
+    const has = async () => (await run('git', ['-C', w.worktree, 'cat-file', '-e', `${h}^{commit}`], w.worktree))?.code === 0;
+    if (!(await has()) && !((await run('git', ['-C', w.worktree, 'fetch', '-q', 'origin', h], w.worktree, 60_000))?.code === 0 && await has())) { unknown = true; continue; }
+    const r = await run('git', ['-C', w.worktree, 'merge-base', '--is-ancestor', 'HEAD', h], w.worktree);
+    if (r?.code === 0) return 'merged';
+    if (r?.code !== 1) unknown = true;
+  }
+  return unknown ? 'unknown' : 'unmerged';
+}
+let capacityBusy = false;
+async function checkCapacity() {
+  if (capacityBusy) return;
+  capacityBusy = true;
+  try {
+    const now = Date.now();
+    const running = json('workers.json', []).filter((w: any) => w.status === 'running');
+    let s = pruneDone(capacity(), new Set(running.map((w: any) => w.name)));
+    const free = freeGb(), floor = parseDiskFloor(text('local.md') + text('policies.md'));
+    for (const lead of Object.values(LEADS)) {
+      // Ideas are read only when an IDLE line could be said: at most once a minute, never within 30 minutes of the last.
+      if (!idleDue(s, lead.name, now)) continue;
+      let config, ideas: ReturnType<typeof loadIdeas> = [];
+      try { config = loadConfig(root); if (config.repo === lead.repo) ideas = loadIdeas(root); } catch { continue; }
+      const mine = running.filter((w: any) => w.repo === lead.repo).map((w: any) => w.name);
+      const busy = building(mine, ideas, openDecisions(ideas, root));
+      const r = idleLine(s, lead.name, busy.length, buildLimit(config.building, free, floor), waitingWork(ideas, text(`plans/${lead.repo}.md`), mine), now);
+      s = r.state;
+      if (r.line) { saveCapacity(s); say(r.line); }
+    }
+    saveCapacity(s);
+    for (const name of unshippedDue(s, now)) {
+      const w = running.find((x: any) => x.name === name);
+      // A worker that works again was prompted after its DONE; its next DONE restarts the clock. Asked before gh, so
+      // a working worker never costs a gh call.
+      if (w.pane && (await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS)).result?.agent?.agent_status === 'working') continue;
+      const merged = await mergedState(w);
+      if (merged === 'unknown') continue;
+      const cur = capacity();
+      if (!cur.done[name] || !unshippedDue(cur, Date.now()).includes(name)) continue;
+      const u = merged === 'merged' ? mergedNotCleaned(cur, name, Date.now()) : unshipped(cur, name, Date.now());
+      saveCapacity(u.state);
+      say(u.line);
+    }
+  } catch (e) { console.log(`CAPACITY error: ${e instanceof Error ? e.message : e}`); }
+  finally { capacityBusy = false; }
 }
 
 // Under the Disk thin threshold (local.md, default 30 GB) on the home folder's volume, thin local Time Machine

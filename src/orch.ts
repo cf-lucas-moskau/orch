@@ -18,6 +18,7 @@ import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, run
 import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
 import { pendingLines } from './ideas.ts';
 import { parseDfFreeGb } from './disk.ts';
+import { isMerged, mergedHeads } from './merged.ts';
 import { impl as implCmd, team as teamCmd } from './team-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
@@ -894,15 +895,6 @@ function commitsBehind(path: string, pr: string, base: string, head: string): nu
   if (r.status === 0 && r.stdout.split('\n')[0] === git(path, 'rev-parse', `${head}^{tree}`).trim()) return 0;
   return Number(git(path, 'rev-list', '--count', `${head}..origin/${base}`).trim());
 }
-
-// Head commits of the branch's merged PRs, or what gh said when it failed.
-function mergedHeads(path: string, branch: string): { heads: string[] } | { error: string } {
-  const r = spawnSync('gh', ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'headRefOid', '-q', '.[].headRefOid'], { cwd: path, encoding: 'utf8' });
-  if (r.status !== 0) return { error: (r.stderr || r.error?.message || `exit ${r.status}`).trim().split('\n')[0] };
-  return { heads: r.stdout.trim().split('\n').filter(Boolean) };
-}
-// Merged when the branch's head is one a merged PR had, or older; a reused branch with new commits counts again.
-const isMerged = (cwd: string, ref: string, heads: string[]) => heads.some(h => ok(cwd, 'merge-base', '--is-ancestor', ref, h));
 
 // Routines: routines/<name>.md, due ones started by `tick`, which launchd runs every minute (npm run setup installs it).
 const ROUTINE_DIR = join(root, 'routines');
