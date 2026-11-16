@@ -82,5 +82,5 @@ export function runName(r: Routine, slot: Date): string {
 
 // orch itself: the Claude session titled orch in orch's own folder (npm start names it).
 export function orchPane(live: Live[], root: string): Live | undefined {
-  return live.find(a => a.agent === 'claude' && a.terminal_title_stripped === 'orch' && a.cwd === root);
+  return live.find(a => a.agent === 'claude' && a.terminal_title_stripped?.toLowerCase() === 'orch' && a.cwd === root);
 }

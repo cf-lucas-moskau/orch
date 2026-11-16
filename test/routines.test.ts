@@ -68,4 +68,5 @@ test('orch is the Claude session titled orch in its own folder', () => {
   ];
   assert.equal(orchPane(live, '/o')?.pane_id, 'w9:p1');
   assert.equal(orchPane(live, '/elsewhere'), undefined);
+  assert.equal(orchPane([{ ...live[1], terminal_title_stripped: 'ORCH' }], '/o')?.pane_id, 'w9:p1', 'the title case does not matter');
 });
