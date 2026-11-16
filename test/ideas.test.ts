@@ -11,7 +11,7 @@ import { dossierFile, download, handle, idea, inboxDir, settled, loadConfig, loa
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
   bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk, isParked, parkBlocker, decisionStatus,
-  imageOk, inboxOrder, inboxPicks, inboxUrlOk, keywordsPost, parseTitle, type Upload,
+  inboxCount, inboxOk, inboxOrder, inboxPicks, inboxUrlOk, keywordsPost, parseTitle, type Upload,
 } from '../src/ideas.ts';
 
 const NOW = '2026-10-30T10:00:00.000Z';
@@ -1826,10 +1826,10 @@ test('team images: Discord CDN only, image types by name and bytes, five per mes
   assert.equal(inboxUrlOk('https://user:pw@cdn.discordapp.com/a.png'), false);
   assert.equal(inboxUrlOk('https://cdn.discordapp.com:8443/a.png'), false);
   assert.equal(inboxUrlOk('file:///etc/passwd'), false);
-  assert.equal(imageOk('webp', WEBP), true);
-  assert.equal(imageOk('png', PNG), true);
-  assert.equal(imageOk('png', Buffer.from('#!/bin/sh')), false);
-  assert.equal(imageOk('mp4', Buffer.from('\0\0\0\x20ftypisom', 'latin1')), false, 'video is not a screenshot');
+  assert.equal(inboxOk('webp', WEBP), true);
+  assert.equal(inboxOk('png', PNG), true);
+  assert.equal(inboxOk('png', Buffer.from('#!/bin/sh')), false);
+  assert.equal(inboxOk('mp4', Buffer.from('\0\0\0\x20ftypisom', 'latin1')), false, 'video is not a screenshot');
   const up = (filename: string, o: Partial<Upload> = {}): Upload => ({ url: `${CDN}/${filename}`, filename, size: 1000, ...o });
   const picks = inboxPicks('42', [
     up('a.PNG'), up('b.jpeg'), up('../../x.gif'), up('run.sh'), up('c.webp', { url: 'https://evil.example/c.webp' }),
@@ -1837,9 +1837,70 @@ test('team images: Discord CDN only, image types by name and bytes, five per mes
   ]);
   assert.deepEqual(picks.take.map(p => p.name), ['42-1.png', '42-2.jpg', '42-3.gif', '42-4.png', '42-5.png']);
   assert.deepEqual(picks.skip, [
-    '"run.sh" not a png, jpg, gif or webp', '"c.webp" not on Discord\'s CDN', '"big.png" 9.0 MB is over 8 MB', '"f.png" more than 5 images in one message',
+    '"run.sh" not a png, jpg, gif, webp, mp3, wav or ogg', '"c.webp" not on Discord\'s CDN', '"big.png" 9.0 MB is over 8 MB', '"f.png" more than 5 files in one message',
   ]);
   assert.deepEqual(inboxPicks('../m', [up('a.png')]).skip, ['"a.png" odd message id']);
+});
+
+const ID3 = Buffer.from('ID3\x04\0\0\0\0\0\0', 'latin1');
+const MPEG = Buffer.from([0xff, 0xfb, 0x90, 0x64, 0, 0]);
+const WAV = Buffer.from('RIFF\x24\0\0\0WAVEfmt ', 'latin1');
+const OGG = Buffer.from('OggS\0\x02\0\0', 'latin1');
+const TEXT = Buffer.from('hello, not a sound at all');
+test('team sounds: mp3, wav and ogg by name and by first bytes, renamed png or text refused', () => {
+  for (const [ext, head] of [['mp3', ID3], ['mp3', MPEG], ['wav', WAV], ['ogg', OGG]] as const) {
+    assert.equal(inboxOk(ext, head), true, `a real ${ext} header`);
+    assert.equal(inboxOk(ext, PNG), false, `a png renamed to .${ext}`);
+    assert.equal(inboxOk(ext, TEXT), false, `a text file renamed to .${ext}`);
+  }
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xd8, 0xff, 0xe0])), false, 'a jpg is not an MPEG frame');
+  assert.equal(inboxOk('mp3', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello, not a sound', 'utf16le')])), false, 'a UTF-16 text file renamed to .mp3');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xfb, 0xf0, 0x64])), false, 'bitrate index 1111');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xfb, 0x9c, 0x64])), false, 'sample-rate index 11');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xf9, 0x90, 0x64])), false, 'layer bits 00');
+  assert.equal(inboxOk('mp3', Buffer.from([0xff, 0xf3, 0x90, 0x64])), true, 'an MPEG-2 Layer III frame');
+  assert.equal(inboxOk('wav', WEBP), false, 'a webp is RIFF but not WAVE');
+  assert.equal(inboxOk('webp', WAV), false, 'a wav is RIFF but not WEBP');
+  assert.equal(inboxOk('png', OGG), false);
+  const up = (filename: string, o: Partial<Upload> = {}): Upload => ({ url: `${CDN}/${filename}`, filename, size: 1000, ...o });
+  const picks = inboxPicks('7', [up('hit.MP3'), up('roar.wav'), up('rift.ogg'), up('big.ogg', { size: 9 * 1024 * 1024 }), up('x.flac'), up('a.png'), up('b.mp3'), up('c.wav')]);
+  assert.deepEqual(picks.take.map(p => p.name), ['7-1.mp3', '7-2.wav', '7-3.ogg', '7-4.png', '7-5.mp3']);
+  assert.deepEqual(picks.skip, ['"big.ogg" 9.0 MB is over 8 MB', '"x.flac" not a png, jpg, gif, webp, mp3, wav or ogg', '"c.wav" more than 5 files in one message']);
+  assert.equal(inboxCount(['1-1.png', '1-2.mp3', '1-3.ogg']), '[1 image, 2 sounds]');
+  assert.equal(inboxCount(['1-1.wav']), '[1 sound]');
+  assert.equal(inboxCount(['1-1.png', '1-2.gif']), '[2 images]');
+  assert.equal(inboxCount([]), '');
+});
+
+test('end to end on mocks: sounds posted in a thread reach orch, the inbox and the worker', async () => {
+  const w = world();
+  w.d.fetch = fakeFetch({
+    [`${CDN}/hit.mp3`]: [200, ID3],
+    [`${CDN}/roar.wav`]: [200, WAV],
+    [`${CDN}/rift.ogg`]: [200, OGG],
+    [`${CDN}/fake.ogg`]: [200, PNG],
+    [`${CDN}/notes.mp3`]: [200, TEXT],
+    [`${CDN}/shot.png`]: [200, PNG],
+  }).f;
+  const up = (filename: string): Upload => ({ url: `${CDN}/${filename}`, filename, size: 100 });
+  await w.post('Rift battle sounds', '--as', 'ann');
+  w.chat.post('ann', 'free to use', 't-m1', LATER(1), [up('shot.png'), up('hit.mp3'), up('roar.wav'), up('fake.ogg'), up('notes.mp3')]);
+  w.chat.post('ann', '', 't-m1', LATER(2), [up('rift.ogg')]);
+  await w.chat.poll(); await settled();
+  assert.deepEqual(w.feed().slice(-2), ['IDEA I-1 msg ann: free to use [1 image, 2 sounds]', 'IDEA I-1 msg ann: [1 sound]']);
+  assert.deepEqual(readFileSync(join(inboxDir(w.root, 'I-1'), 'm2-2.mp3')), ID3);
+  assert.deepEqual(readFileSync(join(inboxDir(w.root, 'I-1'), 'm2-3.wav')), WAV);
+  assert.ok(!existsSync(join(inboxDir(w.root, 'I-1'), 'm2-4.ogg')), 'a png renamed to .ogg is not kept');
+  assert.ok(!existsSync(join(inboxDir(w.root, 'I-1'), 'm2-5.mp3')), 'a text file renamed to .mp3 is not kept');
+  assert.ok(w.logs.includes('idea bridge: attachment "fake.ogg" its bytes are not a ogg on message m2 from ann skipped'));
+  assert.deepEqual(loadIdeas(w.root)[0].messages!.map(m => m.screenshots), [undefined, ['m2-1.png', 'm2-2.mp3', 'm2-3.wav'], ['m3-1.ogg']]);
+
+  await idea(['plan', 'I-1', 'Use the sounds in Rift battles.'], w.d);
+  await w.post('--in', 'I-1', 'go', '--as', 'ann');
+  await idea(['start', 'I-1'], w.d);
+  const at = (f: string) => join(inboxDir(w.root, 'I-1'), f);
+  assert.ok(w.runs[0][2].includes(`(images, sounds)`));
+  assert.ok(w.runs[0][2].includes(`- ${at('m2-1.png')}\n- ${at('m2-2.mp3')}\n- ${at('m2-3.wav')}\n- ${at('m3-1.ogg')}\n`));
 });
 
 // A stand-in for fetch: url -> [status, body, headers]. Every request is recorded.
@@ -1886,7 +1947,7 @@ test('end to end on mocks: images posted with an idea reach orch, the dossier an
   assert.deepEqual(w.feed(), ['IDEA I-1 new ann: Bats drop more loot [1 image]']);
   assert.deepEqual(readFileSync(join(inboxDir(w.root, 'I-1'), 'm1-1.png')), PNG);
   assert.ok(!existsSync(join(inboxDir(w.root, 'I-1'), 'm1-2.png')), 'bytes that are not a png are not kept');
-  assert.ok(w.logs.includes('idea bridge: attachment "notes.txt" not a png, jpg, gif or webp on message m1 from ann skipped'));
+  assert.ok(w.logs.includes('idea bridge: attachment "notes.txt" not a png, jpg, gif, webp, mp3, wav or ogg on message m1 from ann skipped'));
   assert.ok(w.logs.includes('idea bridge: attachment "fake.png" its bytes are not a png on message m1 from ann skipped'));
 
   w.chat.post('ann', 'like this, in the cave', 't-m1', LATER(1), [up('b.webp')]);
@@ -2184,7 +2245,7 @@ test('review 6 (1): a line whose record fails is not sent; the next tick records
   rmSync(json); mkdirSync(json);
   release(); await settled();
   assert.deepEqual(w.feed(), ['IDEA I-1 new ann: idea'], 'no line while the message is unrecorded');
-  assert.ok(w.logs.some(l => l.startsWith('idea I-1: images from message m2 failed, retried on the next tick: ')), w.logs.join('\n'));
+  assert.ok(w.logs.some(l => l.startsWith('idea I-1: files from message m2 failed, retried on the next tick: ')), w.logs.join('\n'));
   rmSync(json, { recursive: true }); writeFileSync(json, saved);
   await tick(w.d); await settled();
   await tick(w.d); await settled();

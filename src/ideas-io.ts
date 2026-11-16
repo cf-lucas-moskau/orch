@@ -6,7 +6,7 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync,
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { chatFor, MockChat, RearchiveFailed, writeAtomic, type Attachment, type Chat, type ReplyOptions } from './discord.ts';
 import {
-  advance, answer, askPost, imageOk, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, DECISION_ID, decisionStatus, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, keywordsPost, labelled, labelName, parseTitle, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
+  advance, answer, askPost, inboxOk, INBOX_FILE, inboxOrder, inboxPicks, inboxUrlOk, withScreenshots, clears, DEFAULT_CONFIG, dossierText, dueGoReminder, dueQuestions, goReminderPost, entry, DECISION_ID, decisionStatus, isParked, parkBlocker, MAX_MEDIA, mediaOk, migrate, parseNotes, progress, roundOf, STAGES, STALE_DAYS, stale, timeoutPost, type Stage, ideaLine, keywordsPost, labelled, labelName, parseTitle, nextId, planPost, route, sanitize, shipPost, startBlocker, startPost, tell, threadName, visiblePlan, withRelated, workerName, workerTask,
   type Config, type Idea, type Incoming, type Question, type Step, type Title, type Told,
 } from './ideas.ts';
 
@@ -119,11 +119,11 @@ export function mediaIn(root: string, sub: string, name: string): { file: Attach
 export const mediaFile = (root: string, id: string, name: string) => mediaIn(root, join('progress', id), name);
 import type { Download, InboxPick } from './ideas.ts';
 
-// Images the team posted for an idea, kept for orch and its workers. Files land under their final name only once
+// Images and sounds the team posted for an idea, kept for orch and its workers. Files land under their final name only once
 // complete, so a half-written one is never listed.
 export const inboxDir = (root: string, id: string) => join(dir(root), 'inbox', id);
 const inboxNames = (root: string, id: string) => {
-  try { return inboxOrder(readdirSync(inboxDir(root, id)).filter(f => /^\w+-\d+\.(png|jpg|gif|webp)$/.test(f))); }
+  try { return inboxOrder(readdirSync(inboxDir(root, id)).filter(f => INBOX_FILE.test(f))); }
   catch { return []; }
 };
 // The images of the idea's current round: a closed round's leftovers are never handed to a new worker.
@@ -194,7 +194,7 @@ function fetchDownload(d: Deps, id: string, dl: Download) {
     if (existsSync(join(inboxDir(d.root, id), p.name))) return p.name;
     const got = await download(d.fetch ?? fetch, p.url).catch(e => ({ refused: `download failed: ${e instanceof Error ? e.message : e}` }));
     if ('refused' in got) { left(`${p.from} ${got.refused}`); return; }
-    if (!imageOk(p.ext, got.data)) { left(`${p.from} its bytes are not a ${p.ext}`); return; }
+    if (!inboxOk(p.ext, got.data)) { left(`${p.from} its bytes are not a ${p.ext}`); return; }
     try {
       return locked(d.root, () => {
         if (!owns(readIf(d.root, id), dl.msg)) { left(`${p.from} arrived after the close`); return; }
@@ -211,16 +211,16 @@ function fetchDownload(d: Deps, id: string, dl: Download) {
       const kept = locked(d.root, () => {
         const i = readIf(d.root, id);
         if (!owns(i, dl.msg)) {
-          if (names.length) d.log(`idea ${id}: ${names.length} image(s) from message ${dl.msg} arrived after the close, not kept`);
+          if (names.length) d.log(`idea ${id}: ${names.length} file(s) from message ${dl.msg} arrived after the close, not kept`);
           return undefined;
         }
         const downloads = i!.downloads!.filter(x => x.msg !== dl.msg);
         save(d.root, withScreenshots({ ...i!, downloads: downloads.length ? downloads : undefined }, dl.msg, names, dl.ts, dl.by));
         return names;
       });
-      if (kept && dl.line) feed(d.root, ideaLine(id, dl.line.kind, dl.by, dl.line.text, kept.length), (d.now ?? (() => new Date().toISOString()))());
+      if (kept && dl.line) feed(d.root, ideaLine(id, dl.line.kind, dl.by, dl.line.text, kept), (d.now ?? (() => new Date().toISOString()))());
     } catch (e) {
-      d.log(`idea ${id}: images from message ${dl.msg} failed, retried on the next tick: ${e instanceof Error ? e.message : e}`);
+      d.log(`idea ${id}: files from message ${dl.msg} failed, retried on the next tick: ${e instanceof Error ? e.message : e}`);
     }
   })();
   inflight.set(key, job);
