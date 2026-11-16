@@ -4,7 +4,8 @@
 
 export type Lead = {
   name: string;
-  // Workers on this repo belong to the lead: their DONE, QUESTION, BLOCKED, STALLED and OVERLAP lines.
+  // Workers on this repo belong to the lead: their DONE, QUESTION, BLOCKED, STALLED, UNSHIPPED and OVERLAP lines.
+  // IDLE lead <name> lines go to the lead they name.
   repo: string;
   // Watcher line kinds that are the lead's whatever they name.
   kinds: readonly string[];
@@ -48,16 +49,17 @@ export function parsePane(stdout: string): LeadPane {
   return typeof a?.agent_status === 'string' ? { status: a.agent_status, sid: a.agent_session?.value ?? '' } : 'unknown';
 }
 
-const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED', 'STALLED']);
+const WORKER_KINDS = new Set(['DONE', 'QUESTION', 'BLOCKED', 'STALLED', 'UNSHIPPED']);
 
 // Who handles a watcher line: a lead's name, or 'orch'. workerRepo finds a running worker's repo by name.
 export function ownerOf(line: string, workerRepo: (name: string) => string | undefined, leads: Lead[] = Object.values(LEADS)): string {
   const kind = line.split(' ', 1)[0];
   const byKind = leads.find(l => l.kinds.includes(kind));
   if (byKind) return byKind.name;
+  if (kind === 'IDLE') return leads.find(l => l.name === line.match(/^IDLE lead (\S+):/)?.[1])?.name ?? 'orch';
   let repo: string | undefined;
   if (WORKER_KINDS.has(kind)) {
-    const m = line.match(/^\w+ worker (\S+) /);
+    const m = line.match(/^\w+ worker ([^\s:]+)/);
     repo = m ? workerRepo(m[1]) : undefined;
   } else if (kind === 'OVERLAP') {
     // OVERLAP <repo>: ..., OVERLAP error: <repo>: ..., OVERLAP warning: <repo>: ...; an error about the check itself names no repo.

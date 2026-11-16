@@ -86,7 +86,7 @@ Every new idea, thread message, go, feedback, question timeout and unanswered nu
 }
 ```
 
-Only allowlisted user ids can post ideas, talk in their threads and say go; taking someone off the list also takes them out of their own ideas. Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day (the limit is also said once a day), `building` caps ideas building at once; an idea parked on an open decision does not count.
+Only allowlisted user ids can post ideas, talk in their threads and say go; taking someone off the list also takes them out of their own ideas. Everyone else gets a polite no once a day; after that the bridge stays silent and only logs their messages. `perDay` caps new ideas per person per day (the limit is also said once a day), `building` caps ideas building at once; an idea parked on an open decision does not count. The lead fills to it: while fewer workers run on the repo than `building` (4 when unset there, 3 under 20 GB free, none under the Disk floor) and approved ideas or open plan tasks wait, the watcher says `IDLE lead <name>: building <n>/<limit>, <k> waiting` every 30 minutes, and `UNSHIPPED worker <name>: done <m> min ago, not shipped` hourly for a worker whose DONE is over 45 minutes old with no merged PR and no cleanup (src/capacity.ts).
 
 The live bridge remembers the last message it handled in the channel and in each thread. After a restart it catches up on everything posted since, in the channel and its active threads, before it handles new messages.
 
