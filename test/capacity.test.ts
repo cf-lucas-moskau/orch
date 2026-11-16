@@ -58,6 +58,8 @@ test('waiting work is approved ideas with a plan plus open, unheld tasks of the 
   assert.equal(waitingWork(ideas, OLD_LAYOUT, ['held']), 2);
   assert.equal(waitingWork([], README_LAYOUT, []), 2, 'the Tasks section, not the Notes after it');
   assert.equal(waitingWork([], README_LAYOUT, ['gx']), 1);
+  assert.equal(waitingWork([], README_LAYOUT.replace('newest first, no tasks here', '- [ ] noted: an idea jotted under Notes'), []), 2, '## Tasks wins over a later section with boxes');
+  assert.equal(waitingWork([], '## Tasks\n- [x] a: done\n\n## Later\n- [ ] b: someday\n', []), 0, 'a finished Tasks section waits for nothing');
   assert.equal(waitingWork([], '', []), 0);
   assert.equal(waitingWork([], '- [ ] solo: no sections at all\n', []), 1);
 });
@@ -117,7 +119,8 @@ async function until(lines: string[], done: () => boolean, ms = 15_000) {
   return lines;
 }
 
-test('the watcher: IDLE under the 3-cap without the parked worker, UNSHIPPED for an unmerged finish, one reminder for a merged one', async () => {
+// gh: the stub's body; it gets $head, the HEAD of the one test repo. worktree: idea-7's worktree, the repo by default.
+async function watchCapacity(o: { gh?: string; worktree?: (repo: string) => string; want: number }) {
   const root = mkdtempSync(join(tmpdir(), 'orch-capacity-'));
   for (const d of ['feed', 'leads', 'ideas', 'plans', 'bin', 'decisions']) mkdirSync(join(root, d));
   writeFileSync(join(root, 'ideas', 'off'), '');
@@ -136,30 +139,52 @@ test('the watcher: IDLE under the 3-cap without the parked worker, UNSHIPPED for
   git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'one');
   const head = git('rev-parse', 'HEAD');
   const w = (name: string, more = {}) => ({ name, repo: 'evrloot-next', repoPath: root, worktree: repo, branch: `orch/${name}`, pane: `${name}:p1`, sid: name, status: 'running', ...more });
-  writeFileSync(join(root, 'workers.json'), JSON.stringify([w('idea-7'), w('idea-8', { prHead: 'pr/idea-8' }), w('idea-9')]));
+  writeFileSync(join(root, 'workers.json'), JSON.stringify([w('idea-7', { worktree: o.worktree?.(repo) ?? repo }), w('idea-8', { prHead: 'pr/idea-8' }), w('idea-9')]));
   const old = Date.now() - 50 * MIN;
   writeFileSync(join(root, 'capacity.json'), JSON.stringify({ idle: {}, done: { 'idea-7': { at: old }, 'idea-8': { at: old }, gone: { at: old } } }));
   const bin = join(root, 'bin');
   writeFileSync(join(bin, 'df'), '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/disk3s5 482797652 1 18874368 87% /System/Volumes/Data"\n', { mode: 0o755 });
-  writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *"--head pr/idea-8 "*) echo ${head};; esac\n`, { mode: 0o755 });
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\nhead=${head}\n${o.gh ?? 'case "$*" in *"--head pr/idea-8 "*) echo $head;; esac'}\n`, { mode: 0o755 });
   writeFileSync(join(bin, 'herdr'), '#!/bin/sh\necho \'{"result":{"agent":{"agent_status":"idle"}}}\'\n', { mode: 0o755 });
   const p = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', join(SRC, 'watch.ts')],
     { env: { ...process.env, ORCH_DIR: root, ORCH_SID: 'orch0001', ORCH_QUEUE: 'off', ORCH_CAPACITY_CHECK_MS: '200', PATH: `${bin}:${process.env.PATH}` } });
   spawned.push(p);
   const lines: string[] = [];
   createInterface({ input: p.stdout }).on('line', l => { if (/^(IDLE|UNSHIPPED|CAPACITY)/.test(l)) lines.push(l); });
-  await until(lines, () => lines.length >= 3);
-  // A few more checks pass: nothing repeats.
-  await new Promise(r => setTimeout(r, 1000));
+  await until(lines, () => lines.length >= o.want);
+  // A few more checks pass: nothing repeats, nothing late.
+  await new Promise(r => setTimeout(r, 1500));
   await new Promise(r => { p.on('exit', r); p.kill(); });
-  assert.deepEqual(lines.sort(), [
+  return { lines: lines.sort(), s: JSON.parse(readFileSync(join(root, 'capacity.json'), 'utf8')) };
+}
+
+test('the watcher: IDLE under the 3-cap without the parked worker, UNSHIPPED for an unmerged finish, one reminder for a merged one', async () => {
+  const { lines, s } = await watchCapacity({ want: 3 });
+  assert.deepEqual(lines, [
     'IDLE lead evrloot: building 2/3, 3 waiting',
     'UNSHIPPED worker idea-7: done 50 min ago, not shipped',
     'UNSHIPPED worker idea-8: done 50 min ago, merged, not cleaned up',
   ]);
-  const s = JSON.parse(readFileSync(join(root, 'capacity.json'), 'utf8'));
   assert.deepEqual(Object.keys(s.done).sort(), ['idea-7', 'idea-8'], 'gone was cleaned up');
   assert.equal(typeof s.done['idea-7'].said, 'number');
   assert.equal(typeof s.done['idea-8'].merged, 'number');
   assert.equal(typeof s.idle.evrloot, 'number');
+});
+
+const IDLE_ONLY = ['IDLE lead evrloot: building 2/3, 3 waiting'];
+
+test('a failing gh is unknown: no UNSHIPPED line for anyone', async () => {
+  const { lines, s } = await watchCapacity({ gh: 'echo "HTTP 502" >&2\nexit 1', want: 1 });
+  assert.deepEqual(lines, IDLE_ONLY);
+  assert.equal(s.done['idea-7'].said, undefined);
+});
+
+test('a missing worktree is unknown: no UNSHIPPED line for that worker', async () => {
+  const { lines } = await watchCapacity({ worktree: repo => join(repo, 'gone'), want: 2 });
+  assert.deepEqual(lines, [...IDLE_ONLY, 'UNSHIPPED worker idea-8: done 50 min ago, merged, not cleaned up']);
+});
+
+test('a merged PR head git cannot read, even after a fetch, is unknown: no UNSHIPPED line', async () => {
+  const { lines } = await watchCapacity({ gh: 'echo 1111111111111111111111111111111111111111', want: 1 });
+  assert.deepEqual(lines, IDLE_ONLY);
 });

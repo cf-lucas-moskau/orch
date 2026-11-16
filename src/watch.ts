@@ -9,7 +9,6 @@ import { classify, feedLine, screenTail, workerFor, workerIn } from './triage.ts
 import { due, finishKey, step as stepFinish, type Finishes } from './finish.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
 import { loadConfig, loadIdeas, openDecisions } from './ideas-io.ts';
-import { isMerged, mergedHeads } from './merged.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
@@ -315,6 +314,34 @@ const saveCapacity = (s: CapacityState) => {
   writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n');
   renameSync(tmp, f);
 };
+// A command off the event loop: its exit code and stdout, or undefined when it did not start or ran past ms (killed).
+function run(cmd: string, args: string[], cwd: string, ms = 30_000): Promise<{ code: number; out: string } | undefined> {
+  return new Promise(resolve => {
+    const c = spawn(cmd, args, { cwd });
+    let out = '';
+    const kill = setTimeout(() => { c.kill('SIGKILL'); resolve(undefined); }, ms);
+    c.stdout.on('data', d => { out += d; });
+    c.on('error', () => { clearTimeout(kill); resolve(undefined); });
+    c.on('close', code => { clearTimeout(kill); resolve(code === null ? undefined : { code, out }); });
+  });
+}
+// Merged when a merged PR's head (on prHead or branch) contains the worktree's HEAD, as orch's overlap check decides.
+// Anything that cannot tell (gh failed or timed out, no worktree, a PR head git cannot read even after a fetch) is
+// unknown, and the worker is skipped this round.
+async function mergedState(w: any): Promise<'merged' | 'unmerged' | 'unknown'> {
+  if (!w.repoPath || !w.worktree || !existsSync(w.worktree)) return 'unknown';
+  const gh = await run('gh', ['pr', 'list', '--head', w.prHead ?? w.branch, '--state', 'merged', '--json', 'headRefOid', '-q', '.[].headRefOid'], w.repoPath);
+  if (gh?.code !== 0) return 'unknown';
+  let unknown = false;
+  for (const h of gh.out.trim().split('\n').filter(Boolean)) {
+    const has = async () => (await run('git', ['-C', w.worktree, 'cat-file', '-e', `${h}^{commit}`], w.worktree))?.code === 0;
+    if (!(await has()) && !((await run('git', ['-C', w.worktree, 'fetch', '-q', 'origin', h], w.worktree, 60_000))?.code === 0 && await has())) { unknown = true; continue; }
+    const r = await run('git', ['-C', w.worktree, 'merge-base', '--is-ancestor', 'HEAD', h], w.worktree);
+    if (r?.code === 0) return 'merged';
+    if (r?.code !== 1) unknown = true;
+  }
+  return unknown ? 'unknown' : 'unmerged';
+}
 let capacityBusy = false;
 async function checkCapacity() {
   if (capacityBusy) return;
@@ -341,12 +368,11 @@ async function checkCapacity() {
       // A worker that works again was prompted after its DONE; its next DONE restarts the clock. Asked before gh, so
       // a working worker never costs a gh call.
       if (w.pane && (await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS)).result?.agent?.agent_status === 'working') continue;
-      // Merged only when a merged PR's head contains the worker's current HEAD; a gh failure counts as not merged.
-      const m = w.repoPath ? mergedHeads(w.repoPath, w.prHead ?? w.branch) : { heads: [] };
-      const merged = 'heads' in m && existsSync(w.worktree ?? '') && isMerged(w.worktree, 'HEAD', m.heads);
+      const merged = await mergedState(w);
+      if (merged === 'unknown') continue;
       const cur = capacity();
       if (!cur.done[name] || !unshippedDue(cur, Date.now()).includes(name)) continue;
-      const u = merged ? mergedNotCleaned(cur, name, Date.now()) : unshipped(cur, name, Date.now());
+      const u = merged === 'merged' ? mergedNotCleaned(cur, name, Date.now()) : unshipped(cur, name, Date.now());
       saveCapacity(u.state);
       say(u.line);
     }

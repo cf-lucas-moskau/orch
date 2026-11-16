@@ -31,11 +31,12 @@ export function building(running: string[], ideas: Idea[], open: Set<string>): s
   return running.filter(n => !parked.has(n));
 }
 
-// The tasks of the newest plan section that has any: `## Tasks` in the plans/README.md layout (its `## Notes` has
-// none), the last milestone section in older plans. Older sections are history; their leftover open boxes do not count.
+// The current tasks: the newest `## Tasks` section (the plans/README.md layout), else the newest section that has
+// any (older plans with one section per milestone). Older sections are history; their leftover open boxes do not count.
 export function currentTasks(planMd: string) {
-  const sections = planMd.split(/\n(?=## )/).map(s => parsePlan(s).tasks).filter(t => t.length);
-  return sections.at(-1) ?? [];
+  const sections = planMd.split(/\n(?=## )/);
+  const pick = sections.findLast(s => /^\s*## Tasks\s*$/m.test(s.split('\n', 2).find(Boolean) ?? '')) ?? sections.findLast(s => parsePlan(s).tasks.length);
+  return pick ? parsePlan(pick).tasks : [];
 }
 
 // Work a lead could start now: ideas with a go and a plan, and open current tasks no running worker holds.
