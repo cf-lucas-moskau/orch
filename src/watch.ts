@@ -1,6 +1,6 @@
 // Tails today's feed and prints one line per event that might need the user. Run under Monitor.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,14 +8,15 @@ import type { FeedEvent } from './board.ts';
 import { classify, feedLine, screenTail, workerFor, workerIn } from './triage.ts';
 import { due, finishKey, step as stepFinish, type Finishes } from './finish.ts';
 import { follow as followWorker, herdrFollowed, type Followed, type HerdrReply } from './herdr-watch.ts';
-import { loadConfig, loadIdeas } from './ideas-io.ts';
+import { loadConfig, loadIdeas, openDecisions } from './ideas-io.ts';
+import { isMerged, mergedHeads } from './merged.ts';
 import { bridgeShouldStart, pendingLines } from './ideas.ts';
 import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type LeadPane } from './lead.ts';
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 import { parseDiskFloor } from './dispatch.ts';
 import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
-import { buildLimit, EMPTY, idleLine, noteDone, prune as pruneDone, shipped, unshipped, unshippedDue, waitingWork, type CapacityState } from './capacity.ts';
+import { buildLimit, building, EMPTY, idleDue, idleLine, mergedNotCleaned, noteDone, prune as pruneDone, unshipped, unshippedDue, waitingWork, type CapacityState } from './capacity.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
 const self = process.env.ORCH_SID ?? '';
@@ -309,18 +310,11 @@ function startOrchSide() {
 // IDLE and UNSHIPPED lines (src/capacity.ts), checked every minute. capacity.json keeps when each was last said and
 // when each worker last said DONE, so a re-arm neither repeats nor forgets them.
 const capacity = (): CapacityState => ({ ...EMPTY, ...json('capacity.json', {}) });
-const saveCapacity = (s: CapacityState) => writeFileSync(join(root, 'capacity.json'), JSON.stringify(s, null, 2) + '\n');
-// Whether the worker's branch has a merged PR: true, false, or undefined when gh gave no answer.
-function prMerged(w: { repoPath?: string; branch?: string }): Promise<boolean | undefined> {
-  if (!w.repoPath || !w.branch) return Promise.resolve(undefined);
-  return new Promise(resolve => {
-    const c = spawn('gh', ['pr', 'list', '--head', w.branch!, '--state', 'merged', '--json', 'number', '--limit', '1'], { cwd: w.repoPath, timeout: 30_000, killSignal: 'SIGKILL' });
-    let out = '';
-    c.stdout.on('data', d => { out += d; });
-    c.on('error', () => resolve(undefined));
-    c.on('close', code => { try { resolve(code === 0 ? JSON.parse(out).length > 0 : undefined); } catch { resolve(undefined); } });
-  });
-}
+const saveCapacity = (s: CapacityState) => {
+  const f = join(root, 'capacity.json'), tmp = `${f}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n');
+  renameSync(tmp, f);
+};
 let capacityBusy = false;
 async function checkCapacity() {
   if (capacityBusy) return;
@@ -331,23 +325,28 @@ async function checkCapacity() {
     let s = pruneDone(capacity(), new Set(running.map((w: any) => w.name)));
     const free = freeGb(), floor = parseDiskFloor(text('local.md') + text('policies.md'));
     for (const lead of Object.values(LEADS)) {
+      // Ideas are read only when an IDLE line could be said: at most once a minute, never within 30 minutes of the last.
+      if (!idleDue(s, lead.name, now)) continue;
       let config, ideas: ReturnType<typeof loadIdeas> = [];
       try { config = loadConfig(root); if (config.repo === lead.repo) ideas = loadIdeas(root); } catch { continue; }
       const mine = running.filter((w: any) => w.repo === lead.repo).map((w: any) => w.name);
-      const r = idleLine(s, lead.name, mine.length, buildLimit(json('ideas/config.json', {}).building, free, floor), waitingWork(ideas, text(`plans/${lead.repo}.md`), mine), now);
+      const busy = building(mine, ideas, openDecisions(ideas, root));
+      const r = idleLine(s, lead.name, busy.length, buildLimit(config.building, free, floor), waitingWork(ideas, text(`plans/${lead.repo}.md`), mine), now);
       s = r.state;
       if (r.line) { saveCapacity(s); say(r.line); }
     }
     saveCapacity(s);
     for (const name of unshippedDue(s, now)) {
       const w = running.find((x: any) => x.name === name);
-      const merged = await prMerged(w);
-      if (merged) { saveCapacity(shipped(capacity(), name)); continue; }
-      // A worker that works again was prompted after its DONE; its next DONE restarts the clock.
+      // A worker that works again was prompted after its DONE; its next DONE restarts the clock. Asked before gh, so
+      // a working worker never costs a gh call.
       if (w.pane && (await herdrCall(new Set(), ['agent', 'get', w.pane], HERDR_GET_MS)).result?.agent?.agent_status === 'working') continue;
+      // Merged only when a merged PR's head contains the worker's current HEAD; a gh failure counts as not merged.
+      const m = w.repoPath ? mergedHeads(w.repoPath, w.prHead ?? w.branch) : { heads: [] };
+      const merged = 'heads' in m && existsSync(w.worktree ?? '') && isMerged(w.worktree, 'HEAD', m.heads);
       const cur = capacity();
       if (!cur.done[name] || !unshippedDue(cur, Date.now()).includes(name)) continue;
-      const u = unshipped(cur, name, Date.now());
+      const u = merged ? mergedNotCleaned(cur, name, Date.now()) : unshipped(cur, name, Date.now());
       saveCapacity(u.state);
       say(u.line);
     }
