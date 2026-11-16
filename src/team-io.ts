@@ -91,6 +91,9 @@ export async function team(args: string[], d: Deps): Promise<string> {
   }
   if (sub === 'say') {
     const mi = rest.indexOf('--media');
+    // A flag it doesn't know (`--help`, a typo) must never be posted as the message.
+    const unknown = rest.find((a, n) => a.startsWith('--') && n !== mi);
+    if (unknown) fail(`team say: unknown flag ${unknown}; ${TEAM_USAGE}`);
     const files = mi < 0 ? [] : [media(d.root, rest[mi + 1] ?? '')];
     const text = outward(textOf(d.root, rest.filter((_, n) => mi < 0 || (n !== mi && n !== mi + 1))));
     const { posted } = await say(d, chat, 'team', text, files);

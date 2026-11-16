@@ -8,7 +8,7 @@ import type { FeedEvent } from './board.ts';
 import { buildBrief, decisionSkeleton, nextDecisionNumber, parseDecision, parseLearned } from './brief.ts';
 import { LEADS, leadAgent, leadPrompt, leadUp, ownerOf, parsePane, type LeadRecord } from './lead.ts';
 import { read as readInbox, readBeat } from './lead-inbox.ts';
-import { herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, potetoMissing, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
+import { SECRET_PATHS, secretMentions, secretTouches, herdrCaps, readyStep, submitStep, type HerdrCaps, type HerdrReply, potetoLine, potetoMissing, prTitle, promptVerdict, type PromptSample, newOverlaps, overlapLine, overlaps, type OverlapSeen, type Touch,
   canDispatch, canSteer, cleanupBlocker, cleanupFlags, keepTarget, unsavedIgnored, parseDiskFloor, renderConsumers, scratchDir, workerComposeProjects, inputDraft, findLive, isTrustDialog, pairNames, parseAutonomy, parseCap, parseProjects, pickWinner, resolveProject,
   restoreList, resumeCommand, trustKeys, workerBrief, workerPrompt, type Autonomous, type Candidate, type Disk, type Kind, type Live, type Project, type Worker,
 } from './dispatch.ts';
@@ -338,6 +338,23 @@ function runGates(w: Worker, title?: string): { passed: boolean; report: string 
   const lines: string[] = [];
   let failed = 0;
   if (!p.gates.length) lines.push(`no gates registered for ${w.repo}; the worker's own report is all there is`);
+  // D-56: a worker that touched a secret path fails, whatever its tests say.
+  const secret = SECRET_PATHS[w.repo] ?? [];
+  if (secret.length) {
+    const tx = readdirSync(join(homedir(), '.claude', 'projects')).map(d => join(homedir(), '.claude', 'projects', d, `${w.sid}.jsonl`)).find(f => w.sid && existsSync(f));
+    const txText = tx ? readFileSync(tx, 'utf8') : '';
+    const mentions = secretMentions(txText, secret);
+    if (mentions.length) lines.push(`WARN worker wrote code naming ${secret.join(', ')}: orch reads each before shipping (a guard is fine, a loader is a D-56 touch)`, ...mentions.slice(0, 5));
+    const found = [...secretTouches(txText, secret),
+      ...git(w.worktree, 'diff', '--name-only', 'HEAD').split('\n').concat(git(w.worktree, 'ls-files', '--others', '--exclude-standard').split('\n')).filter(f => secret.some(s => f.startsWith(s)))];
+    // Hits orch already read and accepted (accept-touches) stay in the transcript; they warn instead of failing again.
+    const accepted = new Set((JSON.parse(read('accepted-touches.json', '{}')) as Record<string, string[]>)[w.name] ?? []);
+    const touches = found.filter(t => !accepted.has(t));
+    if (found.length > touches.length) lines.push(`WARN ${found.length - touches.length} ${secret.join(', ')} hit(s) accepted earlier by orch (accepted-touches.json)`);
+    if (!tx) lines.push(`WARN no transcript found for ${w.name} (${w.sid}); secret-path check covered the diff only`);
+    if (touches.length) { failed++; lines.push(`FAIL worker touched ${secret.join(', ')} (D-56): tell Lucas, rotate the Admin 2 session if a value could have leaked`, ...touches.slice(0, 5)); }
+    else lines.push(`PASS no touch of ${secret.join(', ')}`);
+  }
   for (const g of p.gates) {
     const r = spawnSync('/bin/bash', ['-lc', g], { cwd: w.worktree, encoding: 'utf8', timeout: 15 * 60_000 });
     const ok = r.status === 0;
@@ -359,6 +376,20 @@ function gates([name, flag, title]: string[]) {
   const r = runGates(worker(name), flag === '-m' ? title : undefined);
   console.log(r.report);
   process.exit(r.passed ? 0 : 1);
+}
+
+// accept-touches <worker> "<why>": orch read every current D-56 hit of this worker and found no access; later gates skip exactly these.
+function acceptTouches([name, why]: string[]) {
+  if (!why) throw new Error('accept-touches <worker> "<why: what orch read and why it is no access>"');
+  const w = worker(name);
+  const secret = SECRET_PATHS[w.repo] ?? [];
+  const tx = readdirSync(join(homedir(), '.claude', 'projects')).map(d => join(homedir(), '.claude', 'projects', d, `${w.sid}.jsonl`)).find(f => w.sid && existsSync(f));
+  const hits = secretTouches(tx ? readFileSync(tx, 'utf8') : '', secret);
+  const all = JSON.parse(read('accepted-touches.json', '{}')) as Record<string, string[]>;
+  all[w.name] = [...new Set([...(all[w.name] ?? []), ...hits])];
+  writeFileSync(join(root, 'accepted-touches.json'), JSON.stringify(all, null, 2) + '\n');
+  log(`accept-touches ${w.name}: ${hits.length} D-56 hit(s) accepted: ${why}`);
+  console.log(`${hits.length} hit(s) accepted for ${w.name}:\n${hits.join('\n')}`);
 }
 
 // cleanup <name> [--abandon] [--keep <path>]...: --keep copies a gitignored path to saved/<name>-<stamp>/ before the worktree goes.
@@ -1033,5 +1064,5 @@ async function team(args: string[]) { try { console.log(await teamCmd(args, { ro
 async function impl(args: string[]) { try { console.log(await implCmd(args, { root, log, run: () => die('impl never dispatches') })); } catch (e: any) { die(e.message); } }
 
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, 'accept-touches': acceptTouches, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

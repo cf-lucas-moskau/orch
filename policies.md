@@ -28,6 +28,8 @@ Concurrency cap: 4 workers. Everything runs on one machine; raise it in `local.m
 
 Disk floor: 20 GB. `orch run` starts no worker while the data volume has less free; `scripts/disk-hygiene.sh --dry-run` shows what can go. Set it in `local.md`.
 
+Below the disk floor, orch may clear caches that rebuild themselves without asking: Go build cache, npm cache, Docker build cache, ShipIt and Playwright browser caches. It logs what it freed and lists it in the next brief. Never touch ~/Movies/gopro, ~/Downloads, Docker volumes, any repo data/ folder or anything that doesn't rebuild. Those stay needs the user, one named item at a time.
+
 Each worker runs in its own herdr worktree on branch `orch/<name>`, leaves its changes for orch to commit once the gates pass, and never pushes, merges, opens PRs, deploys or touches databases; those come back as decisions.
 
 Every brief tells the worker to make in-scope implementation and investigation calls itself and report them; it stops only for outward-facing or irreversible actions or a scope change. A worker question that carries a clear recommendation and stays in scope is steered back with "go with your recommendation" only after the user has approved that once for the worker; until then it is needs the user.
