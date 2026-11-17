@@ -42,12 +42,13 @@ BEFORE=$(free_kb)
 
 # Every process's cwd and command line, so nothing in use gets deleted.
 IN_USE="$( (lsof -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; ps -axww -o command= 2>/dev/null) )"
+re_escape() { sed 's/[][\.*^$+?(){}|]/\\&/g' <<<"$1"; }
 # A path counts as in use when a cwd or argument is it or lies under it, not when it merely shares a prefix.
 # lsof reports resolved paths (/private/var for /var), so both spellings are checked.
 in_use() {
   local p
   for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
-    [ -n "$p" ] && grep -qE -- "(^|[[:space:]=:'\"])$(sed 's/[][\.*^$+?(){}|]/\\&/g' <<<"$p")(/|[[:space:]'\"]|$)" <<<"$IN_USE" && return 0
+    [ -n "$p" ] && grep -qE -- "(^|[[:space:]=:'\"])$(re_escape "$p")(/|[[:space:]'\"]|$)" <<<"$IN_USE" && return 0
   done
   return 1
 }
@@ -167,7 +168,26 @@ if [ -d "$CLAUDE_TMP" ]; then
 fi
 step "claude scratch" "$VERB $(gb "$tmp_kb") ($tmp_n folders idle 3+ days)"
 
-# 7. Electron updater leftovers; apps download them again when they update.
+# 7. Evrloot test temp folders in the per-user TMPDIR idle 6+ hours: a killed test run never reaches its cleanup
+# (220k of them by November 2026). Only mkdtemp names (prefix + 6 characters, or a scratch sweep's .gone-<pid>) of
+# prefixes evrloot-next's tests and tools use; fixed-name caches like evr-guard-cache never match.
+USER_TMP="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}"; USER_TMP="${USER_TMP%/}"
+TEST_TMP_RE='^(evr-[a-z0-9-]+-|anim-item-[a-z]+-|anim-qa-|april-combat-|baked-|barrel-card-|critic-test-|gate-contract-|gate-git-|greybox-|greybox-inside-|guard-cache-db-|guard-cache-test-|inpaint-|ledger-|perf-guard-|pieces-|plan-|repaint-list-|scratch-test-|snap-)[A-Za-z0-9]{6}(\.gone-[0-9]+)?$'
+tt=(); tt_kb=0
+if [ -n "$USER_TMP" ] && [ -d "$USER_TMP" ] && [ "$(cd "$USER_TMP" && pwd -P)" != / ]; then
+  tt_real="$(cd "$USER_TMP" && pwd -P)"
+  # Top-level names under USER_TMP that any process has open, as cwd, as an open file or in its arguments.
+  tt_busy="$( (lsof -Fn 2>/dev/null | sed -n 's/^n//p'; printf '%s\n' "$IN_USE") |
+    grep -oE -- "($(re_escape "$USER_TMP")|$(re_escape "$tt_real"))/[^/[:space:]'\"]+" | sed 's#.*/##' | sort -u)"
+  while IFS= read -r name; do tt+=("$name"); done < <(find "$USER_TMP/" -mindepth 1 -maxdepth 1 -type d -mmin +360 2>/dev/null |
+    sed 's#.*/##' | grep -E -- "$TEST_TMP_RE" | grep -vxF -f <(printf '%s\n' "$tt_busy"))
+  # One du per batch, not per folder: there can be hundreds of thousands.
+  [ "${#tt[@]}" -gt 0 ] && tt_kb=$(cd "${USER_TMP:?}" && printf '%s\0' "${tt[@]}" | xargs -0 du -sk 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+  for name in "${tt[@]+"${tt[@]}"}"; do run rm -rf -- "${USER_TMP:?}/${name:?}"; done
+fi
+step "test temp folders" "$VERB $(gb "$tt_kb") (${#tt[@]} evrloot test folders idle 6+ hours)"
+
+# 8. Electron updater leftovers; apps download them again when they update.
 ship=("$HOME"/Library/Caches/*ShipIt)
 ship_kb=0; ship_n=0
 for d in "${ship[@]}"; do

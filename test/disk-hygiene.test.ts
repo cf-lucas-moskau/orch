@@ -46,7 +46,7 @@ esac
 
 function world() {
   const base = mkdtempSync(join(tmpdir(), 'disk-hygiene-'));
-  const root = join(base, 'orch'), home = join(base, 'home'), tmp = join(base, 'claude-tmp'), bin = join(base, 'bin');
+  const root = join(base, 'orch'), home = join(base, 'home'), tmp = join(base, 'claude-tmp'), bin = join(base, 'bin'), userTmp = join(base, 'user-tmp');
   mkdirSync(join(root, 'scripts'), { recursive: true });
   copyFileSync(script, join(root, 'scripts', 'disk-hygiene.sh'));
   mkdirSync(bin);
@@ -65,7 +65,20 @@ function world() {
     workerScratch: join(tmp, enc(wt), 'out.txt'),
     shipIt: join(home, 'Library', 'Caches', 'com.example.ShipIt', 'update.zip'),
     movies: join(home, 'Movies', 'old.mov'),
+    oldMongo: join(userTmp, 'evr-mongo-a1B2c3', 'db.wt'),
+    oldAnimItem: join(userTmp, 'anim-item-ranger-Zz9yX8', 'frame.png'),
+    oldAnimQa: join(userTmp, 'anim-qa-q1w2e3', 'frame.png'),
+    oldGone: join(userTmp, 'evr-guard-k9k9k9.gone-4242', 'db'),
+    busyTmp: join(userTmp, 'evr-shell-busy01', 'out.txt'),
+    youngTmp: join(userTmp, 'evr-snap-young1', 'snap.json'),
+    guardCache: join(userTmp, 'evr-guard-cache', 'genesis'),
+    otherTool: join(userTmp, 'com.example-abc123', 'x'),
+    looseFile: join(userTmp, 'evr-ipfs-file01'),
   };
+  for (const k of ['oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone', 'busyTmp', 'guardCache', 'otherTool'] as const) { file(paths[k], 1); old(join(paths[k], '..'), 1); }
+  file(paths.youngTmp, 0);
+  old(join(paths.youngTmp, '..'), 1 / 24);
+  file(paths.looseFile, 1);
   file(paths.staleNm, 200, 200_000);
   file(join(home, 'code', 'stale', 'package.json'), 200);
   old(join(home, 'code', 'stale'), 200);
@@ -79,7 +92,7 @@ function world() {
   file(paths.shipIt, 30);
   file(paths.movies, 400);
   const run = (mode: string) => spawnSync('bash', [join(root, 'scripts', 'disk-hygiene.sh'), mode], {
-    encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, DISK_HYGIENE_TMP: tmp },
+    encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, DISK_HYGIENE_TMP: tmp, TMPDIR: `${userTmp}/` },
   });
   const dockerUp = () => writeFileSync(join(bin, 'docker'), DOCKER_UP, { mode: 0o755 });
   const calls = () => existsSync(join(bin, 'calls')) ? readFileSync(join(bin, 'calls'), 'utf8') : '';
@@ -97,6 +110,7 @@ test('dry run deletes nothing and reports what it would free', { skip: process.p
     assert.match(r.stdout, /anonymous volumes\s+skipped, Docker is not running/);
     assert.match(r.stdout, /stale node_modules\s+would free 0\.0 GB \(2 projects untouched 90\+ days: busy stale\)/);
     assert.match(r.stdout, /claude scratch\s+would free 0\.0 GB \(1 folders idle 3\+ days\)/);
+    assert.match(r.stdout, /test temp folders\s+would free 0\.0 GB \(5 evrloot test folders idle 6\+ hours\)/);
     assert.match(r.stdout, /ShipIt caches\s+would free 0\.0 GB \(1 folders\)/);
     assert.ok(!existsSync(join(w.root, 'log.md')), 'dry run does not log');
   } finally { rmSync(w.base, { recursive: true, force: true }); }
@@ -105,13 +119,14 @@ test('dry run deletes nothing and reports what it would free', { skip: process.p
 test('apply deletes only stale, unowned things and logs the summary', { skip: process.platform !== 'darwin' }, () => {
   const w = world();
   try {
-    const busy = spawn('sleep', ['30'], { cwd: join(w.paths.busyNm, '..', '..') });
+    const busy = [spawn('sleep', ['30'], { cwd: join(w.paths.busyNm, '..', '..') }), spawn('sleep', ['30'], { cwd: join(w.paths.busyTmp, '..') })];
     let r;
-    try { r = w.run('--apply'); } finally { busy.kill(); }
+    try { r = w.run('--apply'); } finally { for (const b of busy) b.kill(); }
     assert.equal(r.status, 0, r.stderr);
-    const gone = ['staleNm', 'oldScratch', 'shipIt'] as const;
-    for (const k of gone) assert.ok(!existsSync(w.paths[k]), `deleted ${k}`);
-    for (const k of ['freshNm', 'busyNm', 'newScratch', 'orchScratch', 'workerScratch', 'movies'] as const) assert.ok(existsSync(w.paths[k]), `kept ${k}`);
+    const gone = ['staleNm', 'oldScratch', 'shipIt', 'oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone'] as const;
+    for (const k of gone) assert.ok(!existsSync(join(w.paths[k], '..')), `deleted ${k}`);
+    for (const k of ['freshNm', 'busyNm', 'newScratch', 'orchScratch', 'workerScratch', 'movies', 'busyTmp', 'youngTmp', 'guardCache', 'otherTool', 'looseFile'] as const) assert.ok(existsSync(w.paths[k]), `kept ${k}`);
+    assert.match(r.stdout, /test temp folders\s+freed 0\.0 GB \(4 evrloot test folders idle 6\+ hours\)/);
     assert.ok(existsSync(join(w.paths.staleNm, '..', '..', 'package.json')), 'the project itself stays');
     const log = readFileSync(join(w.root, 'log.md'), 'utf8');
     assert.match(log, /^- \d{4}-\d\d-\d\d \d\d:\d\d disk-hygiene: free .* before, .* after\n {2}- docker build cache {5}skipped/m);
