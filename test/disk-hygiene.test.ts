@@ -73,9 +73,11 @@ function world() {
     youngTmp: join(userTmp, 'evr-snap-young1', 'snap.json'),
     guardCache: join(userTmp, 'evr-guard-cache', 'genesis'),
     otherTool: join(userTmp, 'com.example-abc123', 'x'),
+    genericSnap: join(userTmp, 'snap-abc123', 'x'),
+    genericLedger: join(userTmp, 'ledger-abc123', 'x'),
     looseFile: join(userTmp, 'evr-ipfs-file01'),
   };
-  for (const k of ['oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone', 'busyTmp', 'guardCache', 'otherTool'] as const) { file(paths[k], 1); old(join(paths[k], '..'), 1); }
+  for (const k of ['oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone', 'busyTmp', 'guardCache', 'otherTool', 'genericSnap', 'genericLedger'] as const) { file(paths[k], 1); old(join(paths[k], '..'), 1); }
   file(paths.youngTmp, 0);
   old(join(paths.youngTmp, '..'), 1 / 24);
   file(paths.looseFile, 1);
@@ -91,12 +93,13 @@ function world() {
   file(paths.newScratch, 0);
   file(paths.shipIt, 30);
   file(paths.movies, 400);
-  const run = (mode: string) => spawnSync('bash', [join(root, 'scripts', 'disk-hygiene.sh'), mode], {
-    encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, DISK_HYGIENE_TMP: tmp, TMPDIR: `${userTmp}/` },
+  const run = (mode: string, env: Record<string, string> = {}) => spawnSync('bash', [join(root, 'scripts', 'disk-hygiene.sh'), mode], {
+    encoding: 'utf8', env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, DISK_HYGIENE_TMP: tmp, TMPDIR: `${userTmp}/`, ...env },
   });
   const dockerUp = () => writeFileSync(join(bin, 'docker'), DOCKER_UP, { mode: 0o755 });
   const calls = () => existsSync(join(bin, 'calls')) ? readFileSync(join(bin, 'calls'), 'utf8') : '';
-  return { base, root, paths, run, dockerUp, calls };
+  const lsof = (body: string) => writeFileSync(join(bin, 'lsof'), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return { base, root, paths, run, dockerUp, calls, lsof };
 }
 
 test('dry run deletes nothing and reports what it would free', { skip: process.platform !== 'darwin' }, () => {
@@ -110,7 +113,7 @@ test('dry run deletes nothing and reports what it would free', { skip: process.p
     assert.match(r.stdout, /anonymous volumes\s+skipped, Docker is not running/);
     assert.match(r.stdout, /stale node_modules\s+would free 0\.0 GB \(2 projects untouched 90\+ days: busy stale\)/);
     assert.match(r.stdout, /claude scratch\s+would free 0\.0 GB \(1 folders idle 3\+ days\)/);
-    assert.match(r.stdout, /test temp folders\s+would free 0\.0 GB \(5 evrloot test folders idle 6\+ hours\)/);
+    assert.match(r.stdout, /test temp folders\s+would free 0\.0 GB \(5 evrloot test folders idle 6\+ hours, 0 busy\/unknown kept\)/);
     assert.match(r.stdout, /ShipIt caches\s+would free 0\.0 GB \(1 folders\)/);
     assert.ok(!existsSync(join(w.root, 'log.md')), 'dry run does not log');
   } finally { rmSync(w.base, { recursive: true, force: true }); }
@@ -125,14 +128,44 @@ test('apply deletes only stale, unowned things and logs the summary', { skip: pr
     assert.equal(r.status, 0, r.stderr);
     const gone = ['staleNm', 'oldScratch', 'shipIt', 'oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone'] as const;
     for (const k of gone) assert.ok(!existsSync(join(w.paths[k], '..')), `deleted ${k}`);
-    for (const k of ['freshNm', 'busyNm', 'newScratch', 'orchScratch', 'workerScratch', 'movies', 'busyTmp', 'youngTmp', 'guardCache', 'otherTool', 'looseFile'] as const) assert.ok(existsSync(w.paths[k]), `kept ${k}`);
-    assert.match(r.stdout, /test temp folders\s+freed 0\.0 GB \(4 evrloot test folders idle 6\+ hours\)/);
+    for (const k of ['freshNm', 'busyNm', 'newScratch', 'orchScratch', 'workerScratch', 'movies', 'busyTmp', 'youngTmp', 'guardCache', 'otherTool', 'genericSnap', 'genericLedger', 'looseFile'] as const) assert.ok(existsSync(w.paths[k]), `kept ${k}`);
+    assert.match(r.stdout, /test temp folders\s+freed 0\.0 GB \(4 evrloot test folders idle 6\+ hours, 1 busy\/unknown kept\)/);
     assert.ok(existsSync(join(w.paths.staleNm, '..', '..', 'package.json')), 'the project itself stays');
     const log = readFileSync(join(w.root, 'log.md'), 'utf8');
     assert.match(log, /^- \d{4}-\d\d-\d\d \d\d:\d\d disk-hygiene: free .* before, .* after\n {2}- docker build cache {5}skipped/m);
     assert.match(log, / {2}- stale node_modules {5}freed 0\.0 GB \(1 projects untouched 90\+ days: stale\)/);
   } finally { rmSync(w.base, { recursive: true, force: true }); }
 });
+
+// lsof erroring, denied (exit 0, lists nothing) and hanging past the timeout (SIGALRM, exit 142).
+const LSOF_FAILURES = [
+  { body: 'echo "lsof: permission denied" >&2; exit 1', env: {}, exit: 1 },
+  { body: 'exit 0', env: {}, exit: 0 },
+  { body: 'sleep 5; echo n/x', env: { DISK_HYGIENE_LSOF_TIMEOUT: '1' }, exit: 142 },
+];
+const LSOF_CHECKS = [
+  { check: 'stale node_modules', kept: ['staleNm'], line: /stale node_modules\s+freed 0\.0 GB \(0 projects untouched 90\+ days\)/ },
+  { check: 'claude scratch', kept: ['oldScratch'], line: /claude scratch\s+freed 0\.0 GB \(0 folders idle 3\+ days\)/ },
+  { check: 'ShipIt caches', kept: ['shipIt'], line: /ShipIt caches\s+freed 0\.0 GB \(0 folders\)/ },
+  { check: 'test temp folders', kept: ['oldMongo', 'oldAnimItem', 'oldAnimQa', 'oldGone', 'busyTmp'],
+    line: /test temp folders\s+freed 0\.0 GB \(0 evrloot test folders idle 6\+ hours, 5 busy\/unknown kept\)/ },
+] as const;
+
+for (const c of LSOF_CHECKS) {
+  test(`apply keeps ${c.check} when lsof fails, is denied or times out`, { skip: process.platform !== 'darwin' }, () => {
+    const w = world();
+    try {
+      for (const f of LSOF_FAILURES) {
+        w.lsof(f.body);
+        const r = w.run('--apply', f.env);
+        assert.equal(r.status, 0, r.stderr);
+        for (const k of c.kept) assert.ok(existsSync(w.paths[k]), `kept ${k} with lsof: ${f.body}`);
+        assert.match(r.stdout, c.line);
+        assert.match(r.stdout, new RegExp(`WARNING: busy check failed \\(lsof exit ${f.exit}\\); kept everything that could be in use`));
+      }
+    } finally { rmSync(w.base, { recursive: true, force: true }); }
+  });
+}
 
 test('with Docker up, dry run only reads and names what each Docker step would free', { skip: process.platform !== 'darwin' }, () => {
   const w = world();

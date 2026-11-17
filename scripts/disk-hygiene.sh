@@ -40,13 +40,20 @@ VERB=$([ "$APPLY" = 1 ] && echo freed || echo "would free")
 
 BEFORE=$(free_kb)
 
-# Every process's cwd and command line, so nothing in use gets deleted.
-IN_USE="$( (lsof -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; ps -axww -o command= 2>/dev/null) )"
+# Every process's cwd, open files and command line, so nothing in use gets deleted. Fails closed: when lsof errors,
+# is denied (lists nothing, not even itself) or times out, every path counts as in use.
+LSOF_OUT="$(with_timeout "${DISK_HYGIENE_LSOF_TIMEOUT:-120}" lsof -Fn 2>/dev/null)"; LSOF_RC=$?
+LSOF_OK=1
+if [ "$LSOF_RC" -ne 0 ] || [ -z "$LSOF_OUT" ]; then
+  LSOF_OK=0; SUMMARY+=("WARNING: busy check failed (lsof exit $LSOF_RC); kept everything that could be in use")
+fi
+IN_USE="$( (sed -n 's/^n//p' <<<"$LSOF_OUT"; ps -axww -o command= 2>/dev/null) )"
 re_escape() { sed 's/[][\.*^$+?(){}|]/\\&/g' <<<"$1"; }
-# A path counts as in use when a cwd or argument is it or lies under it, not when it merely shares a prefix.
+# A path counts as in use when a cwd, open file or argument is it or lies under it, not when it merely shares a prefix.
 # lsof reports resolved paths (/private/var for /var), so both spellings are checked.
 in_use() {
   local p
+  [ "$LSOF_OK" = 1 ] || return 0
   for p in "$1" "$(cd "$1" 2>/dev/null && pwd -P)"; do
     [ -n "$p" ] && grep -qE -- "(^|[[:space:]=:'\"])$(re_escape "$p")(/|[[:space:]'\"]|$)" <<<"$IN_USE" && return 0
   done
@@ -170,22 +177,34 @@ step "claude scratch" "$VERB $(gb "$tmp_kb") ($tmp_n folders idle 3+ days)"
 
 # 7. Evrloot test temp folders in the per-user TMPDIR idle 6+ hours: a killed test run never reaches its cleanup
 # (220k of them by November 2026). Only mkdtemp names (prefix + 6 characters, or a scratch sweep's .gone-<pid>) of
-# prefixes evrloot-next's tests and tools use; fixed-name caches like evr-guard-cache never match.
+# the exact prefixes evrloot-next's tests and tools pass to mkdtemp or scratch(); generic ones another tool could use
+# (snap-, ledger-, plan-, greybox-, ...) are left out, and fixed-name caches like evr-guard-cache never match.
 USER_TMP="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}"; USER_TMP="${USER_TMP%/}"
-TEST_TMP_RE='^(evr-[a-z0-9-]+-|anim-item-[a-z]+-|anim-qa-|april-combat-|baked-|barrel-card-|critic-test-|gate-contract-|gate-git-|greybox-|greybox-inside-|guard-cache-db-|guard-cache-test-|inpaint-|ledger-|perf-guard-|pieces-|plan-|repaint-list-|scratch-test-|snap-)[A-Za-z0-9]{6}(\.gone-[0-9]+)?$'
-tt=(); tt_kb=0
+TEST_TMP_PREFIXES='evr-admin-|evr-admin-cli-|evr-admin-file-|evr-admin-source-|evr-anomalies-|evr-anomalies-big-|evr-anomalies-session-|evr-art-|evr-art-cache-|evr-backup-nodocker-|evr-backup-test-|evr-bundle-|evr-catch-rate-|evr-cli-|evr-critic-|evr-d14-|evr-doctor-|evr-e2e-|evr-guard-|evr-houses-|evr-ipfs-|evr-main-depth-|evr-mongo-|evr-none-|evr-perf-gate-dist-|evr-perf-gate-main-|evr-perf-nightly-|evr-perf-pr-|evr-public-|evr-reconcile-|evr-returns-|evr-sec-|evr-security-|evr-shell-|evr-snap-|evr-thumbs-|evr-world-|anim-cut-cache-|anim-item-[a-z0-9]+-|anim-qa-|april-combat-|barrel-card-|greybox-inside-|guard-cache-db-|guard-cache-test-|repaint-list-'
+TEST_TMP_RE="^(${TEST_TMP_PREFIXES})[A-Za-z0-9]{6}(\\.gone-[0-9]+)?\$"
+tt=(); tt_kb=0; tt_unknown=0
 if [ -n "$USER_TMP" ] && [ -d "$USER_TMP" ] && [ "$(cd "$USER_TMP" && pwd -P)" != / ]; then
   tt_real="$(cd "$USER_TMP" && pwd -P)"
-  # Top-level names under USER_TMP that any process has open, as cwd, as an open file or in its arguments.
-  tt_busy="$( (lsof -Fn 2>/dev/null | sed -n 's/^n//p'; printf '%s\n' "$IN_USE") |
-    grep -oE -- "($(re_escape "$USER_TMP")|$(re_escape "$tt_real"))/[^/[:space:]'\"]+" | sed 's#.*/##' | sort -u)"
-  while IFS= read -r name; do tt+=("$name"); done < <(find "$USER_TMP/" -mindepth 1 -maxdepth 1 -type d -mmin +360 2>/dev/null |
-    sed 's#.*/##' | grep -E -- "$TEST_TMP_RE" | grep -vxF -f <(printf '%s\n' "$tt_busy"))
-  # One du per batch, not per folder: there can be hundreds of thousands.
-  [ "${#tt[@]}" -gt 0 ] && tt_kb=$(cd "${USER_TMP:?}" && printf '%s\0' "${tt[@]}" | xargs -0 du -sk 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
-  for name in "${tt[@]+"${tt[@]}"}"; do run rm -rf -- "${USER_TMP:?}/${name:?}"; done
+  cand=()
+  while IFS= read -r name; do cand+=("$name"); done < <(find "$USER_TMP/" -mindepth 1 -maxdepth 1 -type d -mmin +360 2>/dev/null |
+    sed 's#.*/##' | grep -E -- "$TEST_TMP_RE")
+  if [ "$LSOF_OK" != 1 ]; then
+    tt_unknown=${#cand[@]}
+  else
+    # Top-level names under USER_TMP that any process has open, as cwd, as an open file or in its arguments.
+    # One pass over IN_USE instead of in_use per folder: there can be hundreds of thousands.
+    tt_busy="$(grep -oE -- "($(re_escape "$USER_TMP")|$(re_escape "$tt_real"))/[^/[:space:]'\"]+" <<<"$IN_USE" | sed 's#.*/##' | sort -u)"
+    [ "${#cand[@]}" -gt 0 ] && while IFS= read -r name; do tt+=("${USER_TMP:?}/${name:?}"); done < <(printf '%s\n' "${cand[@]}" |
+      grep -vxF -f <(printf '%s\n' "$tt_busy"))
+    tt_unknown=$((${#cand[@]} - ${#tt[@]}))
+  fi
+  # One du and one rm per xargs batch, not per folder: there can be hundreds of thousands.
+  if [ "${#tt[@]}" -gt 0 ]; then
+    tt_kb=$(printf '%s\0' "${tt[@]}" | xargs -0 du -sk 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+    [ "$APPLY" = 1 ] && printf '%s\0' "${tt[@]}" | xargs -0 rm -rf --
+  fi
 fi
-step "test temp folders" "$VERB $(gb "$tt_kb") (${#tt[@]} evrloot test folders idle 6+ hours)"
+step "test temp folders" "$VERB $(gb "$tt_kb") (${#tt[@]} evrloot test folders idle 6+ hours, $tt_unknown busy/unknown kept)"
 
 # 8. Electron updater leftovers; apps download them again when they update.
 ship=("$HOME"/Library/Caches/*ShipIt)
