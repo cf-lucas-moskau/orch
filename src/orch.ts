@@ -18,6 +18,7 @@ import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, run
 import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
 import { pendingLines } from './ideas.ts';
 import { parseDfFreeGb } from './disk.ts';
+import { failingTests } from './gate-output.ts';
 import { isMerged, mergedHeads } from './merged.ts';
 import { impl as implCmd, team as teamCmd } from './team-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
@@ -361,7 +362,12 @@ function runGates(w: Worker, title?: string): { passed: boolean; report: string 
     const ok = r.status === 0;
     if (!ok) failed++;
     lines.push(`${ok ? 'PASS' : 'FAIL'} ${g}`);
-    if (!ok) lines.push((r.stdout + r.stderr).trim().split('\n').slice(-15).join('\n'));
+    if (!ok) {
+      const output = (r.stdout ?? '') + (r.stderr ?? '');
+      const named = failingTests(output);
+      if (named.length) lines.push(`failing tests (${named.length}${named.length === 20 ? '+' : ''}):`, ...named.map(n => `  - ${n}`));
+      lines.push(output.trim().split('\n').slice(-15).join('\n'));
+    }
   }
   if (!failed && git(w.worktree, 'status', '--porcelain').trim()) {
     git(w.worktree, 'add', '-A');
