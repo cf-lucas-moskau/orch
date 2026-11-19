@@ -50,8 +50,10 @@ const gitTop = (path: string) => {
   const r = spawnSync('git', ['-C', path, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
   return r.status === 0 ? r.stdout.trim() : null;
 };
+// By registered path; an unregistered repo's name is only its folder's basename, so the name counts only for old
+// records without a path.
 const projectOf = (w: Worker): Project =>
-  projects().find(p => p.path === w.repoPath || p.repo === w.repo) ?? { repo: w.repo, path: w.repoPath ?? '', gates: [], notes: '' };
+  projects().find(p => w.repoPath ? p.path === w.repoPath : p.repo === w.repo) ?? { repo: w.repo, path: w.repoPath ?? '', gates: [], notes: '' };
 const project = (arg: string) => resolveProject(arg, projects(), gitTop) ?? die(`${arg} is not a registered repo, a git path, or a repo under ORCH_CODE_DIR (default ~/code)`);
 // local.md holds the user's own overrides, including the cap.
 const cap = () => parseCap(read('local.md') + read('policies.md'));
@@ -266,12 +268,19 @@ function defaultRef(path: string, fetch = true, warn = (m: string) => console.er
   return ahead ? local : remote;
 }
 
+// The worktree exists by now, so nothing here may stop startWorker before the worker's record is saved.
 function cloneInto(p: Project, wt: string): string[] {
   if (!p.clone?.length) return [];
-  const r = cloneFromMain(p.path, wt, p.clone);
-  for (const f of r.failed) console.error(`warning: cloning ${f} into ${wt} failed`);
-  log(`run: cloned ${r.done.join(', ') || 'nothing'} into ${wt}${r.skipped.length ? ` (skipped ${r.skipped.join(', ')}${r.why ? `; node_modules not cloned: ${r.why}` : ''})` : ''}`);
-  return r.done;
+  try {
+    const r = cloneFromMain(p.path, wt, p.clone);
+    for (const f of r.failed) console.error(`warning: cloning ${f} into ${wt} failed`);
+    const skipped = r.skipped.map(s => `${s.path}: ${s.why}`).join('; ');
+    log(`run: cloned ${r.done.join(', ') || 'nothing'} into ${wt}${skipped ? ` (skipped ${skipped})` : ''}${r.failed.length ? ` (failed ${r.failed.join(', ')})` : ''}`);
+    return r.done;
+  } catch (e: any) {
+    console.error(`warning: cloning into ${wt} failed: ${e.message}`);
+    return [];
+  }
 }
 
 function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string; parent?: string }, from?: string, stacked = false) {
@@ -427,10 +436,10 @@ function cleanup([name, ...args]: string[]) {
       // The parent's real path plus the leaf's own name: a kept symlink keeps its name and is copied as the file it points to.
       return keepTarget(top, join(realpathSync(dirname(p)), basename(p))) ?? die(`not cleaned: --keep ${k} is not a path inside ${w.worktree}`);
     });
-    // Clone and scratch paths (test captures, projects.md) go with the worktree: saved/ grew to 8 GB of them by 2026-11-19.
-    const p = projectOf(w);
+    // What run cloned in and the repo's scratch paths (test captures, projects.md) go with the worktree: saved/ grew to
+    // 8 GB of them by 2026-11-19. A configured clone path run did not clone is the worker's own and still refuses.
     const unsaved = unsavedIgnored(git(w.worktree, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'), kept,
-      [...p.clone ?? [], ...p.scratch ?? []]);
+      [...w.cloned ?? [], ...projectOf(w).scratch ?? []]);
     const blocker = cleanupBlocker(
       git(w.worktree, 'status', '--porcelain'),
       git(w.worktree, 'rev-list', '--oneline', w.branch, '--not', `--exclude=${w.branch}`, '--branches', '--remotes'),
@@ -1092,7 +1101,7 @@ async function saved(args: string[]) {
   const total = gbOf(sized.reduce((a, s) => a + s.kb, 0));
   if (!yes) {
     console.log(sized.map(s => `${gbOf(s.kb).padStart(8)}  ${s.name}`).join('\n'));
-    return console.log(`\n${old.length} folders in ${savedDir} older than ${SAVED_DAYS} days, ${total}. Rerun with --yes to delete them.`);
+    return console.log(`\n${old.length} folders in ${savedDir} older than ${SAVED_DAYS} days, ${total}. Deleting them needs the user's OK each time (a decision); only then rerun with --yes.`);
   }
   for (const s of sized) rmSync(join(savedDir, s.name), { recursive: true, force: true });
   log(`saved --prune --yes: deleted ${old.length} folders older than ${SAVED_DAYS} days from saved/ (${total}): ${old.join(', ')}`);

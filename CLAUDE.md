@@ -56,7 +56,7 @@ Everything except the READMEs is local to this machine and not in git.
 | `done.json` | Finished worker turns the watcher already reported; a finish it missed is replayed on arm (src/finish.ts). |
 | `capacity.json` | When each lead last got `IDLE` and when each running worker last said DONE and was last told `UNSHIPPED` (src/capacity.ts). |
 | `disk.json` | When the watcher last thinned local snapshots and last said `DISK low` or `DISK swap`, and which workers got `DISK worktree` (src/disk.ts). |
-| `saved/` | What `cleanup --keep` copied out of worktrees, one `<name>-<YYYYMMDD-HHMM>` folder each; `orch saved --prune` lists those over 3 days old, `--yes` deletes them. |
+| `saved/` | What `cleanup --keep` copied out of worktrees, one `<name>-<YYYYMMDD-HHMM>` folder each; `orch saved --prune` lists those over 3 days old, `--yes` deletes them, only with the user's OK each time. |
 | `overlap.json` | Worker pairs the watcher already reported as changing the same files (`orch overlap --new`). |
 | `leads/` | Per lead: `<name>.json` (workspace, pane, session id, running or stopped), `<name>.beat` (its watcher's heartbeat and session id), `<name>.inbox-<date>` (lines orch's watcher hands it, append-only, one file a day, deleted after two days), `<name>.offsets.json` (how far each inbox file has been read), `<name>.down` (orch already said LEAD down). |
 | `plans/<repo>.md` | Goal, milestone and tasks per active project. |

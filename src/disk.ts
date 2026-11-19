@@ -44,11 +44,6 @@ export function parseDfFreeGb(out: string): number | undefined {
 const GB = 1048576;
 const gb = (kb: number) => (kb / GB).toFixed(1);
 
-// The clone paths run copies into a new worktree: node_modules folders only when the main checkout's install fits the
-// worktree's lockfile (cloneFromMain checks), since any other clone is a broken install.
-export const clonePaths = (clone: string[], installOk: boolean) =>
-  clone.filter(c => installOk || c.replace(/\/+$/, '').split('/').at(-1) !== 'node_modules');
-
 // Whether an installed tree is what its lockfile says: npm's hidden lockfile (node_modules/.package-lock.json) lists
 // what is installed. Every non-optional package of the lockfile is there, at the locked version, and nothing else is.
 // evrloot-next's main checkout lacked happy-dom with an unchanged lockfile (2026-11-19), so the lockfile alone can lie.

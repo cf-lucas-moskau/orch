@@ -224,6 +224,9 @@ export function keepTarget(worktree: string, resolved: string): string | null {
 // only typed, which is what orch's prompt is. Codex has no pstack.
 export const SERIOUS = '/pstack:poteto-mode';
 
+// The node_modules folders among what run cloned; other clones (a build mirror) say nothing about the install.
+const installs = (cloned: string[] = []) => cloned.filter(c => c.replace(/\/+$/, '').split('/').at(-1) === 'node_modules');
+
 // sync: off for a colleague's PR branch and a stacked worker, whose base is not the default branch.
 export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch' | 'cloned'>, sync = true): string {
   const gates = p.gates.length ? p.gates.map(g => `\`${g}\``).join(', ') : 'none registered; run the repo\'s own tests';
@@ -252,7 +255,7 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --autostash --no-edit origin/<default>\`; your changes stay uncommitted; never rebase) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     // A clone shares its bytes with the main checkout until written; npm ci would replace 800 MB of it (2026-11-19).
-    ...w.cloned?.length ? [`Cloned: ${w.cloned.map(c => `\`${c}\``).join(', ')} came from the main checkout as copy-on-write clones and are ready to use. Don't run npm ci or npm install unless package-lock.json changes, and don't delete them.`] : [],
+    ...installs(w.cloned).length ? [`Cloned: ${installs(w.cloned).map(c => `\`${c}\``).join(', ')} came from the main checkout as copy-on-write clones of an install that matches your lockfile, and are ready to use. Don't run npm ci or npm install unless a package-lock.json changes, and don't delete them.`] : [],
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
 }

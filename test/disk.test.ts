@@ -1,12 +1,12 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { cloneFromMain } from '../src/disk-io.ts';
-import { afterThin, clonePaths, installMatches, NEVER, parseDfFreeGb, parseDiskThin, parseSwapGb, renderDisk, sizeLines, snapshotCount, staleSaved, THIN_ARGS, thinDue } from '../src/disk.ts';
+import { afterThin, installMatches, NEVER, parseDfFreeGb, parseDiskThin, parseSwapGb, renderDisk, sizeLines, snapshotCount, staleSaved, THIN_ARGS, thinDue } from '../src/disk.ts';
 
 const SRC = join(import.meta.dirname, '..', 'src');
 const MIN = 60_000;
@@ -142,12 +142,6 @@ test('sizeLines: once per running worker name, again for a new worker of that na
   assert.deepEqual(sizeLines({}, T0, [], undefined).lines, []);
 });
 
-test('clone paths: node_modules folders only while the lockfile matches; other listed folders always', () => {
-  const list = ['node_modules', 'apps/web/node_modules/', 'apps/web/.old-mirror'];
-  assert.deepEqual(clonePaths(list, true), list);
-  assert.deepEqual(clonePaths(list, false), ['apps/web/.old-mirror']);
-});
-
 test('cloneFromMain clones listed folders from the main checkout; node_modules only on the same lockfile, installed as locked', () => {
   const dir = mkdtempSync(join(tmpdir(), 'orch-clone-'));
   const main = join(dir, 'main'), same = join(dir, 'same'), other = join(dir, 'other'), stale = join(dir, 'stale');
@@ -163,21 +157,57 @@ test('cloneFromMain clones listed folders from the main checkout; node_modules o
   writeFileSync(join(other, 'package-lock.json'), lock({ 'node_modules/pkg': { version: '2.0.0' } }));
   const list = ['node_modules', 'apps/web/.old-mirror', 'missing'];
 
-  assert.deepEqual(cloneFromMain(main, same, list), { done: ['node_modules', 'apps/web/.old-mirror'], failed: [], skipped: ['missing'], why: '' });
+  assert.deepEqual(cloneFromMain(main, same, list), { done: ['node_modules', 'apps/web/.old-mirror'], failed: [], skipped: [{ path: 'missing', why: 'not in the main checkout' }] });
   assert.equal(readFileSync(join(same, 'node_modules', 'alias', 'index.js'), 'utf8'), 'ok', 'symlinks stay links into the clone');
   assert.equal(readlinkSync(join(same, 'node_modules', 'alias')), 'pkg');
   assert.equal(readFileSync(join(same, 'apps', 'web', '.old-mirror', 'a.png'), 'utf8'), 'png');
 
-  assert.deepEqual(cloneFromMain(main, other, list), { done: ['apps/web/.old-mirror'], failed: [], skipped: ['node_modules', 'missing'], why: 'package-lock.json differs from the main checkout' });
+  assert.deepEqual(cloneFromMain(main, other, list), { done: ['apps/web/.old-mirror'], failed: [],
+    skipped: [{ path: 'node_modules', why: 'package-lock.json differs from the main checkout' }, { path: 'missing', why: 'not in the main checkout' }] });
   assert.throws(() => readFileSync(join(other, 'node_modules', 'pkg', 'index.js')));
 
   writeFileSync(join(main, 'node_modules', '.package-lock.json'), lock({}));
   writeFileSync(join(stale, 'package-lock.json'), v1);
-  assert.deepEqual(cloneFromMain(main, stale, ['node_modules']), { done: [], failed: [], skipped: ['node_modules'], why: 'the main checkout\'s node_modules does not match its package-lock.json' });
+  assert.deepEqual(cloneFromMain(main, stale, ['node_modules']), { done: [], failed: [],
+    skipped: [{ path: 'node_modules', why: 'the main checkout\'s node_modules does not match its package-lock.json' }] });
 
   writeFileSync(join(main, 'apps', 'web', '.old-mirror', 'a.png'), 'changed');
-  assert.deepEqual(cloneFromMain(main, same, list).done, [], 'a path already in the worktree is left alone');
+  assert.deepEqual(cloneFromMain(main, same, list).skipped[1], { path: 'apps/web/.old-mirror', why: 'already in the worktree' });
   assert.equal(readFileSync(join(same, 'apps', 'web', '.old-mirror', 'a.png'), 'utf8'), 'png');
+});
+
+test('a nested node_modules with its own lockfile is checked against that lockfile and its own install', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-clone-'));
+  const main = join(dir, 'main'), wt = join(dir, 'wt');
+  const lock = (v: string) => JSON.stringify({ packages: { '': {}, 'node_modules/x': { version: v } } });
+  for (const d of [join(main, 'node_modules', 'x'), join(main, 'apps', 'web', 'node_modules', 'x'), join(wt, 'apps', 'web')]) mkdirSync(d, { recursive: true });
+  for (const r of [main, wt]) writeFileSync(join(r, 'package-lock.json'), lock('1.0.0'));
+  writeFileSync(join(main, 'node_modules', '.package-lock.json'), lock('1.0.0'));
+  writeFileSync(join(main, 'apps', 'web', 'package-lock.json'), lock('2.0.0'));
+  writeFileSync(join(main, 'apps', 'web', 'node_modules', '.package-lock.json'), lock('2.0.0'));
+  writeFileSync(join(wt, 'apps', 'web', 'package-lock.json'), lock('3.0.0'));
+  assert.deepEqual(cloneFromMain(main, wt, ['node_modules', 'apps/web/node_modules']), { done: ['node_modules'], failed: [],
+    skipped: [{ path: 'apps/web/node_modules', why: 'apps/web/package-lock.json differs from the main checkout' }] });
+
+  writeFileSync(join(wt, 'apps', 'web', 'package-lock.json'), lock('2.0.0'));
+  assert.deepEqual(cloneFromMain(main, wt, ['apps/web/node_modules']).done, ['apps/web/node_modules'], 'same nested lockfile, matching nested install');
+});
+
+test('a clone destination must resolve inside the worktree: no .., no absolute path, no symlink out', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orch-clone-'));
+  const main = join(dir, 'main'), wt = join(dir, 'wt'), outside = join(dir, 'outside');
+  for (const d of [join(main, 'link', 'x'), join(main, 'deep', 'a', 'b'), join(dir, 'escape'), wt, outside]) mkdirSync(d, { recursive: true });
+  symlinkSync(outside, join(wt, 'link'));
+  symlinkSync(outside, join(wt, 'deep'));
+  const r = cloneFromMain(main, wt, ['../escape', '/etc', 'link/x', 'deep/a/b', 'apps/../../escape']);
+  assert.deepEqual(r, { done: [], failed: [], skipped: [
+    { path: '../escape', why: 'not a path inside the repo' },
+    { path: '/etc', why: 'not a path inside the repo' },
+    { path: 'link/x', why: 'its folder leads out of the worktree' },
+    { path: 'deep/a/b', why: 'its folder leads out of the worktree' },
+    { path: 'apps/../../escape', why: 'not a path inside the repo' },
+  ] });
+  assert.deepEqual(readdirSync(outside), [], 'nothing was written through the links');
 });
 
 test('an install matches its lockfile when every locked package is there at its version and nothing else is', () => {

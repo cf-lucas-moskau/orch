@@ -114,10 +114,14 @@ test('clone and scratch paths come from projects.md and never block cleanup', ()
   assert.deepEqual(unsavedIgnored(ls, [], [...web.clone!, ...web.scratch!]), ['apps/web/public/old', 'docs/alpha/notes.local']);
 });
 
-test('a worker with clones is told not to reinstall them', () => {
-  const b = workerBrief('x', parseProjects(md)[1], { name: 'c', branch: 'orch/c', cloned: ['node_modules', 'apps/web/.old-mirror'] });
-  assert.match(b, /^Cloned: `node_modules`, `apps\/web\/\.old-mirror` came from the main checkout as copy-on-write clones .*Don't run npm ci or npm install unless package-lock\.json changes/m);
-  assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'c', branch: 'orch/c' }).includes('Cloned:'));
+test('a worker is told not to reinstall only the node_modules run actually cloned', () => {
+  const brief = (cloned?: string[]) => workerBrief('x', parseProjects(md)[1], { name: 'c', branch: 'orch/c', cloned });
+  assert.match(brief(['node_modules', 'apps/web/.old-mirror', 'apps/web/node_modules']),
+    /^Cloned: `node_modules`, `apps\/web\/node_modules` came from the main checkout as copy-on-write clones of an install that matches your lockfile.*Don't run npm ci or npm install unless a package-lock\.json changes/m);
+  assert.match(brief(['apps/web/node_modules']), /^Cloned: `apps\/web\/node_modules` came/m);
+  assert.ok(!brief(['apps/web/.old-mirror']).includes('Cloned:'), 'a mirror clone says nothing about the install');
+  assert.ok(!brief(undefined).includes('Cloned:'));
+  assert.ok(!brief([]).includes('Cloned:'));
 });
 
 test('cleanup flags: --keep needs a path', () => {
