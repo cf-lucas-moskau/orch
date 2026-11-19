@@ -14,7 +14,8 @@ import { LEADS, leadAgent, leadNotice, leadUp, ownerOf, parsePane, shows, type L
 import { post, prune, read, readBeat } from './lead-inbox.ts';
 import { replay as replayStalls, stallLine, step as stepStall, tick as tickStalls, type Stall } from './stall.ts';
 import { parseDiskFloor } from './dispatch.ts';
-import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
+import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, sizeLines, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
+import { ownKb, swapGb } from './disk-io.ts';
 import { buildLimit, building, EMPTY, idleDue, idleLine, mergedNotCleaned, noteDone, prune as pruneDone, unshipped, unshippedDue, waitingWork, type CapacityState } from './capacity.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -302,6 +303,7 @@ function startOrchSide() {
   void ensureQueue();
   setInterval(() => void ensureQueue(), 60_000);
   setInterval(checkDisk, Number(process.env.ORCH_DISK_CHECK_MS ?? CHECK_MS));
+  setInterval(() => void checkSizes(), Number(process.env.ORCH_DISK_CHECK_MS ?? CHECK_MS));
   void checkCapacity();
   setInterval(() => void checkCapacity(), Number(process.env.ORCH_CAPACITY_CHECK_MS ?? 60_000));
 }
@@ -400,13 +402,34 @@ function checkDisk() {
     if (failure && failure !== diskError) say(`DISK error: tmutil thinlocalsnapshots ${failure}`);
     diskError = failure;
     const r = afterThin(s, now, before, freeGb() ?? before, parseDiskFloor(text('local.md') + text('policies.md')));
-    writeFileSync(join(root, 'disk.json'), JSON.stringify(r.state) + '\n');
+    // Read again: checkSizes may have written its own keys during the thin.
+    writeFileSync(join(root, 'disk.json'), JSON.stringify({ ...json('disk.json', {}), thinned: r.state.thinned, lowSaid: r.state.lowSaid }) + '\n');
     for (const l of r.lines) say(l);
   };
   const c = spawn('tmutil', THIN_ARGS, { timeout: 10 * 60_000, killSignal: 'SIGKILL' });
   c.stderr.on('data', d => { err += d; });
   c.on('error', e => end(`did not start: ${e.message}`));
   c.on('close', (code, signal) => end(code === 0 ? '' : `${signal ? `killed (${signal})` : `exited ${code}`}: ${err.trim().slice(0, 200)}`));
+}
+
+// DISK worktree and DISK swap FYI lines (sizeLines in src/disk.ts), on the thin check's interval. Sizes are measured
+// with du off the event loop; one check at a time.
+let sizing = false;
+async function checkSizes() {
+  if (sizing) return;
+  sizing = true;
+  try {
+    const running = json('workers.json', []).filter((w: any) => w.status === 'running' && w.worktree && existsSync(w.worktree));
+    const [worktrees, swap] = await Promise.all([
+      Promise.all(running.map(async (w: any) => ({ name: w.name, kb: await ownKb(w.worktree, w.cloned) }))),
+      swapGb(),
+    ]);
+    const cur = json('disk.json', {});
+    const r = sizeLines(cur, Date.now(), worktrees, swap);
+    writeFileSync(join(root, 'disk.json'), JSON.stringify({ ...json('disk.json', {}), ...r.state }) + '\n');
+    for (const l of r.lines) say(l);
+  } catch (e) { console.log(`DISK error: size check ${e instanceof Error ? e.message : e}`); }
+  finally { sizing = false; }
 }
 
 // Keep board.md and sessions.json fresh so new sessions get names (the plan's 10-minute refresh).

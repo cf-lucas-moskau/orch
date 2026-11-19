@@ -100,6 +100,30 @@ test('cleanup lists gitignored files that cannot be rebuilt, minus kept ones', (
     'only the entry\'s own name counts as rebuildable, not a folder above it');
 });
 
+test('clone and scratch paths come from projects.md and never block cleanup', () => {
+  const [web, plain] = parseProjects(`| Repo | Path | Gates | Clone | Scratch | Notes |
+|---|---|---|---|---|---|
+| web | ~/code/web | \`npm test\` | \`node_modules\`, \`apps/web/.old-mirror\` | \`docs/alpha/img/_run\`, \`apps/web/public/data\` | |
+| plain | ~/code/plain | | | | |
+`);
+  assert.deepEqual(web.clone, ['node_modules', 'apps/web/.old-mirror']);
+  assert.deepEqual(web.scratch, ['docs/alpha/img/_run', 'apps/web/public/data']);
+  assert.equal(plain.clone, undefined);
+  assert.equal(plain.scratch, undefined);
+  const ls = ['docs/alpha/img/_run/', 'apps/web/.old-mirror/', 'apps/web/public/data/', 'apps/web/public/old', 'docs/alpha/notes.local'].join('\0');
+  assert.deepEqual(unsavedIgnored(ls, [], [...web.clone!, ...web.scratch!]), ['apps/web/public/old', 'docs/alpha/notes.local']);
+});
+
+test('a worker is told not to reinstall only the node_modules run actually cloned', () => {
+  const brief = (cloned?: string[]) => workerBrief('x', parseProjects(md)[1], { name: 'c', branch: 'orch/c', cloned });
+  assert.match(brief(['node_modules', 'apps/web/.old-mirror', 'apps/web/node_modules']),
+    /^Cloned: `node_modules`, `apps\/web\/node_modules` came from the main checkout as copy-on-write clones of an install that matches your lockfile.*Don't run npm ci or npm install unless a package-lock\.json changes/m);
+  assert.match(brief(['apps/web/node_modules']), /^Cloned: `apps\/web\/node_modules` came/m);
+  assert.ok(!brief(['apps/web/.old-mirror']).includes('Cloned:'), 'a mirror clone says nothing about the install');
+  assert.ok(!brief(undefined).includes('Cloned:'));
+  assert.ok(!brief([]).includes('Cloned:'));
+});
+
 test('cleanup flags: --keep needs a path', () => {
   assert.deepEqual(cleanupFlags([]), { abandon: false, kept: [] });
   assert.deepEqual(cleanupFlags(['--keep', 'a', '--abandon', '--keep', 'b/']), { abandon: true, kept: ['a', 'b/'] });

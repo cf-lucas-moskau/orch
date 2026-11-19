@@ -1,7 +1,7 @@
 // orch's hands: run, steer, gates, cleanup, workers, continue, brief, review, judge, restore, the PR commands, routines and ideas.
 // Usage: npm run -s orch -- <command> [args]. Every action that changes a session is logged to log.md.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { FeedEvent } from './board.ts';
@@ -17,7 +17,8 @@ import { addressTask, mergeBlocker, renderTriage, triagePrs, type Pr, type PrSta
 import { due, nextRun, orchPane, parseRoutine, parseSchedule, renderRoutine, runName, validRoutineName, type Mode, type Routine, type RoutineState } from './routines.ts';
 import { idea as ideaCmd, loadIdeas } from './ideas-io.ts';
 import { pendingLines } from './ideas.ts';
-import { parseDfFreeGb } from './disk.ts';
+import { parseDfFreeGb, renderDisk, SAVED_DAYS, snapshotCount, staleSaved, type SavedEntry } from './disk.ts';
+import { cloneFromMain, DOCKER_RAW, duKb, ownKb, swapGb } from './disk-io.ts';
 import { failingTests } from './gate-output.ts';
 import { isMerged, mergedHeads } from './merged.ts';
 import { impl as implCmd, team as teamCmd } from './team-io.ts';
@@ -49,8 +50,10 @@ const gitTop = (path: string) => {
   const r = spawnSync('git', ['-C', path, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
   return r.status === 0 ? r.stdout.trim() : null;
 };
+// By registered path; an unregistered repo's name is only its folder's basename, so the name counts only for old
+// records without a path.
 const projectOf = (w: Worker): Project =>
-  projects().find(p => p.path === w.repoPath || p.repo === w.repo) ?? { repo: w.repo, path: w.repoPath ?? '', gates: [], notes: '' };
+  projects().find(p => w.repoPath ? p.path === w.repoPath : p.repo === w.repo) ?? { repo: w.repo, path: w.repoPath ?? '', gates: [], notes: '' };
 const project = (arg: string) => resolveProject(arg, projects(), gitTop) ?? die(`${arg} is not a registered repo, a git path, or a repo under ORCH_CODE_DIR (default ~/code)`);
 // local.md holds the user's own overrides, including the cap.
 const cap = () => parseCap(read('local.md') + read('policies.md'));
@@ -265,11 +268,27 @@ function defaultRef(path: string, fetch = true, warn = (m: string) => console.er
   return ahead ? local : remote;
 }
 
+// The worktree exists by now, so nothing here may stop startWorker before the worker's record is saved.
+function cloneInto(p: Project, wt: string): string[] {
+  if (!p.clone?.length) return [];
+  try {
+    const r = cloneFromMain(p.path, wt, p.clone);
+    for (const f of r.failed) console.error(`warning: cloning ${f} into ${wt} failed`);
+    const skipped = r.skipped.map(s => `${s.path}: ${s.why}`).join('; ');
+    log(`run: cloned ${r.done.join(', ') || 'nothing'} into ${wt}${skipped ? ` (skipped ${skipped})` : ''}${r.failed.length ? ` (failed ${r.failed.join(', ')})` : ''}`);
+    return r.done;
+  } catch (e: any) {
+    console.error(`warning: cloning into ${wt} failed: ${e.message}`);
+    return [];
+  }
+}
+
 function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string; parent?: string }, from?: string, stacked = false) {
   const branch = `orch/${name}`;
   const wt = herdr('worktree', 'create', '--cwd', p.path, '--branch', branch, ...(from ? ['--base', from] : []), '--label', name, '--no-focus');
   if (wt.error) die(`worktree create failed: ${wt.error.message}`);
   const pane = wt.result.root_pane.pane_id, workspace = wt.result.workspace.workspace_id, path = wt.result.worktree.path;
+  const cloned = cloneInto(p, path);
 
   let started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000');
   const screen = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout;
@@ -279,6 +298,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   const rec: Worker = {
     name, kind, ...extra, repo: p.repo, repoPath: p.path, task, branch, worktree: path, workspace, pane,
     sid: herdr('agent', 'get', name).result?.agent?.agent_session?.value ?? '', started: stamp(), status: 'running',
+    ...cloned.length ? { cloned } : {},
   };
   saveWorkers([...loadWorkers(), rec]);
   if (started.error) {
@@ -416,7 +436,10 @@ function cleanup([name, ...args]: string[]) {
       // The parent's real path plus the leaf's own name: a kept symlink keeps its name and is copied as the file it points to.
       return keepTarget(top, join(realpathSync(dirname(p)), basename(p))) ?? die(`not cleaned: --keep ${k} is not a path inside ${w.worktree}`);
     });
-    const unsaved = unsavedIgnored(git(w.worktree, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'), kept);
+    // What run cloned in and the repo's scratch paths (test captures, projects.md) go with the worktree: saved/ grew to
+    // 8 GB of them by 2026-11-19. A configured clone path run did not clone is the worker's own and still refuses.
+    const unsaved = unsavedIgnored(git(w.worktree, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'), kept,
+      [...w.cloned ?? [], ...projectOf(w).scratch ?? []]);
     const blocker = cleanupBlocker(
       git(w.worktree, 'status', '--porcelain'),
       git(w.worktree, 'rev-list', '--oneline', w.branch, '--not', `--exclude=${w.branch}`, '--branches', '--remotes'),
@@ -1061,6 +1084,48 @@ async function idea(args: string[]) {
 async function team(args: string[]) { try { console.log(await teamCmd(args, { root, log, run: () => die('team never dispatches') })); } catch (e: any) { die(e.message); } }
 async function impl(args: string[]) { try { console.log(await implCmd(args, { root, log, run: () => die('impl never dispatches') })); } catch (e: any) { die(e.message); } }
 
+const savedDir = join(root, 'saved');
+const savedEntries = (): SavedEntry[] => {
+  try { return readdirSync(savedDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => ({ name: d.name, mtimeMs: statSync(join(savedDir, d.name)).mtimeMs })); }
+  catch { return []; }
+};
+const gbOf = (kb: number) => `${(kb / 1048576).toFixed(1)} GB`;
+
+// saved --prune [--yes]: lists saved/ folders older than SAVED_DAYS; deletes them only with --yes. Nothing prunes on its own.
+async function saved(args: string[]) {
+  if (args[0] !== '--prune' || args.slice(1).some(a => a !== '--yes')) die('usage: orch saved --prune [--yes]');
+  const yes = args.includes('--yes');
+  const old = staleSaved(savedEntries(), Date.now());
+  if (!old.length) return console.log(`nothing in ${savedDir} is older than ${SAVED_DAYS} days`);
+  const sized = await Promise.all(old.map(async name => ({ name, kb: await duKb(join(savedDir, name)) })));
+  const total = gbOf(sized.reduce((a, s) => a + s.kb, 0));
+  if (!yes) {
+    console.log(sized.map(s => `${gbOf(s.kb).padStart(8)}  ${s.name}`).join('\n'));
+    return console.log(`\n${old.length} folders in ${savedDir} older than ${SAVED_DAYS} days, ${total}. Deleting them needs the user's OK each time (a decision); only then rerun with --yes.`);
+  }
+  for (const s of sized) rmSync(join(savedDir, s.name), { recursive: true, force: true });
+  log(`saved --prune --yes: deleted ${old.length} folders older than ${SAVED_DAYS} days from saved/ (${total}): ${old.join(', ')}`);
+  console.log(`deleted ${old.length} folders, ${total}`);
+}
+
+// disk: free space, swap, snapshots, running worktrees' own size, saved/, Docker.raw and the top 5, on one screen.
+async function diskReport() {
+  const running = loadWorkers().filter(w => w.status === 'running' && existsSync(w.worktree));
+  const entries = savedEntries();
+  const [worktrees, savedKb, dockerKb, scratchKb, swap] = await Promise.all([
+    Promise.all(running.map(async w => ({ name: w.name, repo: w.repo, kb: await ownKb(w.worktree, w.cloned) }))),
+    duKb(savedDir),
+    existsSync(DOCKER_RAW) ? duKb(DOCKER_RAW) : Promise.resolve(undefined),
+    existsSync(CLAUDE_TMP) ? duKb(CLAUDE_TMP) : Promise.resolve(undefined),
+    swapGb(),
+  ]);
+  console.log(renderDisk({
+    freeGb: disk()?.freeGb, swapGb: swap,
+    snapshots: snapshotCount(spawnSync('tmutil', ['listlocalsnapshots', '/'], { encoding: 'utf8', timeout: 30_000 }).stdout ?? ''),
+    worktrees, saved: { kb: savedKb, folders: entries.length, stale: staleSaved(entries, Date.now()).length }, dockerKb, scratchKb,
+  }));
+}
+
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, 'accept-touches': acceptTouches, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, 'accept-touches': acceptTouches, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision, disk: diskReport, saved };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);
