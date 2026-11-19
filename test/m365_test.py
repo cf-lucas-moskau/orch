@@ -353,13 +353,56 @@ class M365(unittest.TestCase):
         self.assertNotIn(G + '/chats/19:abc@thread.v2/members', [u for u, _, _ in fake.calls])
 
     def test_flags_only_on_commands_that_take_them(self):
-        for argv, msg in [(('me', '--json'), '--json: not supported by me (only calendar, mail, read, chats)'),
-                          (('me', '--since', '2026-11-01'), '--since: not supported by me (only calendar, mail, chats)'),
-                          (('read', 'x', '--since', '2026-11-01'), '--since: not supported by read (only calendar, mail, chats)')]:
+        for argv, msg in [(('me', '--json'), '--json: not supported by me (only calendar, mail, read, event, chats, chat)'),
+                          (('me', '--since', '2026-11-01'), '--since: not supported by me (only calendar, mail, chats, chat)'),
+                          (('read', 'x', '--since', '2026-11-01'), '--since: not supported by read (only calendar, mail, chats, chat)')]:
             with self.assertRaises(SystemExit) as e:
                 run(*argv)
             self.assertEqual(e.exception.code, msg)
         self.assertEqual(fake.calls, [])
+
+    def test_event_json_carries_description_as_text(self):
+        ev = fixture('calendar.json')['value'][0]
+        ev['body'] = {'contentType': 'html', 'content': '<p>Agenda:</p><div>1. Angebot Q1 &amp; Budget</div>'}
+        fake.routes = {G + '/me/events/AAMk%2FEV1': (200, ev)}
+        got = json.loads(run('event', 'AAMk/EV1', '--json'))
+        self.assertEqual((got['subject'], got['start'], got['body']), ('Netto Abstimmung', '2026-11-12T09:00:00+01:00', 'Agenda:\n1. Angebot Q1 & Budget'))
+        self.assertEqual(fake.calls[0][2]['Prefer'], 'outlook.timezone="Europe/Berlin", outlook.body-content-type="text"')
+        self.assertIn('body', fake.calls[0][1]['$select'].split(','))
+
+    def test_calendar_json_has_no_body(self):
+        fake.routes = {G + '/me/calendarView': (200, 'calendar-2.json')}
+        self.assertNotIn('body', json.loads(run('calendar', '--json'))[0])
+
+    def test_chat_json_one_chat_since(self):
+        chat = fixture('chats.json')['value'][0]
+        fake.granted |= {'Chat.Read'}
+        fake.routes = {G + '/chats/19%3Aabc%40thread.v2': (200, chat),
+                       G + '/chats/19:abc@thread.v2/messages': (200, 'chat-messages.json')}
+        got = json.loads(run('chat', '19:abc@thread.v2', '--since', '2026-11-01', '--json'))
+        self.assertEqual((got['id'], got['type'], got['truncated']), ('19:abc@thread.v2', 'oneOnOne', {'members': False, 'messages': False}))
+        self.assertEqual(got['members'][1]['email'], 'erika.muster@netto.example')
+        self.assertEqual([(m['created'], m['from']['name'], m['text']) for m in got['messages']], [
+            ('2026-11-11T10:00:00.000Z', 'Erika Muster', 'Passt der Termin am Freitag?\nGrüße'),
+            ('2026-11-11T09:55:00.000Z', 'Lucas Moskau', 'Hi Erika')], 'system events and messages before --since dropped')
+        self.assertNotIn(G + '/chats/19:abc@thread.v2/messages?$skiptoken=page2', [u for u, _, _ in fake.calls])
+
+    def test_chat_until_filters_on_the_server(self):
+        fake.granted |= {'Chat.Read'}
+        fake.routes = {G + '/chats/19%3Aabc%40thread.v2': (200, fixture('chats.json')['value'][0]),
+                       G + '/chats/19:abc@thread.v2/messages': (200, 'chat-messages.json')}
+        run('chat', '19:abc@thread.v2', '--since', '2026-11-11', '--until', '2026-11-12', '--json')
+        self.assertEqual(fake.calls[1][1]['$filter'], 'createdDateTime lt 2026-11-11T23:00:00Z', 'next midnight in Berlin')
+        with self.assertRaises(SystemExit) as e:
+            run('chats', '--until', '2026-11-12')
+        self.assertEqual(e.exception.code, '--until: not supported by chats (only chat)')
+
+    def test_chat_not_granted(self):
+        fake.routes = {G + '/chats/19%3Aabc%40thread.v2': (403, None)}
+        fake.granted |= {'Chat.Read'}
+        with self.assertRaises(SystemExit) as e:
+            run('chat', '19:abc@thread.v2', '--json')
+        self.assertEqual(e.exception.code, 'not granted: Chat.Read')
 
     def test_windows_zone_names_map_to_iana(self):
         page = fixture('calendar-2.json')
