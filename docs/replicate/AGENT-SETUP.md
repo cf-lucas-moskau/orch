@@ -27,7 +27,7 @@ S5.1 runs on the host before S4.4 so that main's first sync of `~/.claude` alrea
 ## Phase 0: facts
 
 ### S0.1 [both] Ask for the facts
-HUMAN, in one message: their first name; which Mac is the host and which is main; whether the host is a laptop (lid open or closed); whether they want Codex (OpenAI) too; their Gemini API key, or "later" (only for image generation). Suggest Tailscale names: `<name>-host` and `<name>-main`, lowercase.
+HUMAN, in one message: their first name; which Mac is the host and which is main; whether the host is a laptop (lid open or closed); whether they want Codex (OpenAI) too (image generation needs it). Suggest Tailscale names: `<name>-host` and `<name>-main`, lowercase.
 
 Verify: you have all answers.
 
@@ -134,8 +134,8 @@ HUMAN: `gh auth login` (GitHub.com, HTTPS, login with a web browser). Then you r
 
 Verify: `gh auth status`
 
-### S2.5 [host] Codex CLI (optional)
-Only if the human wants Codex workers and two-model reviews.
+### S2.5 [host] Codex CLI
+Needed for image generation (image-gen paints with Codex's built-in image tool on the ChatGPT plan), and for Codex workers and two-model reviews.
 
 ```bash
 npm i -g @openai/codex
@@ -143,7 +143,7 @@ npm i -g @openai/codex
 
 HUMAN: `codex login` (ChatGPT account).
 
-Verify: `codex --version && codex login status`
+Verify: `codex --version && codex login status`, and one image: `cd "$(mktemp -d)" && echo 'Use your built-in image generation tool to make one small image of a red circle on white. Save it as out.png in the current directory.' | codex exec --skip-git-repo-check --ephemeral -s workspace-write - && file out.png` (prints "PNG image data").
 
 ### S2.6 [both] The kit
 Host: `git clone https://github.com/cf-lucas-moskau/orch ~/orch`. Main: `git clone https://github.com/cf-lucas-moskau/orch ~/code/orch-kit` (main never runs orch; the clone only carries the kit).
@@ -378,7 +378,7 @@ mkdir -p ~/.claude/skills/image-gen
 cp "$KIT/image-gen/SKILL.md" "$KIT/image-gen/generate.py" ~/.claude/skills/image-gen/
 ```
 
-With a Gemini key from S0.1, write `~/.claude/skills/image-gen/.env` containing `GEMINI_API_KEY=<key>`, mode 600. Without one, say once that image generation waits for a key (aistudio.google.com, Get API key).
+image-gen paints with Codex's built-in image tool on the ChatGPT plan (no key, no cost per image), so it needs S2.5. Without Codex, say once that image generation waits for it.
 
 present (HTML slide decks): it is Lucas's own skill and not in this public repo. HUMAN: ask Lucas for the `present` skill folder and put it at `~/.claude/skills/present/` (a `skill.md` or `SKILL.md` plus `LEARNINGS.md`).
 
@@ -598,7 +598,7 @@ Found in review and left as they are. None blocks the setup; fix one when it bit
 - **bus-autorun closes waiting sessions.** A bus session older than an hour that is not `working` gets its tab closed, also when it is blocked on a question. Its request is already archived, so it is not retried. Answer bus sessions within the hour.
 - **Retry tabs are forgotten.** When a request is retried after 15 minutes, the first attempt's tab is no longer tracked for cleanup; close it in herdr by hand.
 - **rc-bootstrap can type twice.** In the 10 s while `rc-loop.sh` restarts `claude remote-control`, the 5-minute check may see no claude and type `rc-loop.sh` into the running loop. The pane then runs a second loop; closing the tab lets the job start a clean one.
-- **image-gen errors.** An empty `candidates` list (some safety blocks) or a network error prints a Python traceback instead of "no image in response". Treat a traceback as the same thing: rephrase or retry.
+- **image-gen is slow.** Codex takes 1 to 2 minutes per image and returns about 1254 px; `--size 2K/4K` upscales. "no image from codex" is a refusal (rephrase) or a logged-out CLI (`codex login`).
 - **Screenshot catcher can copy a half-written file.** It copies a thumbnail screenshot the first time it sees it; if macOS is still writing it, the host keeps a truncated image under that name. Take the screenshot again.
 - **`CLAUDE_CONFIG_DIR` and the hooks.** `claude-settings.sh` honours it for where it installs, but the hook and status-line commands it writes always point at `~/.claude`. Only matters for a second Claude profile.
 - **deck-to-pdf trailing page.** A deck with another `div` after the last slide inside `#deck` gets one blank last page. Delete it or move that element out of `#deck`.
