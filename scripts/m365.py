@@ -8,8 +8,10 @@ Run with ~/.local/share/orch-m365/venv/bin/python scripts/m365.py <command>.
   mail [n] [query]      newest n messages (default 10), optional $search query
   mail [n] --since <d>  messages received since date d (YYYY-MM-DD or ISO time), all of them unless n is given
   read <message id>     one message with its full body as text
+  event <event id>      one calendar event with its full description as text
   chats [n] [--since d] newest n Teams chats (default 20) with their messages; needs Chat.Read (sign in with M365_CHAT=1)
-  --json                calendar, mail, read and chats print JSON instead of text
+  chat <chat id> [--since d] [--until d]  one Teams chat with its messages since d and before d (default: the newest 50)
+  --json                calendar, mail, read, event, chats and chat print JSON instead of text
   --box <address>       any command on a shared mailbox, e.g. --box loesungen@tiki-institut.com (Lösungen)
 The token cache lives in ~/.local/share/orch-m365/cache.json (mode 600) and never leaves this Mac."""
 import html, json, os, re, sys, time, datetime as dt
@@ -182,6 +184,7 @@ def event(e):
                       for a in e.get('attendees', [])],
         'preview': e.get('bodyPreview') or '',
         'link': e.get('webLink'),
+        **({'body': text_of(e['body'])} if 'body' in e else {}),
     }
 
 
@@ -296,7 +299,7 @@ def flag(argv, name, has_value=True):
     return argv[:i] + argv[i + 2:], argv[i + 1]
 
 
-JSON_CMDS, SINCE_CMDS = ('calendar', 'mail', 'read', 'chats'), ('calendar', 'mail', 'chats')
+JSON_CMDS, SINCE_CMDS = ('calendar', 'mail', 'read', 'event', 'chats', 'chat'), ('calendar', 'mail', 'chats', 'chat')
 # Per chat, so one huge group chat cannot make chats --since page for minutes.
 CHAT_MEMBERS_CAP, CHAT_MESSAGES_CAP = 250, 1000
 
@@ -315,6 +318,7 @@ def command(argv):
     argv, box = flag(argv, '--box')
     argv, as_json = flag(argv, '--json', has_value=False)
     argv, since = flag(argv, '--since')
+    argv, before = flag(argv, '--until')
     if box:
         from urllib.parse import quote as q
         ME = '/users/' + q(box, safe='@')
@@ -323,7 +327,9 @@ def command(argv):
         sys.exit(f'--json: not supported by {cmd} (only {", ".join(JSON_CMDS)})')
     if since and cmd not in SINCE_CMDS:
         sys.exit(f'--since: not supported by {cmd} (only {", ".join(SINCE_CMDS)})')
-    since = since and parse_since(since)
+    if before and cmd != 'chat':
+        sys.exit(f'--until: not supported by {cmd} (only chat)')
+    since, before = since and parse_since(since), before and parse_since(before)
     fresh = lambda s: since is None or (s is not None and ts(s) >= since)
     if cmd == 'login':
         return login()
@@ -379,6 +385,17 @@ def command(argv):
             return dump(message(m))
         print(m['subject'], '\n', m['receivedDateTime'], (m.get('from') or {}).get('emailAddress'), '\n')
         return print(m['body']['content'])
+    if cmd == 'event':
+        if len(argv) < 2:
+            sys.exit('usage: event <event id>')
+        from urllib.parse import quote
+        e = get(f'{ME}/events/{quote(argv[1], safe="")}',
+                {'$select': 'id,subject,start,end,location,organizer,attendees,isOnlineMeeting,isCancelled,bodyPreview,body,webLink'},
+                {'Prefer': f'outlook.timezone="{TZ}", outlook.body-content-type="text"'})
+        if as_json:
+            return dump(event(e))
+        print(e['subject'], '\n', local_time(e['start']), '–', local_time(e['end']), '\n')
+        return print(text_of(e.get('body')))
     if cmd == 'chats':
         n = int(argv[1]) if len(argv) > 1 else (None if since else 20)
         # Newest activity first, so paging stops at the first chat older than --since.
@@ -393,23 +410,10 @@ def command(argv):
             raise
         out = []
         for c in (c for c in cs if fresh(chat_time(c))):
-            # Graph has no createdDateTime gt filter on chat messages: page newest first and cut locally.
-            truncated = {'members': False, 'messages': False}
             try:
-                if len(c.get('members', [])) >= 25:  # $expand=members stops at 25
-                    ms = get(f"/chats/{c['id']}/members", all_pages=True, limit=CHAT_MEMBERS_CAP, scopes=CHAT)
-                    c['members'], truncated['members'] = ms['value'], ms['truncated']
-                ms = get(f"/chats/{c['id']}/messages", {'$top': 50, '$orderby': 'createdDateTime desc'},
-                         all_pages=bool(since), limit=CHAT_MESSAGES_CAP, scopes=CHAT,
-                         until=since and (lambda m: not fresh(m.get('createdDateTime'))))
-                msgs, truncated['messages'] = ms.get('value', []), ms.get('truncated', False)
+                out.append(chat_with_messages(c, since, fresh))
             except GraphError as e:
                 print(f"skipped chat {c['id']}: {e}", file=sys.stderr)
-                continue
-            for what, cap in (('members', CHAT_MEMBERS_CAP), ('messages', CHAT_MESSAGES_CAP)):
-                if truncated[what]:
-                    print(f"chat {c['id']}: stopped at {cap} {what}", file=sys.stderr)
-            out.append({**chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]), 'truncated': truncated})
         if as_json:
             return dump(out)
         for c in out:
@@ -418,7 +422,43 @@ def command(argv):
             for m in c['messages']:
                 print(f"  {m['created'][:16]}  {m['from']['name'] or '?'}: {' '.join(m['text'].split())[:200]}")
         return
+    if cmd == 'chat':
+        if len(argv) < 2:
+            sys.exit('usage: chat <chat id> [--since <d>] [--until <d>]')
+        from urllib.parse import quote
+        try:
+            c = get(f'/chats/{quote(argv[1], safe="")}', {'$expand': 'members'}, scopes=CHAT)
+        except GraphError as e:
+            if e.status == 403:
+                not_granted(CHAT)
+            raise
+        out = chat_with_messages(c, since, fresh, before)
+        if as_json:
+            return dump(out)
+        for m in out['messages']:
+            print(f"{m['created'][:16]}  {m['from']['name'] or '?'}: {m['text']}")
+        return
     sys.exit(__doc__)
+
+
+def chat_with_messages(c, since, fresh, before=None):
+    # Graph has no createdDateTime gt filter on chat messages: page newest first and cut locally.
+    # It has lt, so --until skips everything newer on the server.
+    truncated = {'members': False, 'messages': False}
+    if len(c.get('members', [])) >= 25:  # $expand=members stops at 25
+        ms = get(f"/chats/{c['id']}/members", all_pages=True, limit=CHAT_MEMBERS_CAP, scopes=CHAT)
+        c['members'], truncated['members'] = ms['value'], ms['truncated']
+    params = {'$top': 50, '$orderby': 'createdDateTime desc'}
+    if before:
+        params['$filter'] = f"createdDateTime lt {before.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    ms = get(f"/chats/{c['id']}/messages", params,
+             all_pages=bool(since), limit=CHAT_MESSAGES_CAP, scopes=CHAT,
+             until=since and (lambda m: not fresh(m.get('createdDateTime'))))
+    msgs, truncated['messages'] = ms.get('value', []), ms.get('truncated', False)
+    for what, cap in (('members', CHAT_MEMBERS_CAP), ('messages', CHAT_MESSAGES_CAP)):
+        if truncated[what]:
+            print(f"chat {c['id']}: stopped at {cap} {what}", file=sys.stderr)
+    return {**chat(c, [m for m in msgs if fresh(m.get('createdDateTime'))]), 'truncated': truncated}
 
 
 if __name__ == '__main__':
