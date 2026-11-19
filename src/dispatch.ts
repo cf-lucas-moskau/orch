@@ -1,13 +1,17 @@
 import type { Merged } from './review.ts';
 // Pure rules for step 3: registry, worker records, and the checks orch runs before it touches a session.
 
-export type Project = { repo: string; path: string; gates: string[]; notes: string };
+// clone: gitignored folders run copies from the main checkout as APFS clones (node_modules only while the lockfile
+// matches). scratch: gitignored test output that cleanup neither refuses on nor saves. Both are projects.md columns.
+export type Project = { repo: string; path: string; gates: string[]; notes: string; clone?: string[]; scratch?: string[] };
 export type Kind = 'claude' | 'codex';
 export type Worker = {
   name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; parent?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
   workspace: string; pane: string; sid: string; started: string; status: 'running' | 'closed';
   // When its first prompt landed; until then it sits idle, which is no finish.
   prompted?: string;
+  // Folders run cloned in from the main checkout; they share their bytes, so its own size leaves them out.
+  cloned?: string[];
 };
 export type Live = {
   agent_status: string; focused?: boolean; pane_id: string; name?: string; agent_session?: { value?: string };
@@ -23,9 +27,13 @@ export function parseProjects(md: string): Project[] {
   const head = rows.findIndex(r => r[0] === 'Repo');
   if (head < 0) return [];
   const col = (r: string[], name: string) => r[rows[head].indexOf(name)] ?? '';
-  return rows.slice(head + 1).filter(r => r[0]).map(r => ({
-    repo: r[0], path: expand(col(r, 'Path').replace(/`/g, '')), gates: codeSpans(col(r, 'Gates')), notes: col(r, 'Notes'),
-  }));
+  return rows.slice(head + 1).filter(r => r[0]).map(r => {
+    const clone = codeSpans(col(r, 'Clone')), scratch = codeSpans(col(r, 'Scratch'));
+    return {
+      repo: r[0], path: expand(col(r, 'Path').replace(/`/g, '')), gates: codeSpans(col(r, 'Gates')), notes: col(r, 'Notes'),
+      ...clone.length ? { clone } : {}, ...scratch.length ? { scratch } : {},
+    };
+  });
 }
 
 const expand = (p: string) => p.replace(/^~(?=\/|$)/, process.env.HOME ?? '~');
@@ -178,8 +186,9 @@ const rebuildable = (base: string) => REBUILDABLE_DIRS.has(base) || base === '.D
 // --directory collapses an ignored folder to one entry, so each entry is its own top ignored ancestor: only its own name
 // decides whether it is rebuildable (data/build/x.csv is not). git also lists a folder that holds only ignored files
 // (deploy/) before its contents; that container is not itself at risk.
-export function unsavedIgnored(lsFilesZ: string, kept: string[] = []): string[] {
-  const keep = kept.map(k => k.replace(/\/+$/, ''));
+// disposable: the repo's clone and scratch paths (projects.md), lost on purpose like build output.
+export function unsavedIgnored(lsFilesZ: string, kept: string[] = [], disposable: string[] = []): string[] {
+  const keep = [...kept, ...disposable].map(k => k.replace(/\/+$/, ''));
   const all = lsFilesZ.split('\0').filter(Boolean);
   const container = (p: string) => p.endsWith('/') && all.some(q => q !== p && q.startsWith(p));
   return all.filter(p => !container(p)).filter(p => {
@@ -216,7 +225,7 @@ export function keepTarget(worktree: string, resolved: string): string | null {
 export const SERIOUS = '/pstack:poteto-mode';
 
 // sync: off for a colleague's PR branch and a stacked worker, whose base is not the default branch.
-export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch'>, sync = true): string {
+export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | 'branch' | 'cloned'>, sync = true): string {
   const gates = p.gates.length ? p.gates.map(g => `\`${g}\``).join(', ') : 'none registered; run the repo\'s own tests';
   return [
     `# Brief for worker ${w.name}`, '',
@@ -242,6 +251,8 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     // while it is cheap. A merge, never a rebase: history is not rewritten, so a normal push updates the PR (no force push).
     ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --autostash --no-edit origin/<default>\`; your changes stay uncommitted; never rebase) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
+    // A clone shares its bytes with the main checkout until written; npm ci would replace 800 MB of it (2026-11-19).
+    ...w.cloned?.length ? [`Cloned: ${w.cloned.map(c => `\`${c}\``).join(', ')} came from the main checkout as copy-on-write clones and are ready to use. Don't run npm ci or npm install unless package-lock.json changes, and don't delete them.`] : [],
     `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
   ].join('\n');
 }
