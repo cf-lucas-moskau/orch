@@ -10,7 +10,7 @@ import { buildBrief } from '../src/brief.ts';
 import { dossierFile, download, handle, idea, inboxDir, settled, loadConfig, loadIdeas, locked, mediaFile, migrateAll, progressDir, reconcile, textOf, tick, type Deps } from '../src/ideas-io.ts';
 import {
   advance, DEFAULT_CONFIG, ideaLine, limitText, nextId, PAUSED, pendingLines, route, sanitize, serial, shipPost, split, startBlocker, STRANGER, workerName, workerTask, type Idea, type Incoming,
-  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk, isParked, parkBlocker, decisionStatus,
+  bridgeShouldStart, labelName, mentionedIds, withRelated, threadName, migrate, pulse, since, askPost, dueQuestions, dueGoReminder, goReminderPost, parseNotes, progress, scrub, timeoutPost, answer, noteKey, mediaOk, isParked, parkBlocker, decisionStatus,
   inboxCount, inboxOk, inboxOrder, inboxPicks, inboxUrlOk, keywordsPost, parseTitle, type Upload,
 } from '../src/ideas.ts';
 
@@ -2326,4 +2326,10 @@ test('review 6 (5): a close drops its idea\'s queued downloads, so they free the
   release(); await settled();
   assert.equal(s.asked.length, SLOTS, 'the queued images are never fetched');
   assert.ok(!existsSync(inboxDir(w.root, 'I-1')));
+});
+
+test('a long build reads in hours or days, not thousands of minutes', () => {
+  assert.equal(since(95), '95 min');
+  assert.equal(since(420), '7 h');
+  assert.equal(since(5907), '4 days');
 });

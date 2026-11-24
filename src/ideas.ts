@@ -363,8 +363,12 @@ export function pulse(i: Idea, now: string): string | null {
   if (i.state !== 'building') return null;
   if (minsSince(lastOrch(i), now) < Math.min(PULSE_MIN * 2 ** pulsesInARow(i), PULSE_MAX_MIN)) return null;
   const mins = i.startedAt ? Math.max(1, Math.round((Date.parse(now) - Date.parse(i.startedAt)) / 60_000)) : undefined;
-  return `Still on it: ${STAGES[i.stage ?? 'building']}${mins ? ` (${mins} min in)` : ''}.`;
+  return `Still on it: ${STAGES[i.stage ?? 'building']}${mins ? ` (${since(mins)} in)` : ''}.`;
 }
+
+// "95 min", "7 h", "4 days": a stall of days must not read as thousands of minutes.
+export const since = (mins: number) =>
+  mins < 120 ? `${mins} min` : mins < 48 * 60 ? `${Math.round(mins / 60)} h` : `${Math.round(mins / 1440)} days`;
 
 const isPulse = (m: { by: string; text: string }) => m.by === 'orch' && m.text.startsWith('Still on it:');
 const pulsesInARow = (i: Idea) => {
