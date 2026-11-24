@@ -1,0 +1,86 @@
+#!/bin/bash
+# orch: start or restart the orch session. ~/.local/bin/orch links here.
+#   orch              restart orch in its herdr pane (workspace "orch"), resuming its conversation; from any terminal
+#   orch --fresh      same, but a new conversation
+#   orch --force      restart even while orch is mid-turn
+#   orch --dry        print what it would do
+#   orch here         resume orch in this terminal (after a reboot, or when you already quit it)
+set -u
+ORCH=${ORCH_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+FLAGS="-n orch --remote-control orch --plugin-dir ./mod"
+FRESH=0 FORCE=0 DRY=0 HERE=0
+for a in "$@"; do case $a in
+  --fresh) FRESH=1 ;; --force) FORCE=1 ;; --dry) DRY=1 ;; here) HERE=1 ;;
+  -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "orch: unknown argument $a (orch --help)"; exit 2 ;;
+esac; done
+cd "$ORCH" || exit 1
+
+# orch's conversation: the newest session in this project named "orch".
+proj="$HOME/.claude/projects/$(echo "$ORCH" | sed 's#[/.]#-#g')"
+sid=""
+for f in $(ls -t "$proj"/*.jsonl 2>/dev/null); do
+  t=$(grep -o '"customTitle":"[^"]*"' "$f" | tail -1)
+  [ "$t" = '"customTitle":"orch"' ] && { sid=$(basename "$f" .jsonl); break; }
+done
+if [ $FRESH = 1 ] || [ -z "$sid" ]; then cmd="claude $FLAGS"; else cmd="claude --resume $sid $FLAGS"; fi
+
+if [ $HERE = 1 ]; then
+  [ $DRY = 1 ] && { echo "would run here: $cmd"; exit 0; }
+  exec $cmd
+fi
+
+command -v herdr >/dev/null || { echo "orch: herdr not found; run 'orch here' instead"; exit 1; }
+# The herdr workspace labelled orch, and the pane orch's claude runs in (else that workspace's first pane).
+read -r ws pane status <<<"$(python3 - "$sid" <<'PY'
+import json, subprocess, sys
+sid = sys.argv[1]
+def api(*a):
+    try: return json.loads(subprocess.run(["herdr", *a], capture_output=True, text=True).stdout)["result"]
+    except Exception: return {}
+ws = next((w["workspace_id"] for w in api("workspace", "list").get("workspaces", []) if w.get("label") == "orch"), "")
+agents = [a for a in api("agent", "list").get("agents", []) if a.get("workspace_id") == ws and ws]
+a = next((a for a in agents if (a.get("agent_session") or {}).get("value") == sid), None)
+if a: print(ws, a["pane_id"], a.get("agent_status") or "unknown")
+else:
+    panes = [p for p in api("pane", "list").get("panes", []) if p.get("workspace_id") == ws and ws]
+    busy = {x["pane_id"] for x in agents}
+    free = next((p["pane_id"] for p in panes if p["pane_id"] not in busy), "")
+    print(ws or "-", free or "-", "none")
+PY
+)"
+
+if [ "$pane" = "-" ]; then
+  [ $DRY = 1 ] && { echo "would open a new herdr workspace orch in $ORCH and run: $cmd"; exit 0; }
+  pane=$(herdr workspace create --cwd "$ORCH" --label orch --no-focus | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])') || exit 1
+  status=none
+fi
+[ "$pane" = "${HERDR_PANE_ID:-}" ] && { echo "orch: this is orch's own pane; type /exit, then run: orch here"; exit 1; }
+if [ "$status" = working ] && [ $FORCE = 0 ]; then echo "orch is mid-turn; wait or run: orch --force"; exit 1; fi
+
+if [ $DRY = 1 ]; then
+  [ "$status" != none ] && echo "would quit orch ($status) in pane $pane"
+  echo "would run in pane $pane: cd $ORCH && $cmd"; exit 0
+fi
+
+if [ "$status" != none ]; then
+  herdr pane send-keys "$pane" esc >/dev/null; sleep 1
+  herdr pane send-text "$pane" /exit >/dev/null; sleep 1
+  herdr pane send-keys "$pane" Enter >/dev/null
+  for i in $(seq 1 30); do
+    sleep 1
+    herdr agent list | grep -q "\"$pane\"" || break
+    # Running monitors or shells make claude ask first; option 1 is "Exit and stop tasks".
+    herdr pane read "$pane" 2>/dev/null | grep -q "Exit and stop tasks" && herdr pane send-keys "$pane" Enter >/dev/null
+  done
+  herdr agent list | grep -q "\"$pane\"" && { echo "orch did not quit in pane $pane; look at it with: herdr agent read $pane"; exit 1; }
+fi
+herdr pane run "$pane" "cd $ORCH && $cmd" >/dev/null || exit 1
+for i in $(seq 1 60); do
+  herdr agent list | grep -q "\"$pane\"" && break; sleep 1
+done
+herdr agent list | grep -q "\"$pane\"" || { echo "orch did not come up in pane $pane; look at it with: herdr pane read $pane"; exit 1; }
+sleep 5
+herdr agent prompt "$pane" "orch was restarted. Do the session start steps in CLAUDE.md (re-arm the watcher first) and log it." >/dev/null 2>&1 \
+  || echo "started, but the wake-up prompt did not land; tell orch to re-arm its watcher"
+echo "orch restarted in pane $pane ($([ $FRESH = 1 ] && echo new conversation || echo "resumed ${sid:-new}"))"
