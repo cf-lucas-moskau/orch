@@ -6,7 +6,7 @@ import type { Merged } from './review.ts';
 export type Project = { repo: string; path: string; gates: string[]; notes: string; clone?: string[]; scratch?: string[] };
 export type Kind = 'claude' | 'codex';
 export type Worker = {
-  name: string; kind?: Kind; pair?: string; base?: string; prHead?: string; parent?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
+  name: string; kind?: Kind; model?: string; pair?: string; base?: string; prHead?: string; parent?: string; repo: string; repoPath?: string; task: string; branch: string; worktree: string;
   workspace: string; pane: string; sid: string; started: string; status: 'running' | 'closed';
   // When its first prompt landed; until then it sits idle, which is no finish.
   prompted?: string;
@@ -252,11 +252,11 @@ export function workerBrief(task: string, p: Project, w: Pick<Worker, 'name' | '
     `Editing files: use the Edit and Write tools, never shell heredocs, cat > file or python/sed scripts that write files; those trip a permission prompt nobody answers and the session sits blocked.`,
     // Parallel workers on one repo collide at merge time; merging the default branch in before the last test run catches it
     // while it is cheap. A merge, never a rebase: history is not rewritten, so a normal push updates the PR (no force push).
-    ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --autostash --no-edit origin/<default>\`; your changes stay uncommitted; never rebase) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
+    ...sync ? [`Other workers: before the final test run, merge origin/<default> into your branch (\`git fetch origin\` then \`git merge --no-edit origin/<default>\`; your changes stay uncommitted; never rebase, and never \`git stash\` or \`--autostash\`: the stash is shared by every worktree of the repo, so another worker can drop yours. If git refuses because your uncommitted changes touch merged files, save them first with \`git diff --binary HEAD > "$(git rev-parse --git-dir)/wip.patch"\`, check the file isn't empty, then \`git reset -q --hard\`, merge, and \`git apply --3way "$(git rev-parse --git-dir)/wip.patch"\`) and rerun the tests. If orch tells you another worker changes the same files, merge early and keep your change out of their way; mention any such overlap in your report.`] : [],
     `Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal.`,
     // A clone shares its bytes with the main checkout until written; npm ci would replace 800 MB of it (2026-11-19).
     ...installs(w.cloned).length ? [`Cloned: ${installs(w.cloned).map(c => `\`${c}\``).join(', ')} came from the main checkout as copy-on-write clones of an install that matches your lockfile, and are ready to use. Don't run npm ci or npm install unless a package-lock.json changes, and don't delete them.`] : [],
-    `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question.`, '',
+    `When finished, end with a short report: what changed, gate results, anything you need from the user as a direct question. Never use AskUserQuestion or any dialog; put every question in the report and keep working on what you can.`, '',
   ].join('\n');
 }
 
