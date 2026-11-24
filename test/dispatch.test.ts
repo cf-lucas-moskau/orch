@@ -203,7 +203,7 @@ test('worker brief carries task, gates and the commit rule; the prompt is one li
   assert.match(b, /^Editing files: use the Edit and Write tools, never shell heredocs/m);
   assert.match(b, /removed when you are done, with their volumes \(`docker run --rm`, or `docker rm -f -v <name>`/);
   assert.ok(!workerBrief('x', parseProjects(md)[1], { name: 'pr7', branch: 'orch/pr7' }, false).includes('Other workers:'), 'no merge line for PR or stacked workers');
-  assert.match(b, /^Other workers: before the final test run, merge origin\/<default> into your branch \(`git fetch origin` then `git merge --autostash --no-edit origin\/<default>`; your changes stay uncommitted; never rebase\) and rerun the tests\. .*mention any such overlap in your report\.$/m);
+  assert.match(b, /^Other workers: before the final test run, merge origin\/<default> into your branch \(`git fetch origin` then `git merge --no-edit origin\/<default>`; your changes stay uncommitted; never rebase, and never `git stash` or `--autostash`: the stash is shared by every worktree .*`git apply --3way "\$\(git rev-parse --git-dir\)\/wip\.patch"`\) and rerun the tests\. .*mention any such overlap in your report\.$/m);
   assert.match(b, /^Disk: this Mac is often short on space; check df before writing more than 500 MB and keep installs and copies minimal\.$/m);
   assert.equal(workerPrompt('/x/briefs/flag.md'), 'Read /x/briefs/flag.md and follow it.');
   assert.equal(potetoLine({ kind: 'claude' }, '/p/SKILL.md'), 'First read /p/SKILL.md in full and work by it (poteto-mode).\n\n');

@@ -101,7 +101,7 @@ test('merge refuses a PR behind its base; once the worker merges the base in, a 
     assert.match(readFileSync(join(w.base, 'orch', 'log.md'), 'utf8'), /merge demo #7 refused: #7 is 2 commits behind main/);
 
     // What the brief tells the worker, with an uncommitted change in the tree.
-    w.sh(w.wt, 'echo wip > wip.txt && git fetch -q origin && git merge -q --autostash --no-edit origin/main');
+    w.sh(w.wt, 'echo wip > wip.txt && git fetch -q origin && git merge -q --no-edit origin/main');
     assert.equal(w.sh(w.wt, 'git rev-list --parents -n1 HEAD').split(' ').length, 3, 'a merge commit');
     assert.equal(w.sh(w.wt, 'git status --porcelain'), '?? wip.txt');
     w.sh(w.wt, 'rm wip.txt');

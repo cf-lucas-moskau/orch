@@ -153,13 +153,18 @@ function submit(target: string, text: string) {
 
 // Quits the agent in a pane and starts it again, for a first prompt that did not land. Ctrl+C clears the box, a second
 // one quits Claude; the shell prompt is back once herdr no longer sees an agent there.
-function relaunch(name: string, kind: Kind, pane: string) {
+function relaunch(name: string, kind: Kind, pane: string, model?: string) {
   herdr('agent', 'send-keys', name, 'ctrl+c'); spawnSync('sleep', ['1']);
   herdr('agent', 'send-keys', name, 'ctrl+c');
   for (let i = 0; i < 15 && herdr('agent', 'get', name).result?.agent?.agent_status; i++) spawnSync('sleep', ['1']);
-  const started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000');
+  const started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000', ...modelArgs(kind, model));
   return started.error ? started : waitReady(name);
 }
+
+// Claude workers never get AskUserQuestion: a dialog blocks the worker until someone presses a key, and lead and orch
+// may not answer it (held-b, 24.11.). Questions go in the report instead. --model picks a cheaper model (orch run --model sonnet).
+const modelArgs = (kind: Kind, model?: string) =>
+  kind === 'claude' ? ['--', '--disallowedTools', 'AskUserQuestion', ...model ? ['--model', model] : []] : [];
 
 // Ready for a prompt (readyStep). herdr's own wait, plus a short settle, is enough from 0.9.4 on.
 function waitReady(name: string): HerdrReply {
@@ -207,10 +212,10 @@ function waitReadyWatched(name: string) {
 }
 
 function run([repoArg, name, ...args]: string[]) {
-  if (!repoArg || !name) die('usage: orch run <repo> <name> [task] [--kind claude|codex|both] [--from <ref>]');
+  if (!repoArg || !name) die('usage: orch run <repo> <name> [task] [--kind claude|codex|both] [--from <ref>] [--model <claude model, e.g. sonnet>]');
   const flag = (f: string) => args.includes(f) ? args[args.indexOf(f) + 1] : undefined;
   const k = args.indexOf('--kind');
-  const rest = args.filter((a, i) => !['--kind', '--from'].includes(a) && !['--kind', '--from'].includes(args[i - 1]));
+  const rest = args.filter((a, i) => !['--kind', '--from', '--model'].includes(a) && !['--kind', '--from', '--model'].includes(args[i - 1]));
   const p = project(repoArg);
   // Without --from, start from the remote's default branch: a stale local checkout put two audit workers 395 commits behind (2026-10-27).
   // With --from nothing is fetched; the default branch as known locally only tells whether the worker is stacked.
@@ -237,7 +242,9 @@ function run([repoArg, name, ...args]: string[]) {
   // (a worker with none is just an older base); overlap never reports the two against each other.
   const parent = stacked ? workers.find(w => w.status === 'running' && w.repo === p.repo && ok(p.path, 'rev-parse', '-q', '--verify', w.branch)
     && sha(w.branch) === base && git(p.path, 'rev-list', '--count', `${dflt}..${w.branch}`).trim() !== '0')?.name : undefined;
-  const extra = { base, ...(parent ? { parent } : {}) };
+  const model = flag('--model');
+  if (model && kind !== 'claude') die('--model is for Claude workers only');
+  const extra = { base, ...(parent ? { parent } : {}), ...(model ? { model } : {}) };
   if (kind === 'both') {
     startWorker(p, names[0], 'claude', task, { pair: name, ...extra }, from, stacked);
     startWorker(p, names[1], 'codex', task, { pair: name, ...extra }, from, stacked);
@@ -283,14 +290,14 @@ function cloneInto(p: Project, wt: string): string[] {
   }
 }
 
-function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string; parent?: string }, from?: string, stacked = false) {
+function startWorker(p: Project, name: string, kind: Kind, task: string, extra: { pair?: string; base: string; prHead?: string; parent?: string; model?: string }, from?: string, stacked = false) {
   const branch = `orch/${name}`;
   const wt = herdr('worktree', 'create', '--cwd', p.path, '--branch', branch, ...(from ? ['--base', from] : []), '--label', name, '--no-focus');
   if (wt.error) die(`worktree create failed: ${wt.error.message}`);
   const pane = wt.result.root_pane.pane_id, workspace = wt.result.workspace.workspace_id, path = wt.result.worktree.path;
   const cloned = cloneInto(p, path);
 
-  let started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000');
+  let started = herdr('agent', 'start', name, '--kind', kind, '--pane', pane, '--timeout', '60000', ...modelArgs(kind, extra.model));
   const screen = spawnSync('herdr', ['agent', 'read', name, '--source', 'visible'], { encoding: 'utf8' }).stdout;
   // The worktree is a fresh folder orch just created, so its folder trust prompt is answered.
   if (started.error?.code === 'agent_not_ready') for (const key of trustKeys(screen) ?? []) herdr('agent', 'send-keys', name, key);
@@ -314,7 +321,7 @@ function startWorker(p: Project, name: string, kind: Kind, task: string, extra: 
   // One fresh start when the first prompt did not land: idea-28 and idea-25-2 sat idle for hours with it garbled.
   if ('failed' in sent && kind !== 'codex') {
     log(`run ${name}: first prompt did not land (${sent.failed}); restarting the agent in ${pane} and sending it again`);
-    const again = relaunch(name, kind, pane);
+    const again = relaunch(name, kind, pane, extra.model);
     if (!again.error) {
       saveWorkers(loadWorkers().map(w => w.name === name && w.status === 'running' ? { ...w, sid: herdr('agent', 'get', name).result?.agent?.agent_session?.value ?? w.sid } : w));
       nudge(name);
