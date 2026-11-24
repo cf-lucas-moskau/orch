@@ -244,7 +244,7 @@ esac
   for (const f of ['herdr', 'gh', 'tailscale']) chmodSync(join(bin, f), 0o755);
   const port = 20000 + Math.floor(Math.random() * 20000);
   const srv: ChildProcess = spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', join(import.meta.dirname, '../src/queue-run.ts')], {
-    env: { ...process.env, ORCH_DIR: dir, ORCH_QUEUE_PORT: String(port), PATH: `${bin}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, ORCH_DIR: dir, ORCH_QUEUE_PORT: String(port), ORCH_ART_LIVE: 'off', PATH: `${bin}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => { srv.kill(); rmSync(dir, { recursive: true, force: true }); });
   let out = '';

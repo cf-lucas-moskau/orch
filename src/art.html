@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orch art progress</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23b4540a'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --dim: #6b6a66; --line: #e2e0da; --accent: #b4540a;
+  --own: #1f7a6d; --universal: #2a62c9; --held: #8a6d00; --track: #ebe9e3; --err: #c0262d;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --dim: #9a9890; --line: #2f2e2b; --accent: #f0a050;
+    --own: #5cc8b5; --universal: #7ea6ff; --held: #e0c050; --track: #2a2926; --err: #ff6b6b; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 14px 16px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; }
+header .tab { font-size: 13px; color: var(--universal); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; background: var(--panel); }
+header .meta { color: var(--dim); font-size: 13px; margin-left: auto; }
+main { max-width: 1100px; margin: 0 auto; padding: 18px 16px 60px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 22px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.stat b { display: block; font-size: 26px; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.stat span { color: var(--dim); font-size: 13px; }
+.bodies { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.body { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.body h2 { font-size: 16px; margin: 0 0 2px; }
+.body .tot { color: var(--dim); font-size: 13px; margin-bottom: 12px; font-variant-numeric: tabular-nums; }
+.g { margin-bottom: 10px; }
+.g .lbl { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 3px; }
+.g .lbl span:last-child { color: var(--dim); font-variant-numeric: tabular-nums; }
+.track { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+.fill { height: 100%; border-radius: 4px; }
+.own .fill { background: var(--own); } .universal .fill { background: var(--universal); } .held .fill { background: var(--held); }
+details { margin-top: 10px; font-size: 13px; }
+summary { cursor: pointer; color: var(--dim); }
+details ul { margin: 6px 0 0; padding-left: 18px; columns: 2; column-gap: 16px; }
+details li { break-inside: avoid; }
+details li i { color: var(--dim); font-style: normal; }
+.warn { color: var(--err); font-size: 13px; margin: 0 0 14px; }
+.note { color: var(--dim); font-size: 13px; margin-top: 18px; }
+svg.spark { display: block; width: 100%; height: 60px; }
+@media (max-width: 520px) { details ul { columns: 1; } .stat b { font-size: 22px; } }
+</style>
+</head>
+<body>
+<header><h1>Citizen art progress</h1><a class="tab" href="/">Queue</a><span class="meta" id="meta">loading…</span></header>
+<main>
+  <div id="warn"></div>
+  <div class="summary" id="summary"></div>
+  <div class="stat" id="pace" style="margin-bottom:22px"></div>
+  <div class="bodies" id="bodies"></div>
+  <p class="note">Live counts come from the deployed atlases on api.runforit.io (refreshed every 5 minutes). Targets are every item a Citizen of that body can equip (Citizens wear only lootV1 and lootV2 items): <b>class</b> items name the body's class, <b>universal</b> items name no class, <b>held</b> are weapons, shields and necklaces drawn from the old art.</p>
+</main>
+<script>
+const NAMES = { 'behemoth-f': 'Behemoth (f)', 'behemoth-m': 'Behemoth (m)', 'sandshaper-f': 'Sand Shaper (f)', 'sandshaper-m': 'Sand Shaper (m)' };
+const GL = { own: 'Class items', universal: 'Universal items', held: 'Held items' };
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+const ago = iso => { if (!iso) return 'never'; const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+
+function sumLive(e) { return Object.values(e.live).reduce((s, v) => s + (v ?? 0), 0); }
+
+function pace(history) {
+  if (!history.length) return '<span>No history yet. The pace shows once the live counts change.</span>';
+  const now = Date.now(), last = history.at(-1);
+  const before = t => [...history].reverse().find(e => Date.parse(e.at) <= now - t) ?? history[0];
+  const d24 = sumLive(last) - sumLive(before(24 * 3600e3)), d6 = sumLive(last) - sumLive(before(6 * 3600e3));
+  // A small step chart of the live total over the kept history.
+  const pts = history.map(e => [Date.parse(e.at), sumLive(e)]);
+  pts.push([now, sumLive(last)]);
+  const x0 = pts[0][0], x1 = Math.max(now, x0 + 1), ys = pts.map(p => p[1]), y0 = Math.min(...ys), y1 = Math.max(...ys, y0 + 1);
+  const X = t => (100 * (t - x0) / (x1 - x0)).toFixed(2), Y = v => (55 - 50 * (v - y0) / (y1 - y0)).toFixed(2);
+  let d = `M${X(pts[0][0])},${Y(pts[0][1])}`;
+  for (let i = 1; i < pts.length; i++) d += ` H${X(pts[i][0])} V${Y(pts[i][1])}`;
+  return `<b>+${d24} <span style="font-size:15px">atlas items in the last 24 h</span></b><span>+${d6} in the last 6 h · tracked since ${new Date(x0).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}</span>
+    <svg class="spark" viewBox="0 0 100 60" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function render(a) {
+  document.getElementById('meta').textContent = `live atlases read ${ago(a.liveAt)}` + (a.generated ? ` · targets from ${new Date(a.generated).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}` : '');
+  const w = [];
+  if (!a.targetsOk) w.push('Targets are not written yet (evrloot-next data/citizen/targets.json), so totals show as 0. Live counts below are real.');
+  const unread = a.bodies.filter(b => !b.liveKnown).map(b => NAMES[b.body] ?? b.body);
+  if (unread.length) w.push(`Could not read the live atlas for ${unread.join(', ')}.`);
+  document.getElementById('warn').innerHTML = w.map(x => `<p class="warn">${esc(x)}</p>`).join('');
+
+  const sum = (k, f) => a.bodies.reduce((s, b) => s + b.groups.find(g => g.group === k)[f], 0);
+  const all = (f) => a.bodies.reduce((s, b) => s + b[f], 0);
+  const stats = [
+    [all('live'), all('total'), 'items live, all bodies'],
+    [sum('own', 'live'), sum('own', 'total'), 'class items live'],
+    [sum('universal', 'live'), sum('universal', 'total'), 'universal items live'],
+    [sum('held', 'live'), sum('held', 'total'), 'held items live'],
+    [a.bodies.reduce((s, b) => s + (b.warborn?.live ?? 0), 0), a.bodies.reduce((s, b) => s + (b.warborn?.total ?? 0), 0), 'Warborn-only items drawn (Citizens cannot wear them, not counted)'],
+  ];
+  document.getElementById('summary').innerHTML = stats.map(([l, t, s]) =>
+    `<div class="stat"><b>${l}${t ? ` / ${t}` : ''}</b><span>${s}${t ? ` · ${pct(l, t)} %` : ''}</span></div>`).join('');
+  document.getElementById('pace').innerHTML = pace(a.history);
+
+  document.getElementById('bodies').innerHTML = a.bodies.map(b => {
+    const groups = b.groups.map(g => `<div class="g ${g.group}"><div class="lbl"><span>${GL[g.group]}</span><span>${g.live} / ${g.total}</span></div>
+      <div class="track"><div class="fill" style="width:${pct(g.live, g.total)}%"></div></div></div>`).join('');
+    const own = b.groups.find(g => g.group === 'own'), uni = b.groups.find(g => g.group === 'universal');
+    const list = (g, n) => g.missing.length ? `<details><summary>${g.missing.length} ${n} still missing</summary><ul>${g.missing.map(m => `<li>${esc(m.name)} <i>${esc(m.slot)}</i></li>`).join('')}</ul></details>` : '';
+    return `<div class="body"><h2>${esc(NAMES[b.body] ?? b.body)}</h2><div class="tot">${b.live}${b.total ? ` of ${b.total} · ${pct(b.live, b.total)} %` : ' live'}</div>
+      ${groups}${b.warborn?.total ? `<div class="tot" style="margin:6px 0 0">${b.warborn.live} Warborn-only items drawn, not wearable (of ${b.warborn.total})</div>` : ''}${list(own, 'class items')}${list(uni, 'universal items')}</div>`;
+  }).join('');
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/art', { cache: 'no-store' });
+    if (!r.ok) throw new Error((await r.json()).error ?? r.status);
+    render(await r.json());
+  } catch (e) { document.getElementById('meta').textContent = `could not load: ${e.message}`; }
+}
+load();
+setInterval(load, 60_000);
+</script>
+</body>
+</html>

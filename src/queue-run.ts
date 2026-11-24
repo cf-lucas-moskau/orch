@@ -5,11 +5,12 @@ import { execFile, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { networkInterfaces } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
 import { extname, join } from 'node:path';
 import type { FeedEvent } from './board.ts';
 import type { Worker } from './dispatch.ts';
 import type { Idea } from './ideas.ts';
+import { artProgress, BODIES, type Targets } from './art.ts';
 import { buildQueue, checkAnswer, openedPrs, type Item, type Ledger } from './queue.ts';
 import { orchPane } from './routines.ts';
 
@@ -66,6 +67,42 @@ async function refreshPrs() {
       prStates[u] = r.code === 0 ? r.out.trim() : prStates[u] ?? '';
     }));
   } finally { prRefreshing = false; }
+}
+
+// Citizen art progress (the Art tab): the live atlases' item keys, refreshed in the background every 5 minutes, against
+// evrloot-next's targets.json. A body whose index fails keeps its last good keys; never read is undefined.
+const ART_LIVE = process.env.ORCH_ART_LIVE ?? 'https://api.runforit.io/anim';
+const ART_TARGETS = process.env.ORCH_ART_TARGETS ?? join(homedir(), 'code/evrloot-next/data/citizen/targets.json');
+const artLive: Record<string, string[] | undefined> = {};
+let artAt = '';
+async function refreshArt() {
+  await Promise.all(BODIES.map(async b => {
+    try {
+      const r = await fetch(`${ART_LIVE}/${b}-8-512/index.json?t=${Date.now()}`, { signal: AbortSignal.timeout(15_000) });
+      if (!r.ok) return;
+      const items = (await r.json() as { items?: Record<string, unknown> }).items ?? {};
+      artLive[b] = Object.keys(items);
+    } catch { /* keep the last good keys */ }
+  }));
+  artAt = new Date().toISOString();
+  // One line per change of the live totals, so the tab can show the pace.
+  const totals = Object.fromEntries(BODIES.map(b => [b, artLive[b]?.length ?? null]));
+  const hist = json<{ at: string; live: Record<string, number | null> }[]>('art-history.json', []);
+  if (JSON.stringify(hist.at(-1)?.live) !== JSON.stringify(totals)) {
+    hist.push({ at: artAt, live: totals });
+    writeFileSync(join(root, 'art-history.json'), `${JSON.stringify(hist.slice(-2000))}\n`);
+  }
+}
+function art() {
+  let targets: Targets = {}, generated = '', targetsOk = false;
+  try {
+    const t = JSON.parse(readFileSync(ART_TARGETS, 'utf8')) as Targets & { generated?: string };
+    generated = String(t.generated ?? '');
+    delete (t as { generated?: string }).generated;
+    targets = t; targetsOk = true;
+  } catch { /* not written yet */ }
+  const history = json<{ at: string; live: Record<string, number | null> }[]>('art-history.json', []);
+  return { bodies: artProgress(targets, artLive), targetsOk, generated, liveAt: artAt, history: history.slice(-500) };
 }
 
 // The files the last queue named; /media and /doc serve only these.
@@ -194,6 +231,11 @@ async function handle(local: boolean, req: IncomingMessage, res: ServerResponse)
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     return res.end(readFileSync(join(import.meta.dirname, 'queue.html')));
   }
+  if (req.method === 'GET' && url.pathname === '/art') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(readFileSync(join(import.meta.dirname, 'art.html')));
+  }
+  if (req.method === 'GET' && url.pathname === '/api/art') return reply(res, 200, art());
   if (req.method === 'GET' && url.pathname === '/api/queue') {
     const items = queue();
     for (const k of sent.keys()) if (!items.some(i => i.key === k)) sent.delete(k);
@@ -237,3 +279,8 @@ for (const h of hosts) {
 newLoginLink();
 void refreshPrs();
 setInterval(() => void refreshPrs(), 60_000);
+// ORCH_ART_LIVE=off (tests): no network reads of the live atlases.
+if (ART_LIVE !== 'off') {
+  void refreshArt();
+  setInterval(() => void refreshArt(), 5 * 60_000);
+}

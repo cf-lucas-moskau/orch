@@ -20,6 +20,7 @@ html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4
 header { display: flex; align-items: baseline; gap: 12px; padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
 header h1 { font-size: 17px; margin: 0; }
 header .meta { color: var(--dim); font-size: 13px; }
+header .tab { font-size: 13px; color: var(--merge); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; background: var(--panel); }
 header .keys { margin-left: auto; color: var(--dim); font-size: 12px; }
 kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--panel); }
 main { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; height: calc(100vh - 50px); }
@@ -62,7 +63,7 @@ main { display: grid; grid-template-columns: minmax(260px, 380px) 1fr; height: c
 </style>
 </head>
 <body>
-<header><h1>orch queue</h1><span class="meta" id="meta">loading…</span>
+<header><h1>orch queue</h1><a class="tab" href="/art">Art progress</a><span class="meta" id="meta">loading…</span>
 <span class="keys"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>a</kbd> accept · <kbd>r</kbd> reject · <kbd>e</kbd> edit · <kbd>Esc</kbd> cancel</span></header>
 <main><nav id="list"></nav><section id="detail"></section></main>
 <div id="bar"></div>
