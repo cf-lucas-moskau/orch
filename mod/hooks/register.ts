@@ -36,6 +36,10 @@ async function deckOf($: EngineInterface): Promise<Deck> {
 // ---------------------------------------------------------------- feeding
 
 let stream: { return?: () => unknown } | null = null
+// Closed deck: no state updates, so nothing repaints the chat.
+let deckOpen = true
+// Feed events that came in while the deck was closed, applied when it opens.
+let held: ReturnType<typeof parseFeed> = []
 let streamDay = ''
 
 // tail -F today's feed for the session's life; at midnight the poll ends it and starts tomorrow's.
@@ -57,6 +61,7 @@ function startFeed($: EngineInterface, day: string) {
         buf = buf.slice(cut + 1)
         const replace = first
         first = false
+        if (!deckOpen && !replace) { held = [...held, ...evs].slice(-FEED_KEEP); continue }
         await update($, feed, list => (replace ? evs : [...list, ...evs]).slice(-FEED_KEEP))
       }
     } catch (err) {
@@ -67,6 +72,7 @@ function startFeed($: EngineInterface, day: string) {
 
 let lastFiles = ''
 async function pollFiles($: EngineInterface) {
+  if (!deckOpen) return
   const root = orchRoot($)
   const json = async <T>(p: string, d: T): Promise<T> => {
     try { return JSON.parse(await $.fs.read(`${root}/${p}`)) as T } catch { return d }
@@ -107,6 +113,7 @@ const out = async ($: EngineInterface, argv: string[], timeoutMs = 2000) => {
 
 const SYSCTL = ['hw.memsize', 'vm.loadavg', 'kern.boottime', 'hw.ncpu', 'vm.swapusage', 'kern.memorystatus_vm_pressure_level', 'hw.perflevel0.logicalcpu', 'hw.perflevel1.logicalcpu']
 async function pollFast($: EngineInterface) {
+  if (!deckOpen) return
   const [df, vm, sys, batt, therm] = await Promise.all([
     out($, ['df', '-k', '/', '/System/Volumes/Data']), out($, ['vm_stat']), out($, ['sysctl', ...SYSCTL]),
     out($, ['pmset', '-g', 'batt']), out($, ['pmset', '-g', 'therm']),
@@ -118,6 +125,7 @@ async function pollFast($: EngineInterface) {
 // powermetrics needs root, so temperature only shows when one of these no-sudo tools is installed.
 const TEMP_TOOLS = [['osx-cpu-temp'], ['smctemp', '-c'], ['istats', 'cpu', 'temp', '--value-only']]
 async function pollSlow($: EngineInterface) {
+  if (!deckOpen) return
   const home = await $.env.get('HOME')
   const [dock, du, ...temps] = await Promise.all([
     $.process.run(['docker', 'system', 'df', '--format', '{{json .}}'], { timeoutMs: 20_000 }).catch(() => null),
@@ -170,7 +178,7 @@ export const register: Register = (on) => {
     $.clock.every(350, () => void (async () => {
       const [fl, now] = await Promise.all([read($, feed), $.clock.now()])
       const last = fl.at(-1)
-      if (last && now - Date.parse(last.ts) < 21_000) await update($, tick, t => t + 1)
+      if (deckOpen && last && now - Date.parse(last.ts) < 21_000) await update($, tick, t => t + 1)
     })().catch(() => undefined))
     void pollFast($)
     void pollSlow($)
@@ -182,9 +190,14 @@ export const register: Register = (on) => {
 
   on('command.run', { command: 'deck' }, async ($, e) => {
     if (e.args.trim() === 'close') {
+      deckOpen = false
       await $.ui.close({ id: PANE })
       return { text: 'orch deck closed.' }
     }
+    deckOpen = true
+    const back = held
+    held = []
+    if (back.length) await update($, feed, list => [...list, ...back].slice(-FEED_KEEP))
     const opened = await $.ui.open({ id: PANE, title: 'orch deck', columns: 72, rows: 10, focus: true })
     return { text: opened.isPlaced ? 'orch deck open. ctrl+x tab focuses it; m b w d f switch tabs, j/k select.' : `orch deck not shown: ${opened.reason}` }
   })
