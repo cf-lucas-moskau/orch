@@ -37,3 +37,4 @@ saved/
 # Python bytecode from running the kit's scripts and tests
 __pycache__/
 accepted-touches.json
+art-history.json
