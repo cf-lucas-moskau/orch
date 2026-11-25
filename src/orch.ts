@@ -22,6 +22,9 @@ import { cloneFromMain, DOCKER_RAW, duKb, ownKb, swapGb } from './disk-io.ts';
 import { failingTests } from './gate-output.ts';
 import { isMerged, mergedHeads } from './merged.ts';
 import { impl as implCmd, team as teamCmd } from './team-io.ts';
+import { account as accountCmd } from './accounts-cli.ts';
+import { statusLines } from './accounts.ts';
+import { activeName, expiries, loadAccounts, loadState as loadSeats } from './accounts-io.ts';
 import { FINDINGS_SCHEMA, mergeFindings, parseFindings, renderReview, reviewPrompt, type Finding, type Merged } from './review.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -682,6 +685,14 @@ function decision([sub, ...args]: string[]) {
   }
 }
 
+// The seats' last numbers, as the watcher read them; nothing is fetched for the brief.
+function briefSeats() {
+  const accounts = loadAccounts(root);
+  if (!accounts.length) return undefined;
+  const active = activeName(accounts);
+  return statusLines(accounts, active, loadSeats(root), expiries(accounts, active), Date.now());
+}
+
 function brief() {
   const now = Date.now();
   const days = [1, 0].map(o => new Date(now - o * 864e5).toLocaleDateString('sv-SE'));
@@ -696,6 +707,7 @@ function brief() {
     learned: dir('learned').flatMap(f => parseLearned(read(`learned/${f}`)).map(l => ({ ...l, id: `${f.replace('.md', '')}/${l.id}` }))),
     workers: loadWorkers(),
     ideas: pendingLines(loadIdeas(root)),
+    accounts: briefSeats(),
   }));
 }
 
@@ -1143,5 +1155,5 @@ async function diskReport() {
 }
 
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, 'accept-touches': acceptTouches, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision, disk: diskReport, saved };
+const cmds: Record<string, (a: string[]) => void | Promise<void>> = { run, steer, gates, 'accept-touches': acceptTouches, cleanup, workers, continue: cont, brief, review, judge, restore, prs, address, 'post-review': postReview, push, 'open-pr': openPr, merge, overlap, routine, tick, idea, team, impl, lead, decision, disk: diskReport, saved, account: a => accountCmd(root, a, log, die) };
 (cmds[cmd] ?? (() => die(`commands: ${Object.keys(cmds).join(', ')}`)))(args);

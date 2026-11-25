@@ -28,6 +28,8 @@ reviews/
 learned/
 ideas/*
 !ideas/README.md
+accounts/*
+!accounts/README.md
 .playwright-mcp/
 secrets/
 
