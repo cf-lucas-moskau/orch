@@ -233,7 +233,10 @@ def chat(c, msgs):
         out.append({'id': m['id'], 'created': m.get('createdDateTime'),
                     'from': {'name': u.get('displayName'), 'email': email.get(u.get('id')), 'userId': u.get('id'),
                              'tenantId': u.get('tenantId')},
-                    'text': text_of(m.get('body'))})
+                    'text': text_of(m.get('body')),
+                    # Files shared in the chat (a transcript, a deck): name and SharePoint/OneDrive link.
+                    **({'files': [{'name': a.get('name'), 'url': a.get('contentUrl')} for a in m['attachments'] if a.get('contentUrl')]}
+                       if m.get('attachments') else {})})
     return {'id': c['id'], 'topic': c.get('topic'), 'type': c.get('chatType'),
             'updated': chat_time(c), 'link': c.get('webUrl'), 'members': members, 'messages': out}
 
