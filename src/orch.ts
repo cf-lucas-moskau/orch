@@ -163,8 +163,10 @@ function relaunch(name: string, kind: Kind, pane: string, model?: string) {
 
 // Claude workers never get AskUserQuestion: a dialog blocks the worker until someone presses a key, and lead and orch
 // may not answer it (held-b, 24.11.). Questions go in the report instead. --model picks a cheaper model (orch run --model sonnet).
+// D-119: hooks/worker-rm-guard.sh refuses rm on a variable path at once instead of a prompt that stalls the worker.
+const workerSettings = () => JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: join(root, 'hooks', 'worker-rm-guard.sh') }] }] } });
 const modelArgs = (kind: Kind, model?: string) =>
-  kind === 'claude' ? ['--', '--disallowedTools', 'AskUserQuestion', ...model ? ['--model', model] : []] : [];
+  kind === 'claude' ? ['--', '--disallowedTools', 'AskUserQuestion', '--settings', workerSettings(), ...model ? ['--model', model] : []] : [];
 
 // Ready for a prompt (readyStep). herdr's own wait, plus a short settle, is enough from 0.9.4 on.
 function waitReady(name: string): HerdrReply {
