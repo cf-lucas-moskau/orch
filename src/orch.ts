@@ -364,8 +364,13 @@ function steer([target, ...rest]: string[]) {
 }
 
 // Runs the repo's gates in the worker's worktree and, on a pass, makes the worker's one local commit.
-function runGates(w: Worker, title?: string): { passed: boolean; report: string } {
-  const p = projectOf(w);
+// Art-only branches (D-art, Lucas 24.11., rule 4) gate on the repo's own art:gate plus typecheck instead of the full set.
+export const ART_GATES = ['npm run art:gate', 'npm run typecheck'];
+
+function runGates(w: Worker, title?: string, art = false): { passed: boolean; report: string } {
+  const proj = projectOf(w);
+  if (art && !(() => { try { return JSON.parse(readFileSync(join(w.worktree, 'package.json'), 'utf8')).scripts?.['art:gate']; } catch { return false; } })()) die(`gates --art: ${w.repo} has no art:gate script`);
+  const p = art ? { ...proj, gates: ART_GATES } : proj;
   const lines: string[] = [];
   let failed = 0;
   if (!p.gates.length) lines.push(`no gates registered for ${w.repo}; the worker's own report is all there is`);
@@ -407,9 +412,11 @@ function runGates(w: Worker, title?: string): { passed: boolean; report: string 
   return { passed: !failed, report: lines.join('\n') };
 }
 
-// gates <worker> [-m "<commit title>"]: reused workers keep their first brief, so name the round.
-function gates([name, flag, title]: string[]) {
-  const r = runGates(worker(name), flag === '-m' ? title : undefined);
+// gates <worker> [--art] [-m "<commit title>"]: reused workers keep their first brief, so name the round. --art runs
+// ART_GATES for an art-only branch; art:gate itself fails a branch that holds code.
+function gates([name, ...args]: string[]) {
+  const m = args.indexOf('-m');
+  const r = runGates(worker(name), m >= 0 ? args[m + 1] : undefined, args.includes('--art'));
   console.log(r.report);
   process.exit(r.passed ? 0 : 1);
 }
