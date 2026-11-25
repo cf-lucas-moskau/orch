@@ -32,7 +32,7 @@ const oneLine = (s: string, n = 140) => { const t = s.replace(/\s+/g, ' ').trim(
 
 export function buildBrief(o: {
   date: string; feed: FeedEvent[]; since: string; names: Record<string, { name: string }>;
-  decisions: Decision[]; plans: Plan[]; learned: Learned[]; workers: Worker[]; ideas?: string[];
+  decisions: Decision[]; plans: Plan[]; learned: Learned[]; workers: Worker[]; ideas?: string[]; accounts?: string[];
 }): string {
   const moved = new Map<string, FeedEvent>();
   for (const e of o.feed) if (e.ts >= o.since && e.event === 'Stop') moved.set(e.sid, e);
@@ -51,6 +51,7 @@ export function buildBrief(o: {
     const rest = o.ideas.filter(l => !feedback.includes(l));
     out.push(`## Ideas waiting on orch (${rest.length})`, ...rest, '');
   }
+  if (o.accounts?.length) out.push('## Claude seats', ...o.accounts, '');
   out.push(`## Workers (${running.length})`, ...running.map(w => `${w.name} on ${w.repo}: ${oneLine(w.task, 80)}`), '');
   out.push('## Plans', ...o.plans.map(p => {
     const c = (s: string) => p.tasks.filter(t => t.state === s).length;

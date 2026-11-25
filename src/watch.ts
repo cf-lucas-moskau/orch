@@ -16,6 +16,8 @@ import { replay as replayStalls, stallLine, step as stepStall, tick as tickStall
 import { parseDiskFloor } from './dispatch.ts';
 import { afterThin, CHECK_MS, NEVER, parseDfFreeGb, parseDiskThin, sizeLines, THIN_ARGS, thinDue, type DiskState } from './disk.ts';
 import { ownKb, swapGb } from './disk-io.ts';
+import { decide, errorLine, loginLines, pollDue } from './accounts.ts';
+import { activeName, expiries, loadAccounts, loadState, readUsage, saveState, swap } from './accounts-io.ts';
 import { buildLimit, building, EMPTY, idleDue, idleLine, mergedNotCleaned, noteDone, prune as pruneDone, unshipped, unshippedDue, waitingWork, type CapacityState } from './capacity.ts';
 
 const root = process.env.ORCH_DIR ?? join(import.meta.dirname, '..');
@@ -306,6 +308,43 @@ function startOrchSide() {
   setInterval(() => void checkSizes(), Number(process.env.ORCH_DISK_CHECK_MS ?? CHECK_MS));
   void checkCapacity();
   setInterval(() => void checkCapacity(), Number(process.env.ORCH_CAPACITY_CHECK_MS ?? 60_000));
+  void checkAccounts();
+  setInterval(() => void checkAccounts(), Number(process.env.ORCH_ACCOUNT_CHECK_MS ?? 60_000));
+}
+
+// Claude seats (src/accounts.ts): every minute, read the numbers that are due (active seat every 3 min, others every
+// 15), switch the live login at 95% to the seat with room, warn 5 days before a login ends. The watcher switches by
+// itself, since a switch cannot wait for orch's turn; orch only hears ACCOUNT lines. Needs two seats in
+// accounts/config.json, so a fresh install or a test watcher does nothing.
+let accountsBusy = false;
+async function checkAccounts() {
+  if (accountsBusy) return;
+  accountsBusy = true;
+  try {
+    const accounts = loadAccounts(root);
+    if (accounts.length < 2) return;
+    let s = loadState(root);
+    const fail = (text: string) => { const r = errorLine(text, s, Date.now()); s = { ...s, errorSaid: r.said }; if (r.line) say(r.line); };
+    const active = activeName(accounts);
+    if (!active) { fail('the live login is none of the seats in accounts/config.json (orch account status)'); return saveState(root, s); }
+    for (const a of accounts) {
+      if (!pollDue(a.name, active, s, Date.now())) continue;
+      const r = await readUsage(a, active);
+      if (r.usage) s = { ...s, usage: { ...s.usage, [a.name]: r.usage } };
+      else if (r.error) fail(r.error);
+    }
+    const v = decide(accounts, active, s, Date.now());
+    if (v.kind === 'switch') {
+      const err = await swap(accounts.find(a => a.name === active)!, accounts.find(a => a.name === v.to)!);
+      if (err) fail(`switch ${active} -> ${v.to} failed: ${err}`);
+      else { s = { ...s, lastSwitch: Date.now() }; say(v.line); }
+    } else if (v.kind === 'full') { s = { ...s, fullSaid: Date.now() }; say(v.line); }
+    const l = loginLines(expiries(accounts, activeName(accounts)), s, Date.now(), day());
+    s = { ...s, loginSaid: l.said };
+    for (const line of l.lines) say(line);
+    saveState(root, s);
+  } catch (e) { console.log(`ACCOUNT error: check failed: ${e instanceof Error ? e.message : e}`); }
+  finally { accountsBusy = false; }
 }
 
 // IDLE and UNSHIPPED lines (src/capacity.ts), checked every minute. capacity.json keeps when each was last said and
